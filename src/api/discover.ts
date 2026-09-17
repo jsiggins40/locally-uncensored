@@ -1381,6 +1381,69 @@ export function getImageBundles(): ModelBundle[] {
         },
       ],
     },
+    // ── Instruction image editing (FLUX.1 Kontext) ──
+    //
+    // The first bundle in LU whose point is EDITING rather than generating.
+    // The Edit tab's other lanes repaint pixels: img2img re-noises the whole
+    // frame at denoise 0.7, inpaint repaints inside a mask you painted. Kontext
+    // instead takes the source in as conditioning (ReferenceLatent) and reads
+    // the prompt as an instruction -- "give him a leather jacket", "remove the
+    // sign" -- leaving everything you did not ask about alone.
+    // buildDynamicWorkflow routes any diffusion model whose filename contains
+    // 'kontext' onto that graph as soon as a source image is staged
+    // (strategy unet_flux_kontext).
+    //
+    // Kontext is FLUX.1 architecture, so the VAE and both text encoders are the
+    // SAME FILES as the FLUX.1 [dev] bundle above -- a user who already has that
+    // bundle only downloads the model itself. That is why these URLs are copied
+    // verbatim instead of pointing at a Kontext-specific repo.
+    //
+    // NOTE ON THE WEIGHTS: this points at the official Comfy-Org fp8 repack.
+    // The uncensored / de-distilled community Kontext checkpoints are drop-in
+    // replacements -- same architecture, same encoders -- so one dropped into
+    // ComfyUI's models/diffusion_models/ picks up this lane automatically as
+    // long as 'kontext' is in the filename. The URL below could NOT be opened
+    // from the machine this was written on (no network route to
+    // huggingface.co); confirm it resolves before shipping.
+    {
+      name: 'FLUX.1 Kontext dev FP8 (Instruction Editing)',
+      description: 'Edit photos by describing the change in words - no mask, no inpainting. "Make the car red", "put her in a raincoat", "remove the person on the left". Keeps everything you did not ask about.',
+      tags: ['FLUX', 'Edit', 'Instruction', 'FP8'],
+      totalSizeGB: 17,
+      vramRequired: '10-12 GB',
+      workflow: 'flux',
+      url: 'https://huggingface.co/Comfy-Org/flux1-kontext-dev_ComfyUI',
+      files: [
+        {
+          name: 'FLUX.1 Kontext dev FP8',
+          description: 'The Kontext editing model (fp8 scaled).',
+          pulls: '', tags: ['Model', '11.9 GB'], updated: '',
+          downloadUrl: 'https://huggingface.co/Comfy-Org/flux1-kontext-dev_ComfyUI/resolve/main/split_files/diffusion_models/flux1-dev-kontext_fp8_scaled.safetensors',
+          filename: 'flux1-dev-kontext_fp8_scaled.safetensors', subfolder: 'diffusion_models', sizeGB: 11.9,
+        },
+        {
+          name: 'FLUX VAE',
+          description: 'Required autoencoder for FLUX.1 (16 channel ae). Shared with the FLUX.1 bundles.',
+          pulls: '', tags: ['VAE', '335 MB'], updated: '',
+          downloadUrl: 'https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors',
+          filename: 'ae.safetensors', subfolder: 'vae', sizeGB: 0.3,
+        },
+        {
+          name: 'T5-XXL Text Encoder (FP8)',
+          description: 'Required text encoder. Shared with the FLUX.1 bundles.',
+          pulls: '', tags: ['Text Encoder', '4.6 GB'], updated: '',
+          downloadUrl: 'https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors',
+          filename: 't5xxl_fp8_e4m3fn.safetensors', subfolder: 'text_encoders', sizeGB: 4.6,
+        },
+        {
+          name: 'CLIP-L Text Encoder',
+          description: 'Required secondary text encoder. Shared with the FLUX.1 bundles.',
+          pulls: '', tags: ['Text Encoder', '240 MB'], updated: '',
+          downloadUrl: 'https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors',
+          filename: 'clip_l.safetensors', subfolder: 'text_encoders', sizeGB: 0.2,
+        },
+      ],
+    },
     {
       name: 'FLUX 2 Klein 4B (Next Gen)',
       description: 'Latest FLUX architecture. Fastest FLUX model with stunning quality. Includes Qwen 3 text encoder.',

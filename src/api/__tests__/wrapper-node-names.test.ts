@@ -46,6 +46,24 @@ const CORE_NODES = new Set([
   'CLIPTextEncode', 'CLIPSetLastLayer', 'CLIPVisionEncode', 'ConditioningZeroOut',
   'InpaintModelConditioning', 'AudioEncoderEncode', 'ModelSamplingSD3',
   'SVD_img2vid_Conditioning', 'VideoLinearCFGGuidance',
+  // FLUX conditioning — comfy_extras/nodes_flux.py. 'FluxGuidance' has been
+  // core since the FLUX.1 launch; 'ReferenceLatent' and 'FluxKontextImageScale'
+  // arrived with core Kontext support and drive the Edit lane's reference
+  // graph.
+  //
+  // PROVENANCE CAVEAT, and it matters given why this file exists: these three
+  // were NOT read out of a real checkout the way every other entry here was —
+  // the machine this was written on cannot reach github.com or
+  // huggingface.co, so no registry could be opened. Anyone with a working
+  // ComfyUI should confirm them against comfy_extras/nodes_flux.py and replace
+  // this note with a read date.
+  //
+  // The builder is defensive about it in the meantime: FluxKontextImageScale
+  // and FluxGuidance are emitted only when allNodes reports them, so a wrong
+  // name degrades the graph instead of 400ing it, and a missing
+  // ReferenceLatent raises WorkflowUnavailableError with a readable message
+  // rather than reaching ComfyUI at all.
+  'FluxGuidance', 'ReferenceLatent', 'FluxKontextImageScale',
   // latents
   'EmptyLatentImage', 'EmptyLTXVLatentVideo', 'Wan22ImageToVideoLatent', 'TrimVideoLatent',
   'WanSoundImageToVideo', 'WanAnimateToVideo', 'WanVaceToVideo',

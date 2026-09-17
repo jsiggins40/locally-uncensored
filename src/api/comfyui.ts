@@ -270,6 +270,25 @@ export function classifyModel(name: string | null | undefined): ModelType {
   return 'unknown'
 }
 
+/**
+ * FLUX.1 Kontext — instruction-driven image editing ("make her jacket red",
+ * "remove the car"), as opposed to FLUX dev/schnell which only paint from a
+ * prompt. Architecturally it IS FLUX.1: same 16-channel `ae.safetensors`
+ * autoencoder, same T5-XXL + CLIP-L text encoders, so `classifyModel` keeps
+ * returning 'flux' for it on purpose and the VAE/CLIP resolvers need no new
+ * branch. What differs is the GRAPH: the source image is injected as
+ * conditioning through ReferenceLatent instead of being partially re-noised,
+ * which is why the builder needs to recognise it by name.
+ *
+ * Without this, a Kontext checkpoint fell through `classifyModel`'s generic
+ * `includes('flux')` match onto the plain text-to-image path and the source
+ * image was silently dropped — the user got an unrelated fresh image back.
+ */
+export function isKontextModel(name: string | null | undefined): boolean {
+  if (!name || typeof name !== 'string') return false
+  return name.toLowerCase().includes('kontext')
+}
+
 export function isImageModelType(type: ModelType): boolean {
   return type === 'flux' || type === 'flux2' || type === 'zimage' || type === 'ernie_image' || type === 'sdxl' || type === 'sd15' || type === 'unknown'
 }

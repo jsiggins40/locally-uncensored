@@ -137,7 +137,7 @@ npm run tauri build  # production desktop binary
 - **Thinking Mode** (provider-agnostic), **file upload with vision**, **memory system**, **Document Chat (RAG)** with local embeddings, **voice** (Whisper STT + neural TTS), **25+ personas**, chat import from ChatGPT/Claude/Gemini exports.
 
 ### Create — images & video
-- **Image generation** via a bundled, auto-managed ComfyUI: FLUX 2 Klein, FLUX.1, Juggernaut XL, Z-Image Turbo (uncensored), ERNIE-Image, SDXL, SD 3.5. Per-model correct defaults — no node graphs, no config. [How it works](https://locallyuncensored.com/blog/easiest-local-ai-image-generator.html).
+- **Image generation** via a bundled, auto-managed ComfyUI: FLUX 2 Klein, FLUX.1, Juggernaut XL, Z-Image Turbo (uncensored), ERNIE-Image, SDXL, SD 3.5. Plus **instruction editing** with FLUX.1 Kontext — describe the change ("make the jacket red", "remove the sign") instead of painting a mask. Per-model correct defaults — no node graphs, no config. [How it works](https://locallyuncensored.com/blog/easiest-local-ai-image-generator.html).
 - **Video generation** with Wan 2.1/2.2, HunyuanVideo 1.5, LTX 2.3, AnimateDiff, Mochi, Cosmos. **Image-to-video** with FramePack F1 on just 6 GB VRAM. **Image-to-image** with denoise control, in a tab now labelled **Edit / Image to Image**.
 - **Talking Character, Music, Extend Video and Motion Control run on your own GPU** as normal local lanes, built from core ComfyUI node families. Only Upscale, Erase Object and Character Studio are cloud only. Per-lane frame, size and step controls let you trade quality for speed.
 - LoRA picker, VAE override, CLIP-skip, and a local gallery for everything you make. No content filter, no watermark, no credits.
@@ -202,6 +202,7 @@ Deep dives: [vs LM Studio](https://locallyuncensored.com/blog/locally-uncensored
 | Juggernaut XL V9 | 6 GB | Best photoreal SDXL — friendliest entry point. |
 | Z-Image Turbo | 10–16 GB | Uncensored, 8–15 s per image. |
 | ERNIE-Image Turbo | 24 GB | Baidu DiT, 8 steps. |
+| FLUX.1 Kontext dev | 10–12 GB | Edits a photo from a written instruction — no mask. |
 
 ### Video (ComfyUI, auto-managed)
 

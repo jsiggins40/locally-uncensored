@@ -51,12 +51,20 @@ const CORE_NODES = new Set([
   // arrived with core Kontext support and drive the Edit lane's reference
   // graph.
   //
-  // PROVENANCE CAVEAT, and it matters given why this file exists: these three
-  // were NOT read out of a real checkout the way every other entry here was —
-  // the machine this was written on cannot reach github.com or
-  // huggingface.co, so no registry could be opened. Anyone with a working
-  // ComfyUI should confirm them against comfy_extras/nodes_flux.py and replace
-  // this note with a read date.
+  // PROVENANCE (2026-09-19), and it matters given why this file exists: these
+  // three still were NOT read out of a real checkout the way every other entry
+  // here was — github.com and huggingface.co are both blocked by egress
+  // policy on the machines this has been written on, so no registry could be
+  // opened. What was confirmed instead is ComfyUI's own published Kontext
+  // documentation and the wiki tutorial built on it, which describe
+  // 'ReferenceLatent' as the node that merges an encoded image into the
+  // conditioning and 'FluxKontextImageScale' as the node that snaps the source
+  // to a Kontext training resolution — exactly the two roles the builder uses
+  // them for. That is a documented-name check, not a registry read: the names
+  // are right, their input KEYS ('conditioning', 'latent', 'image') are still
+  // inferred from the reference graph's shape. Anyone with a working ComfyUI
+  // should still read comfy_extras/nodes_flux.py and replace this note with a
+  // checkout date.
   //
   // The builder is defensive about it in the meantime: FluxKontextImageScale
   // and FluxGuidance are emitted only when allNodes reports them, so a wrong

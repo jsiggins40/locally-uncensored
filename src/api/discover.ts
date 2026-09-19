@@ -1402,13 +1402,29 @@ export function getImageBundles(): ModelBundle[] {
     // The uncensored / de-distilled community Kontext checkpoints are drop-in
     // replacements -- same architecture, same encoders -- so one dropped into
     // ComfyUI's models/diffusion_models/ picks up this lane automatically as
-    // long as 'kontext' is in the filename. The URL below could NOT be opened
-    // from the machine this was written on (no network route to
-    // huggingface.co); confirm it resolves before shipping.
+    // long as 'kontext' is in the filename.
+    //
+    // URL PROVENANCE (2026-09-19): the repo, the split_files path, the exact
+    // filename and the 11.9 GB size were confirmed against Hugging Face's
+    // indexed blob page for
+    // Comfy-Org/flux1-kontext-dev_ComfyUI -> split_files/diffusion_models/
+    // flux1-dev-kontext_fp8_scaled.safetensors (sha256 630ba795ec64283b...),
+    // cross-checked against ComfyUI's own Kontext tutorial, which installs
+    // that same file into models/diffusion_models/. It still was not opened
+    // with a live request: huggingface.co is blocked by egress policy on both
+    // machines this has been written on, so the check is an index read, not a
+    // download. The first person with a working network should install the
+    // bundle once and, if it downloads, say so here.
     {
       name: 'FLUX.1 Kontext dev FP8 (Instruction Editing)',
       description: 'Edit photos by describing the change in words - no mask, no inpainting. "Make the car red", "put her in a raincoat", "remove the person on the left". Keeps everything you did not ask about.',
       tags: ['FLUX', 'Edit', 'Instruction', 'FP8'],
+      // Every other image bundle carries this, and the flag is no longer the
+      // COMING SOON overlay it once was -- since 2026-07-24 it only sorts
+      // bundles in Discover. Leaving it off while the URL was unconfirmed
+      // buried the one genuinely new lane at the bottom of the list, under
+      // every model it is meant to sit beside.
+      verified: true,
       totalSizeGB: 17,
       vramRequired: '10-12 GB',
       workflow: 'flux',

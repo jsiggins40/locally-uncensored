@@ -26,6 +26,16 @@ All notable changes to Locally Uncensored are documented here.
   inpainting guard and send you off to pick an SD 1.5 / SDXL checkpoint, which
   is the wrong advice — Kontext wants no mask at all. The message now says to
   clear it.
+- **The Edit tab no longer shows a strength slider that does nothing.** On a
+  Kontext model the source is conditioning, not a partially re-noised image, so
+  the render runs at full denoise and the slider was never read. Dragging it up
+  to make a weak edit stronger changed nothing at all. It is replaced there by
+  the line that says what does work: rewrite the instruction.
+- **The Kontext bundle sorts with the models it belongs next to.** It shipped
+  without the `verified` flag every other image bundle carries — which no
+  longer gates anything, but still sinks an unflagged bundle to the bottom of
+  Discover. The download URL has since been checked against Hugging Face's
+  listing for the Comfy-Org repack, so the flag is set.
 
 ## [2.6.7] - 2026-08-31
 

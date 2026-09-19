@@ -10,7 +10,7 @@
  * and a mask is deliberately not part of `specialReady`.
  */
 import { describe, it, expect } from 'vitest'
-import { noPromptHint, shouldShowLaneHint } from '../laneHint'
+import { noPromptHint, shouldShowLaneHint, editLaneHasStrength, KONTEXT_NO_STRENGTH_HINT } from '../laneHint'
 import type { CreateIntent } from '../../../../stores/createStore'
 
 const show = (
@@ -78,5 +78,35 @@ describe('noPromptHint', () => {
     expect(noPromptHint('eraser')).not.toContain('remove the background')
     expect(noPromptHint('upscale')).toContain('enhance the image')
     expect(noPromptHint('removebg')).toContain('remove the background')
+  })
+})
+
+/**
+ * The Edit tab's strength slider is real on every lane but one. FLUX.1 Kontext
+ * takes the source in as conditioning (ReferenceLatent) and buildDynamicWorkflow
+ * samples it at denoise 1.0 — the slider is never read, so a user turning it up
+ * to "make the edit stronger" changes nothing and has no way to know why.
+ */
+describe('editLaneHasStrength', () => {
+  it('drops the slider for a local Kontext model, whatever the repack is called', () => {
+    expect(editLaneHasStrength('local', 'flux1-dev-kontext_fp8_scaled.safetensors')).toBe(false)
+    expect(editLaneHasStrength('local', 'Flux-Kontext-Uncensored.safetensors')).toBe(false)
+    expect(editLaneHasStrength('local', 'flux1-kontext-dev-Q4_K_M.gguf')).toBe(false)
+  })
+
+  it('keeps it for every other local edit model, where denoise really drives the run', () => {
+    expect(editLaneHasStrength('local', 'flux1-dev-fp8.safetensors')).toBe(true)
+    expect(editLaneHasStrength('local', 'juggernautXL_v9.safetensors')).toBe(true)
+    expect(editLaneHasStrength('local', '')).toBe(true)
+  })
+
+  // The Kontext lane is local-only; the cloud edit models do read a strength,
+  // so a cloud model that happens to carry the word must not lose its slider.
+  it('never touches the cloud lane', () => {
+    expect(editLaneHasStrength('cloud', 'flux-kontext-pro')).toBe(true)
+  })
+
+  it('says what replaces the knob, not just that it is gone', () => {
+    expect(KONTEXT_NO_STRENGTH_HINT).toContain('say what to change')
   })
 })

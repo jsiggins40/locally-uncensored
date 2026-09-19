@@ -17,7 +17,7 @@ import {
 import { INTENT_MAP } from './intents'
 import { subscribeInstallRuns, getInstallRun } from '../../../lib/model-install-runs'
 import { useWorkflowStore, shouldShowManagerNotice } from '../../../stores/workflowStore'
-import { noPromptHint, shouldShowLaneHint } from './laneHint'
+import { noPromptHint, shouldShowLaneHint, editLaneHasStrength, KONTEXT_NO_STRENGTH_HINT } from './laneHint'
 import { ModelChip } from './ModelChip'
 import { SpecialControls } from './SpecialIntentControls'
 import { CreditsMeter } from './CreditsMeter'
@@ -305,6 +305,7 @@ function LaneControls() {
   const denoise = useCreateStore((s) => s.denoise)
   const setDenoise = useCreateStore((s) => s.setDenoise)
   const imageModelType = useCreateStore((s) => s.imageModelType)
+  const imageModel = useCreateStore((s) => s.imageModel)
   const width = useCreateStore((s) => s.width)
   const height = useCreateStore((s) => s.height)
   const setSize = useCreateStore((s) => s.setSize)
@@ -367,10 +368,20 @@ function LaneControls() {
           )}
         </div>
 
+        {/* The strength slider is the Edit lane's control everywhere except on
+            FLUX.1 Kontext, which samples at denoise 1.0 and never reads it.
+            A knob that moves and changes nothing reads as "turn it up", so it
+            is swapped for the line that says what to do instead. */}
         {meta.id === 'edit' && (
-          <div className="w-44">
-            <Slider label="Edit strength" min={0.05} max={1} step={0.05} value={denoise} onChange={setDenoise} format={(v) => v.toFixed(2)} />
-          </div>
+          editLaneHasStrength(backend, imageModel) ? (
+            <div className="w-44">
+              <Slider label="Edit strength" min={0.05} max={1} step={0.05} value={denoise} onChange={setDenoise} format={(v) => v.toFixed(2)} />
+            </div>
+          ) : (
+            <p className="w-44 text-[0.62rem] leading-snug text-gray-500 dark:text-gray-400">
+              {KONTEXT_NO_STRENGTH_HINT}
+            </p>
+          )
         )}
       </div>
     )

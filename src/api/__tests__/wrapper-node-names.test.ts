@@ -46,6 +46,32 @@ const CORE_NODES = new Set([
   'CLIPTextEncode', 'CLIPSetLastLayer', 'CLIPVisionEncode', 'ConditioningZeroOut',
   'InpaintModelConditioning', 'AudioEncoderEncode', 'ModelSamplingSD3',
   'SVD_img2vid_Conditioning', 'VideoLinearCFGGuidance',
+  // FLUX conditioning — comfy_extras/nodes_flux.py. 'FluxGuidance' has been
+  // core since the FLUX.1 launch; 'ReferenceLatent' and 'FluxKontextImageScale'
+  // arrived with core Kontext support and drive the Edit lane's reference
+  // graph.
+  //
+  // PROVENANCE (2026-09-19), and it matters given why this file exists: these
+  // three still were NOT read out of a real checkout the way every other entry
+  // here was — github.com and huggingface.co are both blocked by egress
+  // policy on the machines this has been written on, so no registry could be
+  // opened. What was confirmed instead is ComfyUI's own published Kontext
+  // documentation and the wiki tutorial built on it, which describe
+  // 'ReferenceLatent' as the node that merges an encoded image into the
+  // conditioning and 'FluxKontextImageScale' as the node that snaps the source
+  // to a Kontext training resolution — exactly the two roles the builder uses
+  // them for. That is a documented-name check, not a registry read: the names
+  // are right, their input KEYS ('conditioning', 'latent', 'image') are still
+  // inferred from the reference graph's shape. Anyone with a working ComfyUI
+  // should still read comfy_extras/nodes_flux.py and replace this note with a
+  // checkout date.
+  //
+  // The builder is defensive about it in the meantime: FluxKontextImageScale
+  // and FluxGuidance are emitted only when allNodes reports them, so a wrong
+  // name degrades the graph instead of 400ing it, and a missing
+  // ReferenceLatent raises WorkflowUnavailableError with a readable message
+  // rather than reaching ComfyUI at all.
+  'FluxGuidance', 'ReferenceLatent', 'FluxKontextImageScale',
   // latents
   'EmptyLatentImage', 'EmptyLTXVLatentVideo', 'Wan22ImageToVideoLatent', 'TrimVideoLatent',
   'WanSoundImageToVideo', 'WanAnimateToVideo', 'WanVaceToVideo',

@@ -1,4 +1,4 @@
-import { classifyModel, findMatchingVAE, findMatchingCLIP, findFluxCLIPPair } from './comfyui'
+import { classifyModel, findMatchingVAE, findMatchingCLIP, findFluxCLIPPair, isKontextModel } from './comfyui'
 import type { ModelType, GenerateParams, VideoParams } from './comfyui'
 import { log } from '../lib/logger'
 import { resolveRunSeed } from '../lib/run-seed'
@@ -43,6 +43,7 @@ export function promptFilenamePrefix(prompt: string | undefined, isVideo: boolea
 
 export type WorkflowStrategy =
   | 'unet_flux'       // FLUX 1: UNETLoader + CLIPLoader + VAELoader + EmptySD3LatentImage
+  | 'unet_flux_kontext' // FLUX.1 Kontext: FLUX 1 loaders + FluxKontextImageScale + VAEEncode + ReferenceLatent (instruction image editing)
   | 'unet_flux2'      // FLUX 2: UNETLoader + CLIPLoader + VAELoader + EmptyFlux2LatentImage
   | 'unet_zimage'     // Z-Image: UNETLoader + CLIPLoader(qwen_image) + VAELoader + EmptySD3LatentImage
   | 'unet_ernie_image' // ERNIE-Image: UNETLoader + CLIPLoader(flux2) + VAELoader + EmptyFlux2LatentImage + ConditioningZeroOut
@@ -79,6 +80,14 @@ export function determineStrategy(
   isVideo: boolean,
   nodes: CategorizedNodes,
   models: AvailableModels,
+  /** Active model filename. Only consulted to separate FLUX.1 Kontext from
+   *  plain FLUX — both classify as 'flux' because they share an architecture,
+   *  and only the filename says which graph to build. */
+  modelName?: string,
+  /** True when the caller staged a source image. Kontext needs one: without
+   *  it there is nothing to edit and the model is used as a plain
+   *  text-to-image FLUX, which it can also do. */
+  hasSourceImage?: boolean,
 ): StrategyResult {
   const hasUNET = nodes.loaders.includes('UNETLoader')
   const hasCheckpoint = nodes.loaders.includes('CheckpointLoaderSimple')
@@ -108,6 +117,21 @@ export function determineStrategy(
       return { strategy: 'unet_flux2', reason: 'FLUX 2 model → UNETLoader + EmptyFlux2LatentImage' }
     }
     return { strategy: 'unavailable', reason: 'FLUX 2 requires UNETLoader + CLIPLoader + VAELoader nodes' }
+  }
+
+  // FLUX.1 Kontext → the FLUX 1 loaders, but the source image rides in as
+  // conditioning (ReferenceLatent) rather than as a partially-noised latent.
+  // Checked BEFORE the generic FLUX branch, which would otherwise claim it and
+  // throw the source image away. No source image → fall through and use it as
+  // an ordinary text-to-image FLUX, which Kontext is also capable of.
+  if (modelType === 'flux' && !isVideo && isKontextModel(modelName) && hasSourceImage) {
+    if (!hasUNET || !hasCLIPLoader || !hasVAELoader) {
+      return { strategy: 'unavailable', reason: 'FLUX.1 Kontext requires UNETLoader + CLIPLoader + VAELoader nodes' }
+    }
+    // The ReferenceLatent node itself is verified in the builder, which holds
+    // the live node table — it is a conditioning node and so belongs to none of
+    // CategorizedNodes' buckets.
+    return { strategy: 'unet_flux_kontext', reason: 'FLUX.1 Kontext + source image → ReferenceLatent edit pipeline' }
   }
 
   // FLUX 1 → UNET + SD3LatentImage
@@ -400,11 +424,24 @@ export async function buildDynamicWorkflow(
     return buildRemoveBgWorkflow(gp, rmbgMeta)
   }
 
-  const { strategy, reason, installHint } = determineStrategy(type, isVideo, nodes, models)
+  const { strategy, reason, installHint } = determineStrategy(type, isVideo, nodes, models, params.model, !!gp.inputImage)
   log.info(`[dynamic-workflow] Strategy: ${strategy} (${reason})`)
 
   if (strategy === 'unavailable') {
     throw new WorkflowUnavailableError(reason, strategy, installHint)
+  }
+
+  // A mask on the Kontext lane is not a missing feature, it is a leftover: the
+  // whole point of instruction editing is that you say what to change instead
+  // of painting where. Sending the user off to "pick a checkpoint model" (the
+  // generic message below) would be actively wrong advice — clearing the mask
+  // is all they need. Still an explicit refusal rather than a silent drop, for
+  // the same reason the guard below exists.
+  if (!isVideo && gp.inputImage && gp.maskImage && strategy === 'unet_flux_kontext') {
+    throw new WorkflowUnavailableError(
+      'Kontext edits from your description, so it needs no mask — just say what to change ("remove the sign", "make the jacket red"). Clear the mask to continue, or pick an SD 1.5 / SDXL checkpoint to paint the area by hand instead.',
+      strategy,
+    )
   }
 
   // Local Edit (mask inpaint) runs on the SDXL/SD1.5 checkpoint pipeline only.
@@ -459,7 +496,7 @@ export async function buildDynamicWorkflow(
     vaeOutputSlot = 2
     samplerModelId = modelNodeId
 
-  } else if (strategy === 'unet_flux' || strategy === 'unet_flux2' || strategy === 'unet_zimage' || strategy === 'unet_ernie_image' || strategy === 'unet_video' || strategy === 'unet_ltx'
+  } else if (strategy === 'unet_flux' || strategy === 'unet_flux_kontext' || strategy === 'unet_flux2' || strategy === 'unet_zimage' || strategy === 'unet_ernie_image' || strategy === 'unet_video' || strategy === 'unet_ltx'
     || strategy === 'unet_mochi' || strategy === 'unet_cosmos') {
     // Separate loaders
     const unetId = String(n++)
@@ -492,7 +529,7 @@ export async function buildDynamicWorkflow(
     // stays as the fallback for pre-FLUX-era instances (whose CLIPLoader enum
     // still contains 'flux'). Same pattern as the HunyuanVideo DualCLIPLoader
     // below.
-    const useDualFluxClip = type === 'flux' && nodes.loaders.includes('DualCLIPLoader')
+    const useDualFluxClip = type === 'flux' && nodes.loaders.includes('DualCLIPLoader')  // covers Kontext too: same encoder pair
 
     let clip = ''
     let fluxPair: { t5: string; clipL: string } | null = null
@@ -783,9 +820,91 @@ export async function buildDynamicWorkflow(
   let latentRef: [string, number] = [latentId, 0]
   let positiveRef: [string, number] = [posId, 0]
   let negativeRef: [string, number] = [negId, 0]
+  // Set when the edit strength moved onto a FluxGuidance node. The sampler's
+  // own CFG must then sit at 1.0 or the guidance is applied twice.
+  let samplerCfgOverride: number | null = null
+
+  // FLUX.1 Kontext override: instruction editing.
+  //
+  // Unlike I2I, the source is NOT partially re-noised. The image is encoded
+  // once and that latent is used twice: as the sampler's starting latent (so
+  // the output keeps the source's shape) and — the part that makes this an
+  // editor — as a REFERENCE appended to the positive conditioning via
+  // ReferenceLatent. The model then reads "what is already there" from the
+  // conditioning and applies the prompt as an instruction ("make the jacket
+  // red") instead of repainting everything at denoise 0.7. denoise stays 1.0.
+  //
+  // FluxKontextImageScale snaps the source to one of the resolutions Kontext
+  // was trained on; skipping it is the usual cause of soft or warped edits. It
+  // is optional only in the sense that an older ComfyUI may not ship it, in
+  // which case the raw image is encoded directly.
+  if (strategy === 'unet_flux_kontext') {
+    if (!allNodes['ReferenceLatent']) {
+      throw new WorkflowUnavailableError(
+        'FLUX.1 Kontext editing needs the ReferenceLatent node, which your ComfyUI does not have. Update ComfyUI, then try again.',
+        strategy,
+      )
+    }
+
+    const loadImageId = String(n++)
+    workflow[loadImageId] = {
+      class_type: 'LoadImage',
+      inputs: { image: gp.inputImage },
+    }
+
+    let pixelsRef: [string, number] = [loadImageId, 0]
+    if (allNodes['FluxKontextImageScale']) {
+      const scaleId = String(n++)
+      workflow[scaleId] = {
+        class_type: 'FluxKontextImageScale',
+        inputs: { image: [loadImageId, 0] },
+      }
+      pixelsRef = [scaleId, 0]
+    }
+
+    const vaeEncodeId = String(n++)
+    workflow[vaeEncodeId] = {
+      class_type: 'VAEEncode',
+      inputs: { pixels: pixelsRef, vae: [vaeSourceId, vaeOutputSlot] },
+    }
+
+    const refLatentId = String(n++)
+    workflow[refLatentId] = {
+      class_type: 'ReferenceLatent',
+      inputs: { conditioning: [posId, 0], latent: [vaeEncodeId, 0] },
+    }
+    positiveRef = [refLatentId, 0]
+
+    // Kontext is a guidance-distilled FLUX: it reads the edit strength from
+    // FluxGuidance, not from the sampler's CFG (which stays at 1.0 for this
+    // family). 2.5 is the value the reference workflow ships.
+    if (allNodes['FluxGuidance']) {
+      const guidanceId = String(n++)
+      workflow[guidanceId] = {
+        class_type: 'FluxGuidance',
+        inputs: { conditioning: positiveRef, guidance: params.cfgScale > 1 ? params.cfgScale : 2.5 },
+      }
+      positiveRef = [guidanceId, 0]
+      samplerCfgOverride = 1.0
+    }
+
+    // Kontext is distilled and ignores a real negative prompt, so the negative
+    // encoder is replaced IN PLACE by a zeroed conditioning — the same move the
+    // ERNIE-Image path makes above. Overwriting rather than adding a node keeps
+    // the orphaned CLIPTextEncode out of the submitted graph.
+    if (allNodes['ConditioningZeroOut']) {
+      workflow[negId] = {
+        class_type: 'ConditioningZeroOut',
+        inputs: { conditioning: [posId, 0] },
+      }
+      negativeRef = [negId, 0]
+    }
+
+    latentRef = [vaeEncodeId, 0]
+    delete workflow[latentId]
 
   // I2I override: replace empty latent with LoadImage → VAEEncode
-  if (isI2I) {
+  } else if (isI2I) {
     const loadImageId = String(n++)
     const vaeEncodeId = String(n++)
     workflow[loadImageId] = {
@@ -927,7 +1046,7 @@ export async function buildDynamicWorkflow(
       latent_image: latentRef,
       seed,
       steps: params.steps,
-      cfg: params.cfgScale,
+      cfg: samplerCfgOverride ?? params.cfgScale,
       sampler_name: params.sampler,
       scheduler: params.scheduler,
       denoise: isInpaint ? (params.denoise ?? 0.85) : isI2I ? (params.denoise ?? 0.7) : 1.0,

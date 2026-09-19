@@ -4,6 +4,39 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Edit a photo by describing the change, with no mask.** The Edit tab could
+  only ever repaint pixels: image-to-image re-noises the whole frame, and
+  inpainting repaints inside an area you painted by hand. FLUX.1 Kontext reads
+  the prompt as an instruction instead — "give him a leather jacket", "remove
+  the sign" — and leaves everything you did not ask about alone. It arrives as
+  its own bundle under the image models; because Kontext is FLUX.1 underneath,
+  the autoencoder and both text encoders are the same files the FLUX.1 bundle
+  already downloads, so anyone who has that one only fetches the model.
+
+### Fixed
+
+- **A FLUX.1 Kontext model no longer throws your source image away.** Kontext
+  carries "flux" in its filename, so it was classified as ordinary FLUX and put
+  on the text-to-image path, where there is nowhere for a source image to go.
+  It was dropped without a word and an unrelated fresh picture came back. A
+  Kontext model with a staged source now builds the editing graph it needs.
+- **A leftover mask on a Kontext edit explains itself.** It used to hit the
+  inpainting guard and send you off to pick an SD 1.5 / SDXL checkpoint, which
+  is the wrong advice — Kontext wants no mask at all. The message now says to
+  clear it.
+- **The Edit tab no longer shows a strength slider that does nothing.** On a
+  Kontext model the source is conditioning, not a partially re-noised image, so
+  the render runs at full denoise and the slider was never read. Dragging it up
+  to make a weak edit stronger changed nothing at all. It is replaced there by
+  the line that says what does work: rewrite the instruction.
+- **The Kontext bundle sorts with the models it belongs next to.** It shipped
+  without the `verified` flag every other image bundle carries — which no
+  longer gates anything, but still sinks an unflagged bundle to the bottom of
+  Discover. The download URL has since been checked against Hugging Face's
+  listing for the Comfy-Org repack, so the flag is set.
+
 ## [2.6.7] - 2026-08-31
 
 The repair release. Every fix went back to a fresh tester who did not know what

@@ -7,6 +7,7 @@
 // caption was rendered on `!needsPrompt` alone, so it never reacted to anything
 // the user did.
 import type { CreateIntent } from '../../../stores/createStore'
+import { isKontextModel } from '../../../api/comfyui'
 
 /** Captions that name the inputs a lane is waiting for. These go stale the
  *  moment the chips are filled, so they hide once the lane reports ready. */
@@ -55,4 +56,28 @@ export function shouldShowLaneHint(opts: {
   if (opts.needPrompt) return false
   if (opts.isGenerating) return false
   return !(INPUT_HINT_INTENTS.has(opts.intent) && opts.specialReady)
+}
+
+/** The caption that takes the Edit-strength slider's place on a Kontext model.
+ *  It has to say what replaces the knob, not just that the knob is gone. */
+export const KONTEXT_NO_STRENGTH_HINT =
+  'Kontext edits from your description — say what to change, there is no strength to set.'
+
+/**
+ * Does the Edit lane's strength slider actually drive anything right now?
+ *
+ * Everywhere else in the Edit tab it does: image-to-image re-noises the frame
+ * to `denoise` and inpainting repaints the mask at it. FLUX.1 Kontext is the
+ * one model where it does not — the source rides in as conditioning through
+ * ReferenceLatent and buildDynamicWorkflow samples at denoise 1.0, never
+ * reading the slider at all. Leaving the knob on screen there is a control
+ * that moves and changes nothing, which reads as "the edit is too weak, turn
+ * it up" when the real answer is to rewrite the instruction.
+ *
+ * Cloud keeps the slider unconditionally: the Kontext lane is local-only, and
+ * the cloud edit models are the ones that do read a strength.
+ */
+export function editLaneHasStrength(backend: string, imageModel: string): boolean {
+  if (backend === 'cloud') return true
+  return !isKontextModel(imageModel)
 }

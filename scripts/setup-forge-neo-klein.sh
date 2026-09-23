@@ -28,6 +28,24 @@ say "started $(date -u +%FT%TZ)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || die "no GPU visible"
 sudo -n true 2>/dev/null || die "sudo wants a password; run 'sudo true' once first, then re-run this"
 
+# Tens of GB of weights outlast a phone's SSH session, so get out of the
+# foreground before downloading anything. tmux has to exist before it can
+# hold us, hence the install above the re-exec.
+if [ -z "${TMUX:-}" ] && [ "${NO_TMUX:-}" != "1" ]; then
+  command -v tmux >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq tmux; }
+  if command -v tmux >/dev/null; then
+    self=$(readlink -f "$0")
+    say "re-running inside tmux session 'setup' (attach: tmux attach -t setup)"
+    tmux kill-session -t setup 2>/dev/null
+    tmux new-session -d -s setup "bash '$self'"
+    printf '\nDetached. It keeps running if your connection drops.\n'
+    printf '  watch:  tmux attach -t setup      (detach again: Ctrl-B then D)\n'
+    printf '  or:     tail -f %s\n\n' "$LOG"
+    exit 0
+  fi
+  echo "(tmux unavailable, continuing in the foreground)"
+fi
+
 # ---------------------------------------------------------------- packages
 say "system packages"
 sudo apt-get update -qq || die "apt update"

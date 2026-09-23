@@ -85,18 +85,20 @@ from huggingface_hub import list_repo_files, hf_hub_download
 
 stage = sys.argv[1]
 
-def pick(repo, subdir, prefer=(), avoid=()):
-    """Newest-looking .safetensors under subdir, ranked by prefer/avoid hints."""
+def pick(repo, subdir, must=(), prefer=(), avoid=()):
+    """Best .safetensors in repo under subdir, ranked by prefer/avoid hints."""
     try:
         files = list_repo_files(repo)
     except Exception as e:
-        print(f"  ! cannot list {repo}: {e}")
+        print(f"  - {repo}: cannot list ({type(e).__name__}: {e})")
         return None
     cands = [f for f in files
-             if f.endswith(".safetensors") and (not subdir or subdir in f)]
+             if f.endswith(".safetensors")
+             and (not subdir or subdir in f)
+             and all(m in f.lower() for m in must)]
     if not cands:
-        print(f"  ! nothing matching in {repo} ({subdir or 'any'})")
-        print(f"    saw: {files[:20]}")
+        print(f"  - {repo}: nothing matching {subdir or 'any'} {must or ''}")
+        print(f"      holds: {files[:8]}")
         return None
     def score(f):
         low = f.lower()
@@ -109,42 +111,76 @@ def pick(repo, subdir, prefer=(), avoid=()):
                 s += 50
         return (s, len(f))
     cands.sort(key=score)
-    print(f"  {repo}: {len(cands)} candidate(s), taking {cands[0]}")
-    for c in cands[1:6]:
-        print(f"      (also available: {c})")
+    print(f"  + {repo}: taking {cands[0]}")
+    for c in cands[1:5]:
+        print(f"      (also there: {c})")
     return cands[0]
 
-jobs = [
-    # The diffusion weights themselves are not the censored part; take the
-    # plain base checkpoint and skip the community quants that Forge Neo
-    # refuses to load (upstream issue #1226).
-    ("diffusion", "Comfy-Org/flux2-klein-9B", "diffusion_models",
-     ("base", "fp8"), ("nunchaku", "lightning", "lighting", "int8", "fp4")),
+# Several sources per role, tried in order. Comfy-Org/flux2-klein-9B is named
+# for the model but ships only its VAE and text encoders - no transformer - so
+# the checkpoint has to come from somewhere else, and one dead repo should not
+# take the whole install down with it.
+QUANTS = ("nunchaku", "lightning", "lighting", "int8", "fp4", "gguf")
 
-    ("vae", "Comfy-Org/vae-text-encorder-for-flux-klein-9b", "vae",
-     ("flux2",), ()),
+JOBS = [
+    ("diffusion", [
+        # Uncensored full-precision base checkpoint, ungated. First choice on
+        # an 80GB card: no license gate to clear from a headless box.
+        ("darknight9121/FLUX.2-klein-base-9B-bucket-uncensored", ""),
+        # Community fp8 mixed, also ungated.
+        ("silveroxides/FLUX.2-dev-fp8_scaled", ""),
+        # Official, but gated - needs the licence accepted and HF_TOKEN set.
+        ("black-forest-labs/FLUX.2-klein-9b-fp8", ""),
+        ("black-forest-labs/FLUX.2-klein-9B", ""),
+    ], ("klein", "9b"), ("uncensored", "base", "fp8"), QUANTS, True),
 
-    # This is the uncensored piece. Klein's refusals live in the Qwen3 text
-    # encoder, not in the transformer, so swapping this one file is what
-    # actually lifts them.
-    ("text_encoder", "ponpoke/flux2-klein-9b-uncensored-text-encoder", "",
-     ("fp8mixed", "fp8", "safetensors"), ("fp4", "gguf")),
+    ("vae", [
+        ("Comfy-Org/flux2-klein-9B", "vae"),
+        ("Comfy-Org/vae-text-encorder-for-flux-klein-9b", "vae"),
+    ], (), ("flux2",), (), True),
+
+    # The uncensored piece. Klein's refusals live in the Qwen3 text encoder,
+    # not in the transformer, so this one file is what actually lifts them.
+    # Falling back to the stock encoder leaves a working install that still
+    # refuses - hence the warning rather than a silent substitution.
+    ("text_encoder", [
+        ("ponpoke/flux2-klein-9b-uncensored-text-encoder", ""),
+        ("Comfy-Org/flux2-klein-9B", "text_encoders"),
+    ], (), ("fp8mixed", "fp8"), ("fp4", "gguf"), False),
 ]
 
-resolved = {}
-for kind, repo, subdir, prefer, avoid in jobs:
+resolved, warnings = {}, []
+for kind, sources, must, prefer, avoid, required in JOBS:
     print(f"\n{kind}:")
-    name = pick(repo, subdir, prefer, avoid)
-    if not name:
-        sys.exit(f"could not resolve {kind} from {repo}")
-    path = hf_hub_download(repo_id=repo, filename=name, local_dir=stage)
-    resolved[kind] = path
-    print(f"  -> {path} ({os.path.getsize(path)/2**30:.1f} GiB)")
+    for idx, (repo, subdir) in enumerate(sources):
+        name = pick(repo, subdir, must, prefer, avoid)
+        if not name:
+            continue
+        try:
+            path = hf_hub_download(repo_id=repo, filename=name, local_dir=stage)
+        except Exception as e:
+            print(f"  - {repo}: download failed ({type(e).__name__}: {e})")
+            continue
+        resolved[kind] = path
+        print(f"  -> {path} ({os.path.getsize(path)/2**30:.1f} GiB)")
+        if kind == "text_encoder" and "uncensored" not in repo.lower():
+            warnings.append(
+                "text encoder is the STOCK one - the uncensored source failed, "
+                "so prompts will still be refused")
+        break
+    else:
+        if required:
+            sys.exit(f"could not resolve {kind} from any of "
+                     f"{[r for r, _ in sources]}")
+        warnings.append(f"{kind} unresolved, skipped")
+
+for w in warnings:
+    print(f"\n!! {w}")
 
 with open(os.path.join(stage, "resolved.env"), "w") as fh:
     for k, v in resolved.items():
         fh.write(f"{k.upper()}={v}\n")
-print("\nall three resolved")
+print(f"\nresolved: {', '.join(sorted(resolved))}")
 PY
 
 # shellcheck disable=SC1090
@@ -155,9 +191,13 @@ PY
 # ls above is in the log if any of these turn out to be wrong.
 say "placing files"
 mkdir -p models/Stable-diffusion models/VAE models/text_encoder
-cp -n "$DIFFUSION"    models/Stable-diffusion/ && echo "  checkpoint  -> models/Stable-diffusion/"
-cp -n "$VAE"          models/VAE/              && echo "  vae         -> models/VAE/"
-cp -n "$TEXT_ENCODER" models/text_encoder/     && echo "  uncensored TE -> models/text_encoder/"
+place() {  # place <src-var-value> <dest> <label>
+  [ -n "${1:-}" ] || { echo "  $3: nothing resolved, skipped"; return; }
+  cp -n "$1" "$2"/ && echo "  $3 -> $2/$(basename "$1")"
+}
+place "${DIFFUSION:-}"    models/Stable-diffusion "checkpoint"
+place "${VAE:-}"          models/VAE             "vae"
+place "${TEXT_ENCODER:-}" models/text_encoder    "text encoder"
 
 say "on disk"
 find models -name '*.safetensors' -printf '%p  %sB\n' 2>/dev/null || find models -name '*.safetensors'

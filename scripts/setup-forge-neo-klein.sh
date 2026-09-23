@@ -161,8 +161,15 @@ for kind, sources, must, prefer, avoid, required in JOBS:
         except Exception as e:
             print(f"  - {repo}: download failed ({type(e).__name__}: {e})")
             continue
-        resolved[kind] = path
+        # Some repos serve the weights as a bare model.safetensors, which tells
+        # you nothing once it is sitting in a dropdown next to the stock one.
+        leaf = name.rsplit("/", 1)[-1]
+        if leaf in ("model.safetensors", "diffusion_pytorch_model.safetensors"):
+            leaf = repo.rsplit("/", 1)[-1].lower().replace(".", "-") + ".safetensors"
+        resolved[kind] = (path, leaf)
         print(f"  -> {path} ({os.path.getsize(path)/2**30:.1f} GiB)")
+        if leaf != name.rsplit("/", 1)[-1]:
+            print(f"     will be placed as {leaf}")
         if kind == "text_encoder" and "uncensored" not in repo.lower():
             warnings.append(
                 "text encoder is the STOCK one - the uncensored source failed, "
@@ -178,8 +185,9 @@ for w in warnings:
     print(f"\n!! {w}")
 
 with open(os.path.join(stage, "resolved.env"), "w") as fh:
-    for k, v in resolved.items():
-        fh.write(f"{k.upper()}={v}\n")
+    for k, (path, leaf) in resolved.items():
+        fh.write(f"{k.upper()}={path}\n")
+        fh.write(f"{k.upper()}_AS={leaf}\n")
 print(f"\nresolved: {', '.join(sorted(resolved))}")
 PY
 
@@ -191,13 +199,13 @@ PY
 # ls above is in the log if any of these turn out to be wrong.
 say "placing files"
 mkdir -p models/Stable-diffusion models/VAE models/text_encoder
-place() {  # place <src-var-value> <dest> <label>
-  [ -n "${1:-}" ] || { echo "  $3: nothing resolved, skipped"; return; }
-  cp -n "$1" "$2"/ && echo "  $3 -> $2/$(basename "$1")"
+place() {  # place <src> <dest-dir> <dest-name> <label>
+  [ -n "${1:-}" ] || { echo "  $4: nothing resolved, skipped"; return; }
+  cp -n "$1" "$2/$3" && echo "  $4 -> $2/$3"
 }
-place "${DIFFUSION:-}"    models/Stable-diffusion "checkpoint"
-place "${VAE:-}"          models/VAE             "vae"
-place "${TEXT_ENCODER:-}" models/text_encoder    "text encoder"
+place "${DIFFUSION:-}"    models/Stable-diffusion "${DIFFUSION_AS:-}"    "checkpoint"
+place "${VAE:-}"          models/VAE              "${VAE_AS:-}"          "vae"
+place "${TEXT_ENCODER:-}" models/text_encoder     "${TEXT_ENCODER_AS:-}" "text encoder"
 
 say "on disk"
 find models -name '*.safetensors' -printf '%p  %sB\n' 2>/dev/null || find models -name '*.safetensors'

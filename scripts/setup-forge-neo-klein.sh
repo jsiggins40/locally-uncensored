@@ -144,6 +144,10 @@ JOBS = [
     # Falling back to the stock encoder leaves a working install that still
     # refuses - hence the warning rather than a silent substitution.
     ("text_encoder", [
+        # Own mirror first: the upstream repo is gated behind a manual
+        # approval that can sit pending indefinitely, and a copy under your
+        # own account needs no one's permission but your token.
+        ("jsiggins40/flux2-klein-9b-uncensored-text-encoder-bucket", ""),
         ("ponpoke/flux2-klein-9b-uncensored-text-encoder", ""),
         ("Comfy-Org/flux2-klein-9B", "text_encoders"),
     ], (), ("fp8mixed", "fp8"), ("fp4", "gguf"), False),

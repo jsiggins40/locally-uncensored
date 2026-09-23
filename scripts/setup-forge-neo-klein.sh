@@ -79,7 +79,7 @@ ls models/ 2>/dev/null || echo "(models/ not present yet)"
 say "resolving model files"
 mkdir -p "$STAGE"
 
-python3 - "$STAGE" <<'PY' || die "model download"
+python3 -u - "$STAGE" <<'PY' || die "model download"
 import sys, os
 from huggingface_hub import list_repo_files, hf_hub_download
 

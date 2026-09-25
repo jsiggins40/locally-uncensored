@@ -22,14 +22,20 @@ set -uo pipefail
 REPO="prithivMLmods/Qwen2.5-VL-7B-Abliterated-Caption-it"
 OUT_NAME="qwen_2.5_vl_7b_abliterated_caption.safetensors"
 STAGE="$HOME/qwen-abl-stage"
-NEED_GB=45
+NEED_GB=20
 LOG="$HOME/qwen-abl.log"
 exec > >(tee -a "$LOG") 2>&1
 
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\nFAILED: %s\n(see %s)\n' "$*" "$LOG"; exit 1; }
 
-if [ -d "$HOME/ForgeNeo" ]; then
+# Which install to target. Two can exist side by side - the image ships
+# ~/ForgeNeo, and an earlier version of the setup script cloned
+# ~/sd-webui-forge-neo - and models dropped into the one that is not running
+# are invisible to the one that is. FORGE_DIR=... overrides the guess.
+if [ -n "${FORGE_DIR:-}" ]; then
+  [ -d "$FORGE_DIR" ] || die "FORGE_DIR=$FORGE_DIR does not exist"
+elif [ -d "$HOME/ForgeNeo" ]; then
   FORGE_DIR="$HOME/ForgeNeo"
 elif [ -d "$HOME/sd-webui-forge-neo" ]; then
   FORGE_DIR="$HOME/sd-webui-forge-neo"
@@ -38,11 +44,13 @@ else
 fi
 say "Forge at $FORGE_DIR"
 
-# bf16 shards land at ~16GB, and merging needs room for the output beside
-# them before the shards can go.
+# The shards are ~16GB and the merged file is another ~16GB. Holding both on
+# disk needs 33GB, which a box already carrying Klein and Qwen does not have.
+# This machine has 64GB of RAM, so the merge is held in memory and the shards
+# are deleted before the output is written - peak disk is one copy, not two.
 AVAIL=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')
-echo "free: ${AVAIL}G, want ${NEED_GB}G (shards + merged copy)"
-[ "${AVAIL:-0}" -ge "$NEED_GB" ] || die "not enough disk; rm -rf ~/klein-stage ~/qwen-stage frees a lot"
+echo "free: ${AVAIL}G, want ${NEED_GB}G (one copy; merge is held in RAM)"
+[ "${AVAIL:-0}" -ge "$NEED_GB" ] || die "not enough disk. Note ~/qwen-stage is hardlinked to the installed files, so deleting it frees nothing; remove an unused model instead"
 
 if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null; then
   self=$(readlink -f "$0")
@@ -138,6 +146,18 @@ else:
 
 merged = {k: (v.to(torch.bfloat16) if v.is_floating_point() else v)
           for k, v in merged.items()}
+
+# Everything is in RAM now. Drop the shards before writing so the output
+# never has to coexist with its own source on a nearly full disk.
+freed = 0
+for s_ in shards:
+    try:
+        freed += os.path.getsize(s_)
+        os.remove(s_)
+    except OSError:
+        pass
+print(f"\n  shards removed, {freed/2**30:.1f} GiB back before writing")
+
 save_file(merged, out_path, metadata={"format": "pt"})
 print(f"\n  -> {out_path} ({os.path.getsize(out_path)/2**30:.1f} GiB)")
 PY

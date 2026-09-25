@@ -24,7 +24,13 @@ say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\nFAILED: %s\n(see %s)\n' "$*" "$LOG"; exit 1; }
 
 # Match the main script's choice so both write into the same tree.
-if [ -d "$HOME/ForgeNeo" ]; then
+# Which install to target. Two can exist side by side - the image ships
+# ~/ForgeNeo, and an earlier version of the setup script cloned
+# ~/sd-webui-forge-neo - and models dropped into the one that is not running
+# are invisible to the one that is. FORGE_DIR=... overrides the guess.
+if [ -n "${FORGE_DIR:-}" ]; then
+  [ -d "$FORGE_DIR" ] || die "FORGE_DIR=$FORGE_DIR does not exist"
+elif [ -d "$HOME/ForgeNeo" ]; then
   FORGE_DIR="$HOME/ForgeNeo"
 elif [ -d "$HOME/sd-webui-forge-neo" ]; then
   FORGE_DIR="$HOME/sd-webui-forge-neo"

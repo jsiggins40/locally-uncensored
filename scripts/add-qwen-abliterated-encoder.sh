@@ -18,8 +18,12 @@
 # misconfigured pipeline - they look identical from the UI.
 
 set -uo pipefail
+shopt -s globstar nullglob 2>/dev/null
 
-REPO="prithivMLmods/Qwen2.5-VL-7B-Abliterated-Caption-it"
+# Same model, two sources, tried in order. The original is gated behind the
+# owner's manual approval, which may never come; the fp8 fork is the same
+# weights repackaged and is worth trying before waiting on a stranger.
+REPOS="prithivMLmods/Qwen2.5-VL-7B-Abliterated-Caption-it falacal/Qwen2.5-VL-7B-fp8-Abliterated-Caption-it"
 OUT_NAME="qwen_2.5_vl_7b_abliterated_caption.safetensors"
 STAGE="$HOME/qwen-abl-stage"
 NEED_GB=20
@@ -70,10 +74,35 @@ python3 -c 'import torch, safetensors' 2>/dev/null \
 cd "$FORGE_DIR" || die "cd $FORGE_DIR"
 mkdir -p "$STAGE" models/text_encoder
 
-say "downloading $REPO"
-hf download "$REPO" --local-dir "$STAGE" \
-  --exclude "*.gguf" "*.pt" "*.bin" "original/*" \
-  || die "download"
+GOT=""
+for REPO in $REPOS; do
+  say "trying $REPO"
+  if hf download "$REPO" --local-dir "$STAGE" \
+       --exclude "*.gguf" "*.pt" "*.bin" "original/*" 2>&1 | tail -5; then
+    if compgen -G "$STAGE/*.safetensors" >/dev/null || \
+       compgen -G "$STAGE/**/*.safetensors" >/dev/null; then
+      GOT="$REPO"
+      echo "  got it from $REPO"
+      break
+    fi
+  fi
+  echo "  ! $REPO unavailable, trying the next"
+done
+if [ -z "$GOT" ]; then
+  cat <<EOF
+
+None of these could be downloaded. Both are gated by their owners.
+
+  Ask for access here, then re-run this script:
+    https://huggingface.co/prithivMLmods/Qwen2.5-VL-7B-Abliterated-Caption-it
+    https://huggingface.co/falacal/Qwen2.5-VL-7B-fp8-Abliterated-Caption-it
+
+  Approval is a person on the other end, so it may take a while or never
+  come. Nothing else is affected - Qwen Edit keeps working on the stock
+  encoder, censored, exactly as it does now.
+EOF
+  die "no source available"
+fi
 
 say "merging and comparing"
 python3 -u - "$STAGE" "$FORGE_DIR/models/text_encoder/$OUT_NAME" \
@@ -170,7 +199,7 @@ cat <<EOF
 
 === done ===
 
-Written: models/text_encoder/$OUT_NAME
+Written: models/text_encoder/$OUT_NAME   (from $GOT)
 
 Read the comparison above before trying it. If it said the key names do not
 line up, it will not work and no setting in the UI will fix that - tell me

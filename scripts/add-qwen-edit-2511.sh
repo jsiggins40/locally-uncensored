@@ -49,7 +49,10 @@ if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null; then
   self=$(readlink -f "$0")
   say "re-running inside tmux session 'qwen'"
   tmux kill-session -t qwen 2>/dev/null
-  tmux new-session -d -s qwen "bash '$self'"
+  # A fresh tmux shell inherits nothing from here, so FORGE_DIR has to be
+  # carried across explicitly - otherwise the re-exec silently goes back to
+  # guessing, and guesses the tree that is not running.
+  tmux new-session -d -s qwen "FORGE_DIR='${FORGE_DIR:-}' QUALITY='${QUALITY:-}' bash '$self'"
   printf '\nDetached. watch: tmux attach -t qwen   or: tail -f %s\n\n' "$LOG"
   exit 0
 fi

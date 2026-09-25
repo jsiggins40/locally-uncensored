@@ -81,7 +81,13 @@ fi
 
 # ------------------------------------------------------------------- forge
 say "Forge Neo"
-if [ -d "$FORGE_DIR/.git" ]; then
+# Thunder's Forge Neo template ships one already, at ~/ForgeNeo with a
+# start-forgeneo helper. Cloning a second copy beside it wastes disk on a
+# 100GB box and leaves two model trees to wonder about later.
+if [ -d "$HOME/ForgeNeo" ]; then
+  FORGE_DIR="$HOME/ForgeNeo"
+  echo "using the image's own install at $FORGE_DIR"
+elif [ -d "$FORGE_DIR/.git" ]; then
   echo "already cloned at $FORGE_DIR"
 else
   # The Neo work lives on a branch of forge-classic, not on its default branch.
@@ -226,7 +232,17 @@ say "placing files"
 mkdir -p models/Stable-diffusion models/VAE models/text_encoder
 place() {  # place <src> <dest-dir> <dest-name> <label>
   [ -n "${1:-}" ] || { echo "  $4: nothing resolved, skipped"; return; }
-  cp -n "$1" "$2/$3" && echo "  $4 -> $2/$3"
+  [ -e "$2/$3" ] && { echo "  $4: already there"; return; }
+  # Hardlink, not copy: staging and models sit on the same filesystem, and a
+  # 35GB checkpoint stored twice is how a 100GB box runs out of room halfway
+  # through installing torch. Falls back to a copy across filesystems.
+  if ln "$1" "$2/$3" 2>/dev/null; then
+    echo "  $4 -> $2/$3 (linked)"
+  elif cp "$1" "$2/$3"; then
+    echo "  $4 -> $2/$3 (copied)"
+  else
+    echo "  $4: could not place"
+  fi
 }
 place "${DIFFUSION:-}"    models/Stable-diffusion "${DIFFUSION_AS:-}"    "checkpoint"
 place "${VAE:-}"          models/VAE              "${VAE_AS:-}"          "vae"

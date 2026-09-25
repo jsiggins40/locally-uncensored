@@ -2,17 +2,15 @@
 #
 # Add Qwen-Image-Edit 2511 to an existing Forge Neo install.
 #
-#   bash q.sh                 stock encoder (works, censored)
-#   ABLITERATED=1 bash q.sh   also fetch the abliterated caption encoder
+#   bash q.sh
 #
 # Separate from the Klein setup on purpose: this is ~30GB, and a rebuild
 # should not be forced to carry it. Run it after the main script.
 #
-# Note on ABLITERATED: the encoder it fetches is a CAPTION fine-tune that
-# happens to be abliterated, not a drop-in replacement built for this
-# pipeline the way Klein's was. Its own repo has an open "mat1 and mat2
-# shapes" report. It is installed ALONGSIDE the stock encoder, never over
-# it, so you always have a working baseline to compare against.
+# Installs the STOCK encoder only. The abliterated one is a different job
+# (it needs converting out of transformers format) and lives in
+# add-qwen-abliterated-encoder.sh - run this first, get an edit working,
+# then that.
 
 set -uo pipefail
 
@@ -20,7 +18,7 @@ LOG="$HOME/qwen-edit-setup.log"
 exec > >(tee -a "$LOG") 2>&1
 
 STAGE="$HOME/qwen-stage"
-NEED_GB=35
+NEED_GB=32
 
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\nFAILED: %s\n(see %s)\n' "$*" "$LOG"; exit 1; }
@@ -45,7 +43,7 @@ if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null; then
   self=$(readlink -f "$0")
   say "re-running inside tmux session 'qwen'"
   tmux kill-session -t qwen 2>/dev/null
-  tmux new-session -d -s qwen "ABLITERATED=${ABLITERATED:-0} bash '$self'"
+  tmux new-session -d -s qwen "bash '$self'"
   printf '\nDetached. watch: tmux attach -t qwen   or: tail -f %s\n\n' "$LOG"
   exit 0
 fi
@@ -58,11 +56,11 @@ cd "$FORGE_DIR" || die "cd $FORGE_DIR"
 mkdir -p "$STAGE" models/Stable-diffusion models/text_encoder models/VAE
 
 say "resolving"
-python3 -u - "$STAGE" "${ABLITERATED:-0}" <<'PY' || die "download"
+python3 -u - "$STAGE" <<'PY' || die "download"
 import sys, os
 from huggingface_hub import list_repo_files, hf_hub_download
 
-stage, abliterated = sys.argv[1], sys.argv[2] == "1"
+stage = sys.argv[1]
 
 def pick(repo, must=(), avoid=()):
     try:
@@ -91,29 +89,18 @@ JOBS = [
     ("vae", "Comfy-Org/Qwen-Image_ComfyUI",
      ("vae",), ("gguf",)),
 ]
-if abliterated:
-    JOBS.append(("clip_abl", "falacal/Qwen2.5-VL-7B-fp8-Abliterated-Caption-it",
-                 (), ("gguf",)))
-
 out = {}
 for kind, repo, must, avoid in JOBS:
     print(f"\n{kind}:")
     name = pick(repo, must, avoid)
     if not name:
-        if kind == "clip_abl":
-            print("  !! abliterated encoder unavailable; stock still installed")
-            continue
         sys.exit(f"could not resolve {kind}")
     try:
         p = hf_hub_download(repo_id=repo, filename=name, local_dir=stage)
     except Exception as e:
         print(f"  - download failed ({type(e).__name__}: {e})")
-        if kind == "clip_abl":
-            continue
         sys.exit(f"could not download {kind}")
     leaf = name.rsplit("/", 1)[-1]
-    if kind == "clip_abl" and leaf in ("model.safetensors",):
-        leaf = "qwen_2.5_vl_7b_abliterated_caption.safetensors"
     out[kind] = (p, leaf)
     print(f"  -> {p} ({os.path.getsize(p)/2**30:.1f} GiB)")
 
@@ -143,7 +130,6 @@ esac
 place "${MODEL:-}"     models/Stable-diffusion "$MODEL_AS"           "edit model"
 place "${CLIP:-}"      models/text_encoder     "${CLIP_AS:-}"        "stock encoder"
 place "${VAE:-}"       models/VAE              "${VAE_AS:-}"         "vae"
-place "${CLIP_ABL:-}"  models/text_encoder     "${CLIP_ABL_AS:-}"    "abliterated encoder"
 
 say "on disk"
 ls -la models/Stable-diffusion models/text_encoder models/VAE | grep -i qwen || true
@@ -157,10 +143,8 @@ In Forge: refresh the model list, then pick the qwen_image_edit checkpoint.
 Set text encoder to qwen_2.5_vl_7b_fp8_scaled and VAE to qwen_image_vae.
 Those are Qwen's - do NOT pair them with Klein's encoder or VAE.
 
-Get a plain edit working on the STOCK encoder first. Only then switch to
-the abliterated one, if you installed it. If output turns to noise or you
-see a "mat1 and mat2 shapes" error, that encoder is misaligned for this
-pipeline - switch back; nothing else is broken.
+Get a plain edit working before adding anything else. Once it does, the
+abliterated encoder is a separate script: add-qwen-abliterated-encoder.sh
 
 Staging can be deleted once you are happy:  rm -rf ~/qwen-stage
 EOF

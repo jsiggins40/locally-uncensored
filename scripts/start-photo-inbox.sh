@@ -16,6 +16,7 @@ set -uo pipefail
 
 PORT="${PORT:-7861}"
 INBOX="${INBOX:-$HOME/photo-inbox}"
+OUTDIR="${OUTDIR:-$HOME/sd-webui-forge-neo/outputs}"
 CREDS="$HOME/photo-inbox-credentials.txt"
 SCRIPT="$HOME/photo-inbox.py"
 LOG="$HOME/photo-inbox.log"
@@ -151,6 +152,11 @@ PAGE = """<!doctype html>
 
 <h2 style="font-size:18px">Waiting</h2>
 <div class="grid">{items}</div>
+
+<h2 style="font-size:18px">Results</h2>
+<p class="note">Newest first, from <code>{outdir}</code>. Tap an image to open
+it full size, then press and hold to save it to your camera roll.</p>
+<div class="grid">{outs}</div>
 </body></html>
 """
 
@@ -158,6 +164,7 @@ PAGE = """<!doctype html>
 class Handler(BaseHTTPRequestHandler):
     server_version = "photo-inbox"
     directory = os.path.expanduser("~/photo-inbox")
+    outdir = os.path.expanduser("~/sd-webui-forge-neo/outputs")
     credential = ""
 
     def log_message(self, fmt, *args):
@@ -196,6 +203,13 @@ class Handler(BaseHTTPRequestHandler):
                 q=urllib.parse.quote(n), e=html.escape(n))
             for n in names
         ) or '<p class="note">nothing yet</p>' 
+        outs = "".join(
+            '<div class="card"><a href="/out?n={q}"><img loading="lazy" '
+            'src="/out?n={q}" alt=""></a>'
+            '<div class="row"><span class="nm">{e}</span></div></div>'.format(
+                q=urllib.parse.quote(r), e=html.escape(os.path.basename(r)))
+            for r in self.recent_outputs()
+        ) or '<p class="note">nothing generated yet</p>'
         heic = "" if HEIC_OK else (
             '<p class="note">HEIC conversion is unavailable, so iPhone photos '
             "are stored as-is and Forge may not read them. Set Camera &rarr; "
@@ -203,13 +217,38 @@ class Handler(BaseHTTPRequestHandler):
         )
         body = PAGE.format(
             count=len(names), dir=html.escape(self.directory),
-            msg=msg, items=items, heic=heic,
+            outdir=html.escape(self.outdir),
+            msg=msg, items=items, outs=outs, heic=heic,
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def recent_outputs(self, limit=60):
+        """Newest images anywhere under outdir, as paths relative to it.
+
+        Forge nests by date (outputs/img2img-images/2026-09-25/...), so this
+        walks rather than lists, and sorts by mtime because the date folders
+        do not sort usefully once the month rolls over.
+        """
+        found = []
+        for root, _dirs, files in os.walk(self.outdir):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                    full = os.path.join(root, f)
+                    try:
+                        found.append((os.path.getmtime(full), full))
+                    except OSError:
+                        pass
+        found.sort(reverse=True)
+        return [os.path.relpath(p, self.outdir) for _m, p in found[:limit]]
+
+    def resolve_out(self, rel: str):
+        p = os.path.abspath(os.path.join(self.outdir, rel))
+        root = os.path.abspath(self.outdir)
+        return p if p.startswith(root + os.sep) and os.path.isfile(p) else None
 
     def resolve(self, name: str):
         """Absolute path inside the inbox, or None if it tries to escape."""
@@ -221,6 +260,24 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authed():
             return
         parts = urllib.parse.urlsplit(self.path)
+        if parts.path == "/out":
+            rel = urllib.parse.parse_qs(parts.query).get("n", [""])[0]
+            path = self.resolve_out(rel)
+            if not path:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            ext = os.path.splitext(path)[1].lower().lstrip(".")
+            with open(path, "rb") as fh:
+                blob = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "image/" + {"jpg": "jpeg"}.get(ext, ext or "png"))
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
+            return
         if parts.path == "/img":
             q = urllib.parse.parse_qs(parts.query).get("n", [""])[0]
             path = self.resolve(q)
@@ -316,11 +373,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=7861)
     ap.add_argument("--dir", default=os.path.expanduser("~/photo-inbox"))
+    ap.add_argument("--outdir",
+                    default=os.path.expanduser("~/sd-webui-forge-neo/outputs"))
     ap.add_argument("--user", default="")
     ap.add_argument("--password", default="")
     a = ap.parse_args()
 
     Handler.directory = os.path.abspath(os.path.expanduser(a.dir))
+    Handler.outdir = os.path.abspath(os.path.expanduser(a.outdir))
     os.makedirs(Handler.directory, exist_ok=True)
     # The forwarded port is public, so refuse to run naked.
     Handler.credential = (
@@ -332,6 +392,7 @@ def main():
         return 2
 
     print("serving {} on 0.0.0.0:{}".format(Handler.directory, a.port))
+    print("results from", Handler.outdir)
     print("HEIC conversion:", "on" if HEIC_OK else "off (pillow-heif missing)")
     ThreadingHTTPServer(("0.0.0.0", a.port), Handler).serve_forever()
 
@@ -362,7 +423,7 @@ fi
 mkdir -p "$INBOX"
 tmux kill-session -t inbox 2>/dev/null
 tmux new-session -d -s inbox \
-  "python3 '$SCRIPT' --port $PORT --dir '$INBOX' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
+  "python3 '$SCRIPT' --port $PORT --dir '$INBOX' --outdir '$OUTDIR' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
 sleep 2
 
 if ! tmux has-session -t inbox 2>/dev/null; then
@@ -374,6 +435,7 @@ say "running"
 cat <<EOF
   local check   HTTP $CODE  (200 means it is serving)
   inbox         $INBOX
+  results       $OUTDIR
   login         $U / $P      (also in $CREDS)
   stop          tmux kill-session -t inbox
   log           $LOG

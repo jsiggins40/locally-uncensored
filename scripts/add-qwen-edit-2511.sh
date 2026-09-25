@@ -68,7 +68,7 @@ from huggingface_hub import list_repo_files, hf_hub_download
 
 stage = sys.argv[1]
 
-def pick(repo, must=(), avoid=()):
+def pick(repo, must=(), avoid=(), prefer=()):
     try:
         files = list_repo_files(repo)
     except Exception as e:
@@ -81,30 +81,44 @@ def pick(repo, must=(), avoid=()):
         print(f"  - {repo}: nothing matching {must}")
         print(f"      holds: {files[:8]}")
         return None
-    c.sort(key=len)
+    # Sorting by name length alone once picked qwen_image_edit_2511_bf16
+    # (38GiB) over _fp8mixed (20GiB) purely because the name was shorter, and
+    # filled a 100GB disk. Precision is a choice, so state it.
+    def score(f):
+        low = f.lower()
+        for i, p in enumerate(prefer):
+            if p in low:
+                return (i, len(f))
+        return (len(prefer), len(f))
+    c.sort(key=score)
     print(f"  + {repo}: {c[0]}")
+    for alt in c[1:4]:
+        print(f"      (also there: {alt})")
     return c[0]
 
 JOBS = [
     # Forge Neo only treats a model as an EDIT model when its path contains
     # both "qwen" and "edit" - so the filename is load-bearing, not cosmetic.
+    # QUALITY=bf16 takes the full-precision 38GiB file instead; worth it on an
+    # 80GB card with the disk to spare, ruinous on a 100GB one.
     ("model", "Comfy-Org/Qwen-Image-Edit_ComfyUI",
-     ("qwen", "edit", "2511"), ("gguf", "nunchaku")),
+     ("qwen", "edit", "2511"), ("gguf", "nunchaku"),
+     ("bf16",) if os.environ.get("QUALITY") == "bf16" else ("fp8mixed", "fp8")),
     ("clip", "Comfy-Org/Qwen-Image_ComfyUI",
-     ("qwen_2.5_vl", "fp8"), ("gguf",)),
+     ("qwen_2.5_vl", "fp8"), ("gguf",), ("fp8_scaled", "fp8")),
     ("vae", "Comfy-Org/Qwen-Image_ComfyUI",
-     ("vae",), ("gguf",)),
+     ("vae",), ("gguf",), ()),
     # Distillation LoRA: 4 steps instead of ~40, about 10x faster. On a 20B
     # edit model that is what makes it usable rather than a coffee break.
     # Unlike the merged "lightning" checkpoints that Forge Neo refuses in
     # issue #1226, this is a LoRA applied at runtime - a different mechanism.
     ("lora", "lightx2v/Qwen-Image-Edit-2511-Lightning",
-     ("lightning",), ("gguf", "fp32")),
+     ("lightning",), ("gguf", "fp32"), ("4steps", "bf16")),
 ]
 out = {}
-for kind, repo, must, avoid in JOBS:
+for kind, repo, must, avoid, prefer in JOBS:
     print(f"\n{kind}:")
-    name = pick(repo, must, avoid)
+    name = pick(repo, must, avoid, prefer)
     if not name:
         sys.exit(f"could not resolve {kind}")
     try:

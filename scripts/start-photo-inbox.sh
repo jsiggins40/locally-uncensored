@@ -56,6 +56,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BYTES = 64 * 1024 * 1024
@@ -120,8 +121,16 @@ PAGE = """<!doctype html>
   input[type=file] {{ width: 100%; margin-bottom: 16px; }}
   button {{ font-size: 17px; padding: 12px 20px; width: 100%;
             border-radius: 10px; border: 0; background: #d2691e; color: #fff; }}
-  ul {{ padding-left: 20px; }}
-  li {{ margin: 4px 0; word-break: break-all; }}
+  .grid {{ display: grid; gap: 12px;
+           grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }}
+  .card {{ border: 1px solid #8884; border-radius: 10px; overflow: hidden; }}
+  .card img {{ width: 100%; height: 140px; object-fit: cover; display: block;
+               background: #8882; }}
+  .card .row {{ display: flex; align-items: center; gap: 6px; padding: 6px 8px; }}
+  .card .nm {{ font-size: 12px; color: #888; flex: 1; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; }}
+  .card button {{ width: auto; padding: 4px 10px; font-size: 14px;
+                  background: #8883; color: inherit; }}
   code {{ background: #8882; padding: 2px 6px; border-radius: 4px;
           word-break: break-all; }}
   .note {{ color: #888; font-size: 15px; }}
@@ -141,7 +150,7 @@ PAGE = """<!doctype html>
 {heic}
 
 <h2 style="font-size:18px">Waiting</h2>
-<ul>{items}</ul>
+<div class="grid">{items}</div>
 </body></html>
 """
 
@@ -176,9 +185,17 @@ class Handler(BaseHTTPRequestHandler):
             )
         except OSError:
             names = []
+        # Thumbnails are plain <img> tags and the delete control is a plain
+        # form, so the whole page still works with Lockdown Mode on.
         items = "".join(
-            "<li>{}</li>".format(html.escape(n)) for n in names
-        ) or "<li class=note>nothing yet</li>"
+            '<div class="card"><img loading="lazy" src="/img?n={q}" alt="">'
+            '<div class="row"><span class="nm">{e}</span>'
+            '<form method="post" action="/" style="border:0;padding:0;margin:0">'
+            '<input type="hidden" name="delete" value="{q}">'
+            '<button type="submit">delete</button></form></div></div>'.format(
+                q=urllib.parse.quote(n), e=html.escape(n))
+            for n in names
+        ) or '<p class="note">nothing yet</p>' 
         heic = "" if HEIC_OK else (
             '<p class="note">HEIC conversion is unavailable, so iPhone photos '
             "are stored as-is and Forge may not read them. Set Camera &rarr; "
@@ -194,14 +211,58 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def resolve(self, name: str):
+        """Absolute path inside the inbox, or None if it tries to escape."""
+        p = os.path.abspath(os.path.join(self.directory, safe_name(name)))
+        root = os.path.abspath(self.directory)
+        return p if p.startswith(root + os.sep) and os.path.isfile(p) else None
+
     def do_GET(self):
-        if self.authed():
-            self.render()
+        if not self.authed():
+            return
+        parts = urllib.parse.urlsplit(self.path)
+        if parts.path == "/img":
+            q = urllib.parse.parse_qs(parts.query).get("n", [""])[0]
+            path = self.resolve(q)
+            if not path:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            ext = os.path.splitext(path)[1].lower().lstrip(".")
+            ctype = {"jpg": "jpeg", "tif": "tiff"}.get(ext, ext)
+            with open(path, "rb") as fh:
+                blob = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/" + (ctype or "octet-stream"))
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
+            return
+        self.render()
 
     def do_POST(self):
         if not self.authed():
             return
         ctype = self.headers.get("Content-Type", "")
+
+        # The delete button is an ordinary form, so it arrives urlencoded
+        # rather than multipart - handle it before looking for a boundary.
+        if "application/x-www-form-urlencoded" in ctype:
+            n = int(self.headers.get("Content-Length") or 0)
+            fields = urllib.parse.parse_qs(self.rfile.read(n).decode("utf-8", "replace"))
+            target = (fields.get("delete") or [""])[0]
+            path = self.resolve(target)
+            if path:
+                try:
+                    os.remove(path)
+                    return self.render('<p style="color:#4a4">Deleted {}.</p>'.format(
+                        html.escape(os.path.basename(path))))
+                except OSError as exc:
+                    return self.render('<p style="color:#c55">{}</p>'.format(
+                        html.escape(str(exc))))
+            return self.render('<p style="color:#c55">No such file.</p>')
+
         m = re.search(r'boundary=(?:"([^"]+)"|([^;]+))', ctype)
         if not m:
             return self.render('<p style="color:#c55">Not a file upload.</p>')

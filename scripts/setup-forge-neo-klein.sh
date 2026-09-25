@@ -58,6 +58,27 @@ pip install -q --break-system-packages "huggingface_hub[cli]" 2>/dev/null \
   || die "could not install huggingface_hub"
 export PATH="$HOME/.local/bin:$PATH"
 
+# The uncensored text encoder sits behind a gated repo, so without a token the
+# run still finishes - just with the stock encoder, which refuses. Better to
+# say so here than to have it discovered three prompts into a session.
+say "hugging face auth"
+if python3 -c 'from huggingface_hub import whoami; print("  as", whoami()["name"])' 2>/dev/null; then
+  :
+else
+  cat <<'EOF'
+  !! no Hugging Face token found.
+     The uncensored text encoder is gated; without a token this run falls
+     back to the stock one and prompts will still be refused.
+
+     Stop now, run exactly this one line, paste ONLY the hf_... key:
+
+       read -p "token: " K && mkdir -p ~/.cache/huggingface && echo -n "$K" > ~/.cache/huggingface/token && echo "stored ${#K} chars"
+
+     then start this script again. Continuing anyway in 10s.
+EOF
+  sleep 10
+fi
+
 # ------------------------------------------------------------------- forge
 say "Forge Neo"
 if [ -d "$FORGE_DIR/.git" ]; then
@@ -210,6 +231,28 @@ place() {  # place <src> <dest-dir> <dest-name> <label>
 place "${DIFFUSION:-}"    models/Stable-diffusion "${DIFFUSION_AS:-}"    "checkpoint"
 place "${VAE:-}"          models/VAE              "${VAE_AS:-}"          "vae"
 place "${TEXT_ENCODER:-}" models/text_encoder     "${TEXT_ENCODER_AS:-}" "text encoder"
+
+# -------------------------------------------------------------------- loras
+# Klein LoRAs are size-specific: a 4B adapter will not load on 9B, and a
+# FLUX.1 one will not load at all. Everything here is 9B, from Hugging Face,
+# so no second account or API key enters the picture.
+say "loras"
+mkdir -p models/Lora
+while read -r repo file; do
+  [ -n "$repo" ] || continue
+  if [ -s "models/Lora/$file" ]; then
+    echo "  have $file"
+    continue
+  fi
+  if hf download "$repo" "$file" --local-dir models/Lora >/dev/null 2>&1; then
+    echo "  + $file  ($repo)"
+  else
+    echo "  - $file failed ($repo)"
+  fi
+done <<'LORAS'
+dx8152/Flux2-Klein-9B-Enhanced-Details realistic.safetensors
+thedeoxen/refcontrol-FLUX.2-klein-9B-reference-pose-lora refcontrol_v2_poses.safetensors
+LORAS
 
 say "on disk"
 find models -name '*.safetensors' -printf '%p  %sB\n' 2>/dev/null || find models -name '*.safetensors'

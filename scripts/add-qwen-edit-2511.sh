@@ -53,7 +53,7 @@ python3 -c 'from huggingface_hub import whoami; print("  hf as", whoami()["name"
   || echo "  (no hf token; public repos only, which is all this needs)"
 
 cd "$FORGE_DIR" || die "cd $FORGE_DIR"
-mkdir -p "$STAGE" models/Stable-diffusion models/text_encoder models/VAE
+mkdir -p "$STAGE" models/Stable-diffusion models/text_encoder models/VAE models/Lora
 
 say "resolving"
 python3 -u - "$STAGE" <<'PY' || die "download"
@@ -88,6 +88,12 @@ JOBS = [
      ("qwen_2.5_vl", "fp8"), ("gguf",)),
     ("vae", "Comfy-Org/Qwen-Image_ComfyUI",
      ("vae",), ("gguf",)),
+    # Distillation LoRA: 4 steps instead of ~40, about 10x faster. On a 20B
+    # edit model that is what makes it usable rather than a coffee break.
+    # Unlike the merged "lightning" checkpoints that Forge Neo refuses in
+    # issue #1226, this is a LoRA applied at runtime - a different mechanism.
+    ("lora", "lightx2v/Qwen-Image-Edit-2511-Lightning",
+     ("lightning",), ("gguf", "fp32")),
 ]
 out = {}
 for kind, repo, must, avoid in JOBS:
@@ -130,6 +136,7 @@ esac
 place "${MODEL:-}"     models/Stable-diffusion "$MODEL_AS"           "edit model"
 place "${CLIP:-}"      models/text_encoder     "${CLIP_AS:-}"        "stock encoder"
 place "${VAE:-}"       models/VAE              "${VAE_AS:-}"         "vae"
+place "${LORA:-}"      models/Lora             "${LORA_AS:-}"        "lightning lora"
 
 say "on disk"
 ls -la models/Stable-diffusion models/text_encoder models/VAE | grep -i qwen || true
@@ -142,6 +149,10 @@ cat <<'EOF'
 In Forge: refresh the model list, then pick the qwen_image_edit checkpoint.
 Set text encoder to qwen_2.5_vl_7b_fp8_scaled and VAE to qwen_image_vae.
 Those are Qwen's - do NOT pair them with Klein's encoder or VAE.
+
+The Lightning LoRA cuts this to 4 steps. It needs CFG 1.0 - leave CFG high
+and every render looks burnt. Add <lora:Qwen-Image-Edit-2511-Lightning...:1>
+to the prompt, set steps to 4, CFG to 1.0.
 
 Get a plain edit working before adding anything else. Once it does, the
 abliterated encoder is a separate script: add-qwen-abliterated-encoder.sh

@@ -139,7 +139,20 @@ NGINX
 sudo ln -sf /etc/nginx/sites-available/comfy /etc/nginx/sites-enabled/comfy
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t || die "nginx config rejected"
-sudo systemctl restart nginx || sudo nginx -s reload || die "nginx restart"
+# This box is a container: systemctl has no init to talk to, and -s reload
+# needs a master process that does not exist on a first install. So try the
+# service manager, then a reload, then simply starting it.
+if sudo systemctl restart nginx 2>/dev/null; then
+  echo "  started via systemctl"
+elif sudo nginx -s reload 2>/dev/null; then
+  echo "  reloaded running nginx"
+else
+  sudo pkill -x nginx 2>/dev/null
+  sleep 1
+  sudo nginx && echo "  started directly" || die "could not start nginx"
+fi
+sleep 1
+pgrep -x nginx >/dev/null || die "nginx is not running after start"
 
 # ----------------------------------------------------------------- launch
 say "launching"

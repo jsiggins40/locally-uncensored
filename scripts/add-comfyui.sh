@@ -61,13 +61,19 @@ cd "$COMFY" || die "cd $COMFY"
 say "python environment"
 [ -d venv ] || python3 -m venv venv || die "venv"
 ./venv/bin/pip install -q --upgrade pip
-# cu124 wheels match the driver on these A100 images; without the index pip
-# resolves a CPU build and every render takes minutes instead of seconds.
-./venv/bin/pip install -q torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/cu124 || die "torch"
+# Plain PyPI, not the cu124 index. Those wheels are a release behind, and
+# current ComfyUI ships comfy_kitchen, which annotates a parameter list[int]
+# - a form older torch.library.infer_schema rejects outright, so ComfyUI
+# dies on import. PyPI torch carries CUDA now; the check below proves it.
+./venv/bin/pip install -q -U torch torchvision torchaudio || die "torch"
 ./venv/bin/pip install -q -r requirements.txt || die "requirements"
-./venv/bin/python -c 'import torch; print("  cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")' \
-  || die "torch cannot see the GPU"
+./venv/bin/python - <<'PYCHK' || die "torch cannot see the GPU"
+import sys, torch
+print("  torch", torch.__version__, "cuda:", torch.cuda.is_available())
+if not torch.cuda.is_available():
+    sys.exit(1)
+print(" ", torch.cuda.get_device_name(0))
+PYCHK
 
 # ----------------------------------------------------------------- models
 # ComfyUI's tree differs from A1111's, and a merged checkpoint belongs

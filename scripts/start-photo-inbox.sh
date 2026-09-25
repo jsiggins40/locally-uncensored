@@ -16,7 +16,16 @@ set -uo pipefail
 
 PORT="${PORT:-7861}"
 INBOX="${INBOX:-$HOME/photo-inbox}"
-OUTDIR="${OUTDIR:-$HOME/sd-webui-forge-neo/outputs}"
+# Forge Neo writes to output/, singular; A1111 and Forge classic use
+# outputs/. Guessing wrong shows an empty gallery next to a folder full of
+# images, so take whichever is actually there.
+if [ -z "${OUTDIR:-}" ]; then
+  for d in "$HOME/sd-webui-forge-neo/output" "$HOME/sd-webui-forge-neo/outputs" \
+           "$HOME/ForgeNeo/output" "$HOME/ForgeNeo/outputs"; do
+    if [ -d "$d" ]; then OUTDIR="$d"; break; fi
+  done
+  OUTDIR="${OUTDIR:-$HOME/sd-webui-forge-neo/output}"
+fi
 CREDS="$HOME/photo-inbox-credentials.txt"
 SCRIPT="$HOME/photo-inbox.py"
 LOG="$HOME/photo-inbox.log"

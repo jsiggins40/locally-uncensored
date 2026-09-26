@@ -73,6 +73,10 @@ class Graph:
         # Video is optional; its absence is reported on the page rather than
         # treated as a broken install.
         self.i2v = next((n for n in ("WanImageToVideo",) if n in info), None)
+        # Two ways to pin the last frame, depending on the release: a
+        # dedicated node, or an optional end_image on the ordinary one.
+        self.flf = next((n for n in ("WanFirstLastFrameToVideo",) if n in info), None)
+        self.i2v_end = bool(self.i2v and "end_image" in self.inputs_of(self.i2v))
         self.video_saver = next(
             (n for n in ("SaveWEBM", "SaveAnimatedWEBP", "SaveVideo") if n in info),
             None)
@@ -166,9 +170,12 @@ class Graph:
         return g
 
 
+    def can_end_frame(self):
+        return bool(self.flf or self.i2v_end)
+
     def build_video(self, *, high, low, clip, vae, image, prompt, negative,
                     steps, cfg, seed, width, height, length, lora=None,
-                    lora_strength=1.0):
+                    lora_strength=1.0, end_image=None):
         """Wan 2.2 I2V: two experts over one latent, high noise then low."""
         if not self.i2v:
             raise RuntimeError("WanImageToVideo node is not available")
@@ -203,10 +210,21 @@ class Graph:
                    "inputs": {"clip": C, "text": prompt}}
         g["ne"] = {"class_type": "CLIPTextEncode",
                    "inputs": {"clip": C, "text": negative}}
-        g["wv"] = {"class_type": self.i2v, "inputs": {
-            "positive": ["po", 0], "negative": ["ne", 0], "vae": ["va", 0],
-            "width": width, "height": height, "length": length,
-            "batch_size": 1, "start_image": ["im", 0]}}
+        ins = {"positive": ["po", 0], "negative": ["ne", 0], "vae": ["va", 0],
+               "width": width, "height": height, "length": length,
+               "batch_size": 1, "start_image": ["im", 0]}
+        node = self.i2v
+        if end_image:
+            if not self.can_end_frame():
+                raise RuntimeError(
+                    "this ComfyUI has no way to pin a last frame - neither "
+                    "WanFirstLastFrameToVideo nor an end_image input")
+            g["im2"] = {"class_type": "LoadImage", "inputs": {"image": end_image}}
+            ins["end_image"] = ["im2", 0]
+            # The dedicated node is the better path where it exists; the
+            # optional input on the plain node is the fallback.
+            node = self.flf or self.i2v
+        g["wv"] = {"class_type": node, "inputs": ins}
 
         half = max(1, steps // 2)
         g["k1"] = {"class_type": "KSamplerAdvanced", "inputs": {
@@ -267,6 +285,10 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   <input type="file" name="photo" accept="image/*">
   <label>…or pick one already on the box</label>
   <select name="existing">{choices}</select>
+
+  <label>End frame (video only, optional)</label>
+  <input type="file" name="photo2" accept="image/*">
+  <select name="existing2">{choices2}</select>
 
   <label>Instruction</label>
   <textarea name="prompt" placeholder="change the shirt to green">{last}</textarea>
@@ -406,9 +428,15 @@ class H(BaseHTTPRequestHandler):
                 modes += '<option value="" disabled>video: models not installed</option>'
             else:
                 modes += '<option value="" disabled>video: WanImageToVideo node missing</option>'
+        avail = self.listing(self.indir)
         choices = "".join(
             '<option value="{0}">{1}</option>'.format(html.escape(f), html.escape(f))
-            for f in self.listing(self.indir)) or "<option value=''>(none)</option>"
+            for f in avail) or "<option value=''>(none)</option>"
+        choices2 = "<option value=''>(none - free motion)</option>" + "".join(
+            '<option value="{0}">{1}</option>'.format(html.escape(f), html.escape(f))
+            for f in avail)
+        if not self.graph.can_end_frame():
+            choices2 = "<option value=''>(not supported by this ComfyUI)</option>"
         outs = "".join(
             '<div class="card"><a href="/out?n={q}"><img loading="lazy" '
             'src="/out?n={q}" alt=""></a></div>'.format(q=urllib.parse.quote(r))
@@ -421,6 +449,7 @@ class H(BaseHTTPRequestHandler):
                            models="".join(opts) or "<option value=''>(no Qwen edit model installed)</option>",
                            loras=loras, lstr=html.escape(str(lstr)),
                            modes=modes, length=length, size=html.escape(size),
+                           choices2=choices2,
                            outs=outs, last=html.escape(self.last_prompt),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
         self.send_response(200)
@@ -461,21 +490,25 @@ class H(BaseHTTPRequestHandler):
             return self.render('<p class="err">too large</p>')
         body = self.rfile.read(n)
 
-        fields, upload = {}, None
+        fields, uploads = {}, {}
         for name, fn, data in parse_multipart(body, (m.group(1) or m.group(2)).strip().encode()):
             if fn and data:
-                upload = (safe(fn), data)
+                uploads[name] = (safe(fn), data)   # keyed: two pickers now
             elif name:
                 fields[name] = data.decode("utf-8", "replace").strip()
 
-        image = ""
-        if upload:
-            os.makedirs(self.indir, exist_ok=True)
-            image = time.strftime("%H%M%S_") + upload[0]
-            with open(os.path.join(self.indir, image), "wb") as fh:
-                fh.write(upload[1])
-        elif fields.get("existing"):
-            image = fields["existing"]
+        def stash(field, existing):
+            up = uploads.get(field)
+            if up:
+                os.makedirs(self.indir, exist_ok=True)
+                nm = time.strftime("%H%M%S_") + up[0]
+                with open(os.path.join(self.indir, nm), "wb") as fh:
+                    fh.write(up[1])
+                return nm
+            return fields.get(existing) or ""
+
+        image = stash("photo", "existing")
+        end_image = stash("photo2", "existing2")
         if not image:
             return self.render('<p class="err">pick or upload a photo</p>')
 
@@ -519,7 +552,8 @@ class H(BaseHTTPRequestHandler):
                     steps=steps, cfg=cfg,
                     seed=int(time.time() * 1000) % 2**31,
                     width=width, height=height, length=length,
-                    lora=lora, lora_strength=lstr)
+                    lora=lora, lora_strength=lstr,
+                    end_image=end_image or None)
             except Exception as e:
                 return self.render('<p class="err">could not build the video '
                                    'graph: {}</p>'.format(html.escape(str(e))), **keep)
@@ -532,9 +566,11 @@ class H(BaseHTTPRequestHandler):
                                    **keep)
             except Exception as e:
                 return self.render('<p class="err">{}</p>'.format(html.escape(str(e))), **keep)
-            return self.render('<p class="ok">queued {} frames at {}x{} ({}). '
+            return self.render('<p class="ok">queued {} frames at {}x{}{} ({}). '
                                'Video takes minutes, not seconds - reload in a '
                                'few.</p>'.format(length, width, height,
+                                                 ", ending on your last frame"
+                                                 if end_image else "",
                                                  html.escape(str(r.get("prompt_id", "?")))),
                                **keep)
 

@@ -287,7 +287,10 @@ class H(BaseHTTPRequestHandler):
         for c in m["ckpt"]:
             opts.append('<option value="ckpt:{0}">{1} (merged, 4 steps)</option>'
                         .format(html.escape(c), html.escape(c)))
-        for u in m["unet"]:
+        # diffusion_models holds whatever else is installed - Klein, on this
+        # box. Wrapping a Qwen graph around a FLUX model fails in a way that
+        # looks like a broken pipeline, so only offer what belongs here.
+        for u in [x for x in m["unet"] if "qwen" in x.lower()]:
             opts.append('<option value="unet:{0}">{1} (separate, 20 steps)</option>'
                         .format(html.escape(u), html.escape(u)))
         loras = '<option value="">(none)</option>' + "".join(
@@ -306,7 +309,7 @@ class H(BaseHTTPRequestHandler):
         if self.graph.notes:
             status += " · " + "; ".join(self.graph.notes)
         body = PAGE.format(status=html.escape(status), msg=msg, choices=choices,
-                           models="".join(opts) or "<option>(no models)</option>",
+                           models="".join(opts) or "<option value=''>(no Qwen edit model installed)</option>",
                            loras=loras, lstr=html.escape(str(lstr)),
                            outs=outs, last=html.escape(self.last_prompt),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
@@ -392,6 +395,12 @@ class H(BaseHTTPRequestHandler):
                                      seed=int(time.time() * 1000) % 2**31,
                                      sampler="euler", scheduler="simple",
                                      lora=lora, lora_strength=lstr)
+            elif "qwen" not in name.lower():
+                return self.render('<p class="err">{} is not a Qwen edit model. '
+                                   'This form only drives Qwen editing; Klein '
+                                   'lives in Forge on 7860.</p>'
+                                   .format(html.escape(name)), steps, cfg,
+                                   lora or "", lstr)
             else:
                 if not (mm["clip"] and mm["vae"]):
                     return self.render('<p class="err">no clip or vae installed</p>')

@@ -42,7 +42,7 @@ echo "free: ${AVAIL}G, want ${NEED_GB}G (torch and deps; models are linked)"
 if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null; then
   self=$(readlink -f "$0")
   say "re-running inside tmux session 'comfysetup'"
-  tmux kill-session -t comfysetup 2>/dev/null
+  tmux kill-session -t =comfysetup 2>/dev/null
   tmux new-session -d -s comfysetup \
     "FORGE_DIR='$FORGE' PORT='$PUBLIC_PORT' bash '$self'"
   printf '\nDetached. watch: tmux attach -t comfysetup   or: tail -f %s\n\n' "$LOG"
@@ -162,7 +162,7 @@ pgrep -x nginx >/dev/null || die "nginx is not running after start"
 
 # ----------------------------------------------------------------- launch
 say "launching"
-tmux kill-session -t comfy 2>/dev/null
+tmux kill-session -t =comfy 2>/dev/null
 tmux new-session -d -s comfy \
   "cd $COMFY && ./venv/bin/python main.py --listen 127.0.0.1 --port $INTERNAL_PORT 2>&1 | tee -a $HOME/comfy-run.log"
 

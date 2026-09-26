@@ -36,7 +36,7 @@ if [ -z "${TMUX:-}" ] && [ "${NO_TMUX:-}" != "1" ]; then
   if command -v tmux >/dev/null; then
     self=$(readlink -f "$0")
     say "re-running inside tmux session 'setup' (attach: tmux attach -t setup)"
-    tmux kill-session -t setup 2>/dev/null
+    tmux kill-session -t =setup 2>/dev/null
     tmux new-session -d -s setup "bash '$self'"
     printf '\nDetached. It keeps running if your connection drops.\n'
     printf '  watch:  tmux attach -t setup      (detach again: Ctrl-B then D)\n'
@@ -284,7 +284,7 @@ FORGE_USER=$(awk '/^user:/{print $2}' "$PASSFILE")
 FORGE_PASS=$(awk '/^pass:/{print $2}' "$PASSFILE")
 
 say "launching under tmux"
-tmux kill-session -t forge 2>/dev/null
+tmux kill-session -t =forge 2>/dev/null
 tmux new-session -d -s forge \
   "cd $FORGE_DIR && ./webui.sh --listen --port 7860 --api \
      --gradio-auth $FORGE_USER:$FORGE_PASS 2>&1 | tee -a $HOME/forge-run.log"

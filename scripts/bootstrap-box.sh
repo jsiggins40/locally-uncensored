@@ -66,7 +66,7 @@ fetch() {  # fetch <name>
 
 wait_for() {  # wait_for <tmux-session> <minutes>
   local s=$1 mins=$2 i=0
-  while tmux has-session -t "$s" 2>/dev/null; do
+  while tmux has-session -t "=$s" 2>/dev/null; do
     sleep 10
     i=$((i + 1))
     [ $((i % 6)) -eq 0 ] && printf '   ... %s running, %d min\n' "$s" $((i / 6))
@@ -95,7 +95,7 @@ say "3/4  photo inbox"
 fetch start-photo-inbox.sh
 bash "$HOME/start-photo-inbox.sh" || echo "   (inbox failed; continuing)"
 
-if [ "${SKIP_COMFY:-}" != "1" ] && tmux has-session -t comfy 2>/dev/null; then
+if [ "${SKIP_COMFY:-}" != "1" ] && tmux has-session -t =comfy 2>/dev/null; then
   say "4/4  edit form"
   fetch start-edit-form.sh
   bash "$HOME/start-edit-form.sh" || echo "   (edit form failed; continuing)"
@@ -107,7 +107,7 @@ fi
 say "everything, in one place"
 show() {  # show <label> <port> <credentials-file> <tmux-session>
   local up="down"
-  tmux has-session -t "$4" 2>/dev/null && up="up"
+  tmux has-session -t "=$4" 2>/dev/null && up="up"
   printf '\n  %-12s port %-6s [%s]\n' "$1" "$2" "$up"
   [ -s "$3" ] && sed 's/^/                /' "$3"
 }

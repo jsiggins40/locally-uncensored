@@ -430,12 +430,12 @@ if ! python3 -c 'import pillow_heif' 2>/dev/null; then
 fi
 
 mkdir -p "$INBOX"
-tmux kill-session -t inbox 2>/dev/null
+tmux kill-session -t =inbox 2>/dev/null
 tmux new-session -d -s inbox \
   "python3 '$SCRIPT' --port $PORT --dir '$INBOX' --outdir '$OUTDIR' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
 sleep 2
 
-if ! tmux has-session -t inbox 2>/dev/null; then
+if ! tmux has-session -t =inbox 2>/dev/null; then
   echo "failed to start; see $LOG"; tail -5 "$LOG"; exit 1
 fi
 
@@ -446,7 +446,7 @@ cat <<EOF
   inbox         $INBOX
   results       $OUTDIR
   login         $U / $P      (also in $CREDS)
-  stop          tmux kill-session -t inbox
+  stop          tmux kill-session -t =inbox
   log           $LOG
 
 Next:

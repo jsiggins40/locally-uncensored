@@ -48,7 +48,7 @@ echo "free: ${AVAIL}G, want ${NEED_GB}G"
 if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null; then
   self=$(readlink -f "$0")
   say "re-running inside tmux session 'qwen'"
-  tmux kill-session -t qwen 2>/dev/null
+  tmux kill-session -t =qwen 2>/dev/null
   # A fresh tmux shell inherits nothing from here, so FORGE_DIR has to be
   # carried across explicitly - otherwise the re-exec silently goes back to
   # guessing, and guesses the tree that is not running.

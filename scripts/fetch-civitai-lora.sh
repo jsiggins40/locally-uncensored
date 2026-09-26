@@ -92,6 +92,6 @@ ls -la "$LORA_DIR" 2>/dev/null | grep -v '^total' || echo "(empty)"
 cat <<'EOF'
 
 Restart Forge so it rescans, or press the refresh arrow next to the Lora tab:
-  tmux kill-session -t forge
+  tmux kill-session -t =forge
 then re-run the setup script, which relaunches it.
 EOF

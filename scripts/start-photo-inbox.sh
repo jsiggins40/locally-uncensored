@@ -432,7 +432,7 @@ fi
 mkdir -p "$INBOX"
 tmux kill-session -t =inbox 2>/dev/null
 tmux new-session -d -s inbox \
-  "python3 '$SCRIPT' --port $PORT --dir '$INBOX' --outdir '$OUTDIR' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
+  "python3 -u '$SCRIPT' --port $PORT --dir '$INBOX' --outdir '$OUTDIR' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
 sleep 2
 
 if ! tmux has-session -t =inbox 2>/dev/null; then

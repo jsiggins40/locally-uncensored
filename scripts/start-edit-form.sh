@@ -455,7 +455,7 @@ fi
 say "starting"
 tmux kill-session -t =editform 2>/dev/null
 tmux new-session -d -s editform \
-  "python3 '$SCRIPT' --port $PORT --comfy '$COMFY_URL' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
+  "python3 -u '$SCRIPT' --port $PORT --comfy '$COMFY_URL' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
 sleep 4
 tmux has-session -t =editform 2>/dev/null || { tail -20 "$LOG"; die "did not start"; }
 CODE=$(curl -sS -o /dev/null -w '%{http_code}' -u "$U:$P" "http://127.0.0.1:$PORT/" 2>/dev/null)

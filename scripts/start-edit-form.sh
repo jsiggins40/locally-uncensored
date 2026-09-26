@@ -50,7 +50,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BYTES = 64 * 1024 * 1024
-IMG_EXT = (".png", ".jpg", ".jpeg", ".webp")
+IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".webm", ".mp4")
 
 
 def api(url, path, payload=None, timeout=30):
@@ -70,6 +70,12 @@ class Graph:
         self.notes = []
         self.encoder = self.pick(
             ["TextEncodeQwenImageEditPlus", "TextEncodeQwenImageEdit"])
+        # Video is optional; its absence is reported on the page rather than
+        # treated as a broken install.
+        self.i2v = next((n for n in ("WanImageToVideo",) if n in info), None)
+        self.video_saver = next(
+            (n for n in ("SaveWEBM", "SaveAnimatedWEBP", "SaveVideo") if n in info),
+            None)
         for n in ("UNETLoader", "CLIPLoader", "VAELoader", "VAEEncode",
                   "VAEDecode", "KSampler", "LoadImage", "SaveImage",
                   "CheckpointLoaderSimple", "LoraLoader"):
@@ -160,6 +166,80 @@ class Graph:
         return g
 
 
+    def build_video(self, *, high, low, clip, vae, image, prompt, negative,
+                    steps, cfg, seed, width, height, length, lora=None,
+                    lora_strength=1.0):
+        """Wan 2.2 I2V: two experts over one latent, high noise then low."""
+        if not self.i2v:
+            raise RuntimeError("WanImageToVideo node is not available")
+        if not (high and low and clip and vae):
+            raise RuntimeError("need both Wan experts, the umt5 encoder and a vae")
+
+        types = self.enum_for("CLIPLoader", "type")
+        wan = next((t for t in types if "wan" in t.lower()), "wan")
+        g = {
+            "uh": {"class_type": "UNETLoader",
+                   "inputs": {"unet_name": high, "weight_dtype": "default"}},
+            "ul": {"class_type": "UNETLoader",
+                   "inputs": {"unet_name": low, "weight_dtype": "default"}},
+            "cl": {"class_type": "CLIPLoader",
+                   "inputs": {"clip_name": clip, "type": wan}},
+            "va": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
+            "im": {"class_type": "LoadImage", "inputs": {"image": image}},
+        }
+        MH, ML, C = ["uh", 0], ["ul", 0], ["cl", 0]
+        if lora:
+            # Both experts have to carry it, or the halves disagree halfway
+            # through the same clip.
+            g["lh"] = {"class_type": "LoraLoader", "inputs": {
+                "model": MH, "clip": C, "lora_name": lora,
+                "strength_model": lora_strength, "strength_clip": lora_strength}}
+            g["ll"] = {"class_type": "LoraLoader", "inputs": {
+                "model": ML, "clip": C, "lora_name": lora,
+                "strength_model": lora_strength, "strength_clip": 1.0}}
+            MH, ML, C = ["lh", 0], ["ll", 0], ["lh", 1]
+
+        g["po"] = {"class_type": "CLIPTextEncode",
+                   "inputs": {"clip": C, "text": prompt}}
+        g["ne"] = {"class_type": "CLIPTextEncode",
+                   "inputs": {"clip": C, "text": negative}}
+        g["wv"] = {"class_type": self.i2v, "inputs": {
+            "positive": ["po", 0], "negative": ["ne", 0], "vae": ["va", 0],
+            "width": width, "height": height, "length": length,
+            "batch_size": 1, "start_image": ["im", 0]}}
+
+        half = max(1, steps // 2)
+        g["k1"] = {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": MH, "add_noise": "enable", "noise_seed": seed,
+            "steps": steps, "cfg": cfg, "sampler_name": "euler",
+            "scheduler": "simple", "positive": ["wv", 0], "negative": ["wv", 1],
+            "latent_image": ["wv", 2], "start_at_step": 0,
+            "end_at_step": half, "return_with_leftover_noise": "enable"}}
+        g["k2"] = {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": ML, "add_noise": "disable", "noise_seed": seed,
+            "steps": steps, "cfg": cfg, "sampler_name": "euler",
+            "scheduler": "simple", "positive": ["wv", 0], "negative": ["wv", 1],
+            "latent_image": ["k1", 0], "start_at_step": half,
+            "end_at_step": 10000, "return_with_leftover_noise": "disable"}}
+        g["de"] = {"class_type": "VAEDecode",
+                   "inputs": {"samples": ["k2", 0], "vae": ["va", 0]}}
+
+        # Which video writer exists moves between releases; frames are the
+        # fallback, and beat failing outright.
+        if self.video_saver == "SaveWEBM":
+            g["sv"] = {"class_type": "SaveWEBM", "inputs": {
+                "images": ["de", 0], "filename_prefix": "video",
+                "codec": "vp9", "fps": 16.0, "crf": 32.0}}
+        elif self.video_saver == "SaveAnimatedWEBP":
+            g["sv"] = {"class_type": "SaveAnimatedWEBP", "inputs": {
+                "images": ["de", 0], "filename_prefix": "video",
+                "fps": 16.0, "lossless": False, "quality": 85, "method": "default"}}
+        else:
+            g["sv"] = {"class_type": "SaveImage", "inputs": {
+                "images": ["de", 0], "filename_prefix": "video_frame"}}
+        return g
+
+
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Edit</title><style>
@@ -191,7 +271,10 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   <label>Instruction</label>
   <textarea name="prompt" placeholder="change the shirt to green">{last}</textarea>
 
-  <label>Model</label>
+  <label>What to do</label>
+  <select name="mode">{modes}</select>
+
+  <label>Model (image editing only)</label>
   <select name="model">{models}</select>
 
   <label>LoRA (optional)</label>
@@ -203,8 +286,13 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Steps</label><input type="number" name="steps" value="{steps}" min="1" max="60"></div>
     <div><label>CFG</label><input type="text" name="cfg" value="{cfg}"></div>
   </div>
-  <p class="note">The merged AIO wants 4 steps and CFG 1. The separate
-  bf16 model wants about 20 steps and CFG 3.</p>
+  <div class="row">
+    <div><label>Frames (video)</label><input type="number" name="length" value="{length}" min="9" max="161"></div>
+    <div><label>Size</label><input type="text" name="size" value="{size}"></div>
+  </div>
+  <p class="note">Editing: the merged AIO wants 4 steps and CFG 1; the
+  separate bf16 wants 20 and CFG 3. Video: 20 steps, CFG 3.5, 49 frames
+  (about 3s). Identity holds over short clips and drifts over long ones.</p>
   <button type="submit">Run</button>
 </form>
 
@@ -275,13 +363,23 @@ class H(BaseHTTPRequestHandler):
         o = self.graph.info
         def enum(node, field):
             return self.graph.enum_for(node, field)
-        return {"lora": enum("LoraLoader", "lora_name"),
+        unets = enum("UNETLoader", "unet_name")
+        return {"wan_high": [u for u in unets if "wan" in u.lower() and "high" in u.lower()],
+                "wan_low": [u for u in unets if "wan" in u.lower() and "low" in u.lower()],
+                "wan_clip": [c for c in enum("CLIPLoader", "clip_name") if "umt5" in c.lower()],
+                "wan_vae": [v for v in enum("VAELoader", "vae_name") if "wan" in v.lower()],
+                "lora": enum("LoraLoader", "lora_name"),
                 "ckpt": enum("CheckpointLoaderSimple", "ckpt_name"),
                 "unet": enum("UNETLoader", "unet_name"),
                 "clip": enum("CLIPLoader", "clip_name"),
                 "vae": enum("VAELoader", "vae_name")}
 
-    def render(self, msg="", steps=4, cfg="1.0", lora="", lstr="1.0"):
+    def video_ready(self, m):
+        return bool(self.graph.i2v and m["wan_high"] and m["wan_low"]
+                    and m["wan_clip"] and m["wan_vae"])
+
+    def render(self, msg="", steps=4, cfg="1.0", lora="", lstr="1.0",
+               mode="image", length=49, size="832x480"):
         m = self.models()
         opts = []
         for c in m["ckpt"]:
@@ -297,6 +395,17 @@ class H(BaseHTTPRequestHandler):
             '<option value="{0}"{2}>{1}</option>'.format(
                 html.escape(l), html.escape(l), " selected" if l == lora else "")
             for l in m["lora"])
+        vsel = " selected" if mode == "video" else ""
+        if self.video_ready(m):
+            modes = ('<option value="image"{0}>edit an image</option>'
+                     '<option value="video"{1}>animate an image (Wan 2.2)</option>'
+                     .format("" if vsel else " selected", vsel))
+        else:
+            modes = '<option value="image" selected>edit an image</option>'
+            if self.graph.i2v:
+                modes += '<option value="" disabled>video: models not installed</option>'
+            else:
+                modes += '<option value="" disabled>video: WanImageToVideo node missing</option>'
         choices = "".join(
             '<option value="{0}">{1}</option>'.format(html.escape(f), html.escape(f))
             for f in self.listing(self.indir)) or "<option value=''>(none)</option>"
@@ -311,6 +420,7 @@ class H(BaseHTTPRequestHandler):
         body = PAGE.format(status=html.escape(status), msg=msg, choices=choices,
                            models="".join(opts) or "<option value=''>(no Qwen edit model installed)</option>",
                            loras=loras, lstr=html.escape(str(lstr)),
+                           modes=modes, length=length, size=html.escape(size),
                            outs=outs, last=html.escape(self.last_prompt),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
         self.send_response(200)
@@ -378,15 +488,58 @@ class H(BaseHTTPRequestHandler):
             steps = max(1, min(60, int(fields.get("steps") or 4)))
             cfg = float(fields.get("cfg") or 1.0)
             lstr = max(0.0, min(2.0, float(fields.get("lora_strength") or 1.0)))
+            length = max(9, min(161, int(fields.get("length") or 49)))
+            w, _, h = (fields.get("size") or "832x480").lower().partition("x")
+            width, height = int(w), int(h)
         except ValueError:
             return self.render('<p class="err">steps, CFG and strength must be numbers</p>')
         lora = fields.get("lora") or None
-        if lora and lora not in self.models()["lora"]:
-            return self.render('<p class="err">no such LoRA</p>')
+        mode = "video" if fields.get("mode") == "video" else "image"
+        size = "{}x{}".format(width, height)
+        keep = dict(steps=steps, cfg=cfg, lora=lora or "", lstr=lstr,
+                    mode=mode, length=length, size=size)
+        mm = self.models()
+        if lora and lora not in mm["lora"]:
+            return self.render('<p class="err">no such LoRA</p>', **keep)
+
+        if mode == "video":
+            if not self.video_ready(mm):
+                return self.render('<p class="err">video is not set up on this '
+                                   'box - run add-wan-video.sh</p>', **keep)
+            # Wan wants both dimensions on a multiple of 16, and the frame
+            # count on 4n+1; ComfyUI errors out unhelpfully otherwise.
+            width, height = (width // 16) * 16, (height // 16) * 16
+            length = ((length - 1) // 4) * 4 + 1
+            try:
+                g = self.graph.build_video(
+                    high=mm["wan_high"][0], low=mm["wan_low"][0],
+                    clip=mm["wan_clip"][0], vae=mm["wan_vae"][0],
+                    image=image, prompt=prompt,
+                    negative="static, still, blurry, distorted",
+                    steps=steps, cfg=cfg,
+                    seed=int(time.time() * 1000) % 2**31,
+                    width=width, height=height, length=length,
+                    lora=lora, lora_strength=lstr)
+            except Exception as e:
+                return self.render('<p class="err">could not build the video '
+                                   'graph: {}</p>'.format(html.escape(str(e))), **keep)
+            try:
+                r = api(self.comfy, "/prompt", {"prompt": g})
+            except urllib.error.HTTPError as e:
+                return self.render('<p class="err">ComfyUI rejected it:</p>'
+                                   '<pre class="note" style="white-space:pre-wrap">{}</pre>'
+                                   .format(html.escape(e.read().decode("utf-8", "replace")[:800])),
+                                   **keep)
+            except Exception as e:
+                return self.render('<p class="err">{}</p>'.format(html.escape(str(e))), **keep)
+            return self.render('<p class="ok">queued {} frames at {}x{} ({}). '
+                               'Video takes minutes, not seconds - reload in a '
+                               'few.</p>'.format(length, width, height,
+                                                 html.escape(str(r.get("prompt_id", "?")))),
+                               **keep)
 
         sel = fields.get("model", "")
         kind, _, name = sel.partition(":")
-        mm = self.models()
         try:
             if kind == "ckpt":
                 g = self.graph.build(mode="checkpoint", ckpt=name, unet=None,
@@ -399,11 +552,10 @@ class H(BaseHTTPRequestHandler):
                 return self.render('<p class="err">{} is not a Qwen edit model. '
                                    'This form only drives Qwen editing; Klein '
                                    'lives in Forge on 7860.</p>'
-                                   .format(html.escape(name)), steps, cfg,
-                                   lora or "", lstr)
+                                   .format(html.escape(name)), **keep)
             else:
                 if not (mm["clip"] and mm["vae"]):
-                    return self.render('<p class="err">no clip or vae installed</p>')
+                    return self.render('<p class="err">no clip or vae installed</p>', **keep)
                 g = self.graph.build(mode="separate", unet=name,
                                      clip=next((c for c in mm["clip"] if "2.5_vl" in c or "2.5-vl" in c), mm["clip"][0]),
                                      vae=next((v for v in mm["vae"] if "qwen" in v.lower()), mm["vae"][0]),
@@ -414,7 +566,7 @@ class H(BaseHTTPRequestHandler):
                                      lora=lora, lora_strength=lstr)
         except Exception as e:
             return self.render('<p class="err">could not build the graph: {}</p>'
-                               .format(html.escape(str(e))))
+                               .format(html.escape(str(e))), **keep)
 
         try:
             r = api(self.comfy, "/prompt", {"prompt": g})
@@ -422,14 +574,14 @@ class H(BaseHTTPRequestHandler):
             detail = e.read().decode("utf-8", "replace")[:800]
             return self.render('<p class="err">ComfyUI rejected it:</p>'
                                '<pre class="note" style="white-space:pre-wrap">{}</pre>'
-                               .format(html.escape(detail)), steps, cfg, lora or "", lstr)
+                               .format(html.escape(detail)), **keep)
         except Exception as e:
             return self.render('<p class="err">{}</p>'.format(html.escape(str(e))),
-                               steps, cfg, lora or "", lstr)
+                               **keep)
 
         self.render('<p class="ok">queued ({}). Reload in a few seconds — it '
                     'appears under Results.</p>'.format(html.escape(str(r.get("prompt_id", "?")))),
-                    steps, cfg, lora or "", lstr)
+                    **keep)
 
 
 def main():

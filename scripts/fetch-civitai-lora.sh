@@ -1,80 +1,122 @@
 #!/usr/bin/env bash
 #
-# Fetch Civitai LoRAs into Forge's models/Lora by model-version id.
+# Search Civitai and pull LoRAs into ComfyUI (or Forge).
 #
-#   bash lora.sh 2584502 2609505 ...
+#   bash l.sh wan nsfw          search - prints names, ids and base models
+#   bash l.sh 3071631 2609505   download those version ids
+#   DEST=~/sd-webui-forge-neo/models/Lora bash l.sh 123   somewhere else
 #
-# The ids are VERSION ids, not model ids: on a Civitai model page they are the
-# number in ?modelVersionId=... for the version you actually want. A model id
-# alone is ambiguous once a LoRA has more than one version, and picking the
-# wrong one is how you end up with a 4B adapter that will not load on 9B.
+# Searching first matters because a LoRA is tied to one base model. A Klein
+# adapter will not load on Qwen, a Wan 2.1 one will not load on Wan 2.2, and
+# the failure looks like a broken pipeline rather than a wrong file. The
+# search prints the base model next to every hit so the choice is made
+# before the download rather than after.
 #
-# Needs a Civitai API key in ~/.civitai-token (civitai.com -> account -> API
-# keys). Downloads are refused without one.
+# Needs an API key in ~/.civitai-token (civitai.com -> account -> API keys).
 
 set -uo pipefail
 
-LORA_DIR="$HOME/sd-webui-forge-neo/models/Lora"
 TOKEN_FILE="$HOME/.civitai-token"
 LOG="$HOME/lora-fetch.log"
-exec > >(tee -a "$LOG") 2>&1
 
-[ $# -gt 0 ] || { echo "usage: bash $0 <versionId> [versionId ...]"; exit 2; }
+if [ -n "${DEST:-}" ]; then
+  LORA_DIR="$DEST"
+elif [ -d "$HOME/ComfyUI/models/loras" ]; then
+  LORA_DIR="$HOME/ComfyUI/models/loras"
+elif [ -d "$HOME/sd-webui-forge-neo/models/Lora" ]; then
+  LORA_DIR="$HOME/sd-webui-forge-neo/models/Lora"
+else
+  echo "no loras folder found; set DEST=..."; exit 2
+fi
+
+[ $# -gt 0 ] || { echo "usage: bash $0 <search words...|versionId...>"; exit 2; }
 
 if [ ! -s "$TOKEN_FILE" ]; then
   cat <<EOF
 No Civitai token at $TOKEN_FILE.
 
-Get one at https://civitai.com/user/account (API Keys), then run exactly:
+Run exactly this one line and paste ONLY the key at the prompt:
 
   read -p "key: " K && echo -n "\$K" > $TOKEN_FILE && chmod 600 $TOKEN_FILE && echo "stored \${#K} chars"
-
-and run this script again.
 EOF
   exit 2
 fi
-
 TOKEN=$(tr -d '[:space:]' < "$TOKEN_FILE")
 mkdir -p "$LORA_DIR"
 
+# All-numeric arguments mean download; anything else is a search.
+NUMERIC=1
+for a in "$@"; do
+  case "$a" in ''|*[!0-9]*) NUMERIC=0;; esac
+done
+
+if [ "$NUMERIC" = "0" ]; then
+  Q=$(printf '%s ' "$@" | sed 's/ *$//')
+  printf '\n=== searching Civitai for "%s" ===\n\n' "$Q"
+  curl -fsSL -H "Authorization: Bearer $TOKEN" -G \
+    --data-urlencode "query=$Q" --data-urlencode "types=LORA" \
+    --data-urlencode "limit=15" --data-urlencode "nsfw=true" \
+    "https://civitai.com/api/v1/models" \
+  | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    sys.exit(f"could not read the reply: {e}")
+items = d.get("items", [])
+if not items:
+    sys.exit("nothing found")
+for m in items:
+    name = m.get("name", "?")[:44]
+    for v in (m.get("versions") or m.get("modelVersions") or [])[:2]:
+        # Pulled out of the format call: a backslash inside an f-string
+        # expression is a syntax error before Python 3.12, and this has to
+        # run on whatever the box happens to ship.
+        vid = v.get("id")
+        vname = (v.get("name") or "")[:18]
+        base = v.get("baseModel", "?")
+        files = [f for f in v.get("files", []) if f.get("type") == "Model"]
+        mb = (files[0].get("sizeKB", 0) / 1024) if files else 0
+        print("%-9s %-24s %6.0fMB  %s / %s" % (vid, base, mb, name, vname))
+' || echo "search failed"
+  cat <<EOF
+
+Pick the ids whose base model matches what you run:
+  Klein images   Flux.2 Klein 9B
+  Qwen editing   Qwen Image Edit / Qwen-Image
+  Wan video      Wan Video 2.2 (2.1 adapters do not load on 2.2)
+
+Then:  bash $0 <id> <id> ...
+EOF
+  exit 0
+fi
+
+exec > >(tee -a "$LOG") 2>&1
 for VID in "$@"; do
   printf '\n=== version %s ===\n' "$VID"
-
-  # Ask the API what this version is before pulling it: the filename, and more
-  # importantly the base model, so a 4B or FLUX.1 adapter is caught here rather
-  # than by a loader error hours later.
   META=$(curl -fsSL -H "Authorization: Bearer $TOKEN" \
     "https://civitai.com/api/v1/model-versions/$VID" 2>/dev/null)
   if [ -z "$META" ]; then
-    echo "  ! cannot read metadata (bad id, or token lacks access)"
+    echo "  ! cannot read metadata (bad id, or the token lacks access)"
     continue
   fi
 
-  BASE=$(printf '%s' "$META" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("baseModel","?"))' 2>/dev/null)
-  NAME=$(printf '%s' "$META" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("model",{}).get("name","?"),"/",d.get("name","?"))' 2>/dev/null)
-  FILE=$(printf '%s' "$META" | python3 -c '
+  read -r BASE NAME FILE <<EOF
+$(printf '%s' "$META" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
 fs = [f for f in d.get("files", []) if f.get("type") == "Model"] or d.get("files", [])
-print(fs[0]["name"] if fs else "")' 2>/dev/null)
-
-  echo "  $NAME"
-  echo "  base model: $BASE"
-  [ -n "$FILE" ] && echo "  file: $FILE"
-
-  case "$BASE" in
-    *9B*|*9b*) ;;
-    *Klein*|*klein*)
-      echo "  !! says Klein but not 9B - a 4B adapter will not load on your 9B." ;;
-    *)
-      echo "  !! base model is not Klein 9B; Forge will refuse or produce noise." ;;
-  esac
+print(d.get("baseModel","?").replace(" ","_"),
+      (d.get("model",{}).get("name","?"))[:40].replace(" ","_"),
+      fs[0]["name"] if fs else "")
+' 2>/dev/null)
+EOF
+  echo "  ${NAME//_/ }"
+  echo "  base model: ${BASE//_/ }"
+  [ -n "${FILE:-}" ] && echo "  file: $FILE"
 
   OUT="$LORA_DIR/${FILE:-civitai-$VID.safetensors}"
-  if [ -s "$OUT" ]; then
-    echo "  already have $(basename "$OUT")"
-    continue
-  fi
+  if [ -s "$OUT" ]; then echo "  already have it"; continue; fi
 
   echo "  downloading..."
   if curl -fL --progress-bar -H "Authorization: Bearer $TOKEN" \
@@ -91,7 +133,8 @@ printf '\n=== in %s ===\n' "$LORA_DIR"
 ls -la "$LORA_DIR" 2>/dev/null | grep -v '^total' || echo "(empty)"
 cat <<'EOF'
 
-Restart Forge so it rescans, or press the refresh arrow next to the Lora tab:
-  tmux kill-session -t =forge
-then re-run the setup script, which relaunches it.
+ComfyUI rescans its folders per request, so the edit form picks these up
+on its next restart:
+
+  bash ~/e.sh
 EOF

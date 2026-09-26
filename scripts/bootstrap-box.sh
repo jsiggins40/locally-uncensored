@@ -2,8 +2,9 @@
 #
 # A whole box from nothing, in one command.
 #
-#   bash b.sh              everything
+#   bash b.sh               everything
 #   SKIP_COMFY=1 bash b.sh  Forge and Klein only
+#   SKIP_QWEN=1 bash b.sh   no Qwen editor (saves 28GB)
 #
 # Runs, in order: Forge Neo with Klein and its uncensored encoder; ComfyUI
 # with the models symlinked across; the photo inbox; the edit form. Then
@@ -75,7 +76,7 @@ wait_for() {  # wait_for <tmux-session> <minutes>
   return 0
 }
 
-say "1/4  Forge Neo, Klein, uncensored encoder"
+say "1/5  Forge Neo, Klein, uncensored encoder"
 fetch setup-forge-neo-klein.sh
 bash "$HOME/setup-forge-neo-klein.sh" || die "forge setup"
 wait_for setup 60
@@ -83,24 +84,48 @@ grep -q 'text encoder is the STOCK one' "$HOME/forge-setup.log" 2>/dev/null \
   && echo "   !! the uncensored encoder did not download; prompts will be refused"
 
 if [ "${SKIP_COMFY:-}" != "1" ]; then
-  say "2/4  ComfyUI"
+  say "2/5  ComfyUI"
   fetch add-comfyui.sh
   bash "$HOME/add-comfyui.sh" || echo "   (comfy setup returned an error; continuing)"
   wait_for comfysetup 40
 else
-  say "2/4  ComfyUI - skipped"
+  say "2/5  ComfyUI - skipped"
 fi
 
-say "3/4  photo inbox"
+if [ "${SKIP_COMFY:-}" != "1" ] && [ "${SKIP_QWEN:-}" != "1" ]; then
+  say "3/5  Qwen image editor"
+  # One merged file carrying model, encoder, VAE and the Lightning
+  # accelerators. Forge Neo could not drive it; ComfyUI is what it is built
+  # for. v19 is the version its author rates best for edit consistency.
+  CK="$HOME/ComfyUI/models/checkpoints"
+  AIO="$CK/qwen-image-edit-rapid-aio-nsfw-v19.safetensors"
+  if [ -s "$AIO" ]; then
+    echo "  already have it"
+  else
+    mkdir -p "$CK"
+    if hf download Phr00t/Qwen-Image-Edit-Rapid-AIO \
+         v19/Qwen-Rapid-AIO-NSFW-v19.safetensors --local-dir "$CK"; then
+      # ComfyUI reads the checkpoints folder flat, and the name says what
+      # the file is - the upstream one does not.
+      mv "$CK/v19/Qwen-Rapid-AIO-NSFW-v19.safetensors" "$AIO" \
+        && rmdir "$CK/v19" 2>/dev/null
+      echo "  -> $(basename "$AIO") ($(du -h "$AIO" | cut -f1))"
+    else
+      echo "  !! could not fetch it; Klein is unaffected"
+    fi
+  fi
+fi
+
+say "4/5  photo inbox"
 fetch start-photo-inbox.sh
 bash "$HOME/start-photo-inbox.sh" || echo "   (inbox failed; continuing)"
 
 if [ "${SKIP_COMFY:-}" != "1" ] && tmux has-session -t =comfy 2>/dev/null; then
-  say "4/4  edit form"
+  say "5/5  edit form"
   fetch start-edit-form.sh
   bash "$HOME/start-edit-form.sh" || echo "   (edit form failed; continuing)"
 else
-  say "4/4  edit form - skipped (needs ComfyUI running)"
+  say "5/5  edit form - skipped (needs ComfyUI running)"
 fi
 
 # ------------------------------------------------------------------ report

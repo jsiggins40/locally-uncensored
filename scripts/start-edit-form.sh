@@ -72,7 +72,7 @@ class Graph:
             ["TextEncodeQwenImageEditPlus", "TextEncodeQwenImageEdit"])
         for n in ("UNETLoader", "CLIPLoader", "VAELoader", "VAEEncode",
                   "VAEDecode", "KSampler", "LoadImage", "SaveImage",
-                  "CheckpointLoaderSimple"):
+                  "CheckpointLoaderSimple", "LoraLoader"):
             if n not in info:
                 self.notes.append(f"missing node: {n}")
 
@@ -105,7 +105,7 @@ class Graph:
         return None
 
     def build(self, *, mode, unet, clip, vae, ckpt, image, prompt,
-              steps, cfg, seed, sampler, scheduler):
+              steps, cfg, seed, sampler, scheduler, lora=None, lora_strength=1.0):
         if not self.encoder:
             raise RuntimeError("no Qwen edit encoder node available")
         g = {}
@@ -123,6 +123,15 @@ class Graph:
                        "inputs": {"clip_name": clip, "type": qwen}}
             g["va"] = {"class_type": "VAELoader", "inputs": {"vae_name": vae}}
             M, C, V = ["un", 0], ["cl", 0], ["va", 0]
+
+        # A LoRA sits between the loaders and everything downstream: the
+        # sampler takes its model, the encoder its clip. Inserting it here
+        # means the rest of the graph is written once either way.
+        if lora:
+            g["lo"] = {"class_type": "LoraLoader", "inputs": {
+                "model": M, "clip": C, "lora_name": lora,
+                "strength_model": lora_strength, "strength_clip": lora_strength}}
+            M, C = ["lo", 0], ["lo", 1]
 
         g["im"] = {"class_type": "LoadImage", "inputs": {"image": image}}
         imgf = self.image_field()
@@ -184,6 +193,11 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
 
   <label>Model</label>
   <select name="model">{models}</select>
+
+  <label>LoRA (optional)</label>
+  <select name="lora">{loras}</select>
+  <label>LoRA strength</label>
+  <input type="text" name="lora_strength" value="{lstr}">
 
   <div class="row">
     <div><label>Steps</label><input type="number" name="steps" value="{steps}" min="1" max="60"></div>
@@ -261,12 +275,13 @@ class H(BaseHTTPRequestHandler):
         o = self.graph.info
         def enum(node, field):
             return self.graph.enum_for(node, field)
-        return {"ckpt": enum("CheckpointLoaderSimple", "ckpt_name"),
+        return {"lora": enum("LoraLoader", "lora_name"),
+                "ckpt": enum("CheckpointLoaderSimple", "ckpt_name"),
                 "unet": enum("UNETLoader", "unet_name"),
                 "clip": enum("CLIPLoader", "clip_name"),
                 "vae": enum("VAELoader", "vae_name")}
 
-    def render(self, msg="", steps=4, cfg="1.0"):
+    def render(self, msg="", steps=4, cfg="1.0", lora="", lstr="1.0"):
         m = self.models()
         opts = []
         for c in m["ckpt"]:
@@ -275,6 +290,10 @@ class H(BaseHTTPRequestHandler):
         for u in m["unet"]:
             opts.append('<option value="unet:{0}">{1} (separate, 20 steps)</option>'
                         .format(html.escape(u), html.escape(u)))
+        loras = '<option value="">(none)</option>' + "".join(
+            '<option value="{0}"{2}>{1}</option>'.format(
+                html.escape(l), html.escape(l), " selected" if l == lora else "")
+            for l in m["lora"])
         choices = "".join(
             '<option value="{0}">{1}</option>'.format(html.escape(f), html.escape(f))
             for f in self.listing(self.indir)) or "<option value=''>(none)</option>"
@@ -288,6 +307,7 @@ class H(BaseHTTPRequestHandler):
             status += " · " + "; ".join(self.graph.notes)
         body = PAGE.format(status=html.escape(status), msg=msg, choices=choices,
                            models="".join(opts) or "<option>(no models)</option>",
+                           loras=loras, lstr=html.escape(str(lstr)),
                            outs=outs, last=html.escape(self.last_prompt),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
         self.send_response(200)
@@ -354,8 +374,12 @@ class H(BaseHTTPRequestHandler):
         try:
             steps = max(1, min(60, int(fields.get("steps") or 4)))
             cfg = float(fields.get("cfg") or 1.0)
+            lstr = max(0.0, min(2.0, float(fields.get("lora_strength") or 1.0)))
         except ValueError:
-            return self.render('<p class="err">steps and CFG must be numbers</p>')
+            return self.render('<p class="err">steps, CFG and strength must be numbers</p>')
+        lora = fields.get("lora") or None
+        if lora and lora not in self.models()["lora"]:
+            return self.render('<p class="err">no such LoRA</p>')
 
         sel = fields.get("model", "")
         kind, _, name = sel.partition(":")
@@ -366,7 +390,8 @@ class H(BaseHTTPRequestHandler):
                                      clip=None, vae=None, image=image,
                                      prompt=prompt, steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
-                                     sampler="euler", scheduler="simple")
+                                     sampler="euler", scheduler="simple",
+                                     lora=lora, lora_strength=lstr)
             else:
                 if not (mm["clip"] and mm["vae"]):
                     return self.render('<p class="err">no clip or vae installed</p>')
@@ -376,7 +401,8 @@ class H(BaseHTTPRequestHandler):
                                      ckpt=None, image=image, prompt=prompt,
                                      steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
-                                     sampler="euler", scheduler="simple")
+                                     sampler="euler", scheduler="simple",
+                                     lora=lora, lora_strength=lstr)
         except Exception as e:
             return self.render('<p class="err">could not build the graph: {}</p>'
                                .format(html.escape(str(e))))
@@ -387,14 +413,14 @@ class H(BaseHTTPRequestHandler):
             detail = e.read().decode("utf-8", "replace")[:800]
             return self.render('<p class="err">ComfyUI rejected it:</p>'
                                '<pre class="note" style="white-space:pre-wrap">{}</pre>'
-                               .format(html.escape(detail)), steps, cfg)
+                               .format(html.escape(detail)), steps, cfg, lora or "", lstr)
         except Exception as e:
             return self.render('<p class="err">{}</p>'.format(html.escape(str(e))),
-                               steps, cfg)
+                               steps, cfg, lora or "", lstr)
 
         self.render('<p class="ok">queued ({}). Reload in a few seconds — it '
                     'appears under Results.</p>'.format(html.escape(str(r.get("prompt_id", "?")))),
-                    steps, cfg)
+                    steps, cfg, lora or "", lstr)
 
 
 def main():

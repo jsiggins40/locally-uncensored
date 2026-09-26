@@ -114,6 +114,23 @@ if [ "${SKIP_COMFY:-}" != "1" ] && [ "${SKIP_QWEN:-}" != "1" ]; then
       echo "  !! could not fetch it; Klein is unaffected"
     fi
   fi
+
+  # An NSFW LoRA for the Plus-series edit models, applied on top rather
+  # than merged in - so its strength is a dial instead of a decision
+  # someone else made.
+  LORAS="$HOME/ComfyUI/models/loras"
+  mkdir -p "$LORAS"
+  if ls "$LORAS"/*nsfw*.safetensors >/dev/null 2>&1; then
+    echo "  nsfw lora already there"
+  elif hf download ScottzillaSystems/qwen-image-edit-plus-nsfw-lora \
+         --local-dir "$LORAS" --include "*.safetensors" >/dev/null 2>&1; then
+    # Downloads can arrive nested; ComfyUI reads the folder flat.
+    find "$LORAS" -mindepth 2 -name '*.safetensors' -exec mv -n {} "$LORAS"/ \; 2>/dev/null
+    find "$LORAS" -mindepth 1 -type d -empty -delete 2>/dev/null
+    echo "  + $(ls "$LORAS" | tr '\n' ' ')"
+  else
+    echo "  !! could not fetch the nsfw lora"
+  fi
 fi
 
 say "4/5  photo inbox"

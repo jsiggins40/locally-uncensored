@@ -62,10 +62,23 @@ if command -v ollama >/dev/null; then
 else
   mkdir -p "$OLLAMA_DIR"
   echo "  downloading (about 1.5GB, it bundles the CUDA runtime)"
-  curl -fL# https://ollama.com/download/ollama-linux-amd64.tgz -o /tmp/ollama.tgz \
-    || die "could not download ollama"
+  # Straight from the release, not from ollama.com/download - that path
+  # 404s. The tag is resolved from the "latest" redirect where that works,
+  # with known-good versions behind it.
+  LATEST=$(curl -sL -o /dev/null -w '%{url_effective}' \
+           https://github.com/ollama/ollama/releases/latest 2>/dev/null)
+  LATEST=${LATEST##*/}
+  GOT=""
+  for v in "$LATEST" v0.13.0 v0.12.6 v0.11.4; do
+    case "$v" in v*) ;; *) continue;; esac
+    url="https://github.com/ollama/ollama/releases/download/$v/ollama-linux-amd64.tgz"
+    echo "  trying $v"
+    if curl -fL# "$url" -o /tmp/ollama.tgz; then GOT="$v"; break; fi
+  done
+  [ -n "$GOT" ] || die "could not download ollama from any release"
   tar -C "$OLLAMA_DIR" -xzf /tmp/ollama.tgz || die "could not unpack ollama"
   rm -f /tmp/ollama.tgz
+  echo "  $GOT"
   command -v ollama >/dev/null || die "ollama is not on PATH after unpacking"
   echo "  -> $(command -v ollama)"
 fi

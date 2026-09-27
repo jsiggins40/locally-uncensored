@@ -466,13 +466,25 @@ class Graph:
 
     def image_field(self):
         """Whether the encoder wants `image` or `image1`."""
-        fields = self.inputs_of(self.encoder) if self.encoder else []
-        for cand in ("image1", "image"):
-            if cand in fields:
-                return cand
-        return None
+        return (self.image_fields() or [None])[0]
 
-    def build(self, *, mode, unet, clip, vae, ckpt, image, prompt,
+    def image_fields(self):
+        """Every reference image slot the encoder has, in order.
+
+        The Plus encoder takes image1, image2, image3 - that is the whole
+        point of it, and it is what lets one person from one photo and
+        another from a second end up in the same picture. The older
+        encoder has a single `image`, so the count is read off the node
+        rather than assumed.
+        """
+        fields = self.inputs_of(self.encoder) if self.encoder else []
+        numbered = sorted(f for f in fields
+                          if re.fullmatch(r"image[1-9]", f or ""))
+        if numbered:
+            return numbered
+        return ["image"] if "image" in fields else []
+
+    def build(self, *, mode, unet, clip, vae, ckpt, images, prompt,
               steps, cfg, seed, sampler, scheduler, loras=()):
         if not self.encoder:
             raise RuntimeError("no Qwen edit encoder node available")
@@ -505,21 +517,29 @@ class Graph:
                 "strength_model": strength, "strength_clip": strength}}
             M, C = [k, 0], [k, 1]
 
-        g["im"] = {"class_type": "LoadImage", "inputs": {"image": image}}
-        imgf = self.image_field()
+        images = [i for i in (images or []) if i]
+        if not images:
+            raise RuntimeError("no input image")
+        slots = self.image_fields()
+        for n, name in enumerate(images[:len(slots)] or images[:1]):
+            g["im%d" % n] = {"class_type": "LoadImage",
+                             "inputs": {"image": name}}
 
         def enc(text):
             ins = {"clip": C, "prompt": text}
             if "vae" in self.inputs_of(self.encoder):
                 ins["vae"] = V
-            if imgf:
-                ins[imgf] = ["im", 0]
+            for n, field in enumerate(slots):
+                if n < len(images):
+                    ins[field] = ["im%d" % n, 0]
             return {"class_type": self.encoder, "inputs": ins}
 
         g["po"] = enc(prompt)
         g["ne"] = enc("")
+        # The first image is what the latent is encoded from, so it is
+        # also what sets the size of the output.
         g["la"] = {"class_type": "VAEEncode",
-                   "inputs": {"pixels": ["im", 0], "vae": V}}
+                   "inputs": {"pixels": ["im0", 0], "vae": V}}
         g["ks"] = {"class_type": "KSampler", "inputs": {
             "model": M, "positive": ["po", 0], "negative": ["ne", 0],
             "latent_image": ["la", 0], "seed": seed, "steps": steps,
@@ -691,9 +711,13 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   <label>…or pick one already on the box</label>
   <select name="existing">{choices}</select>
 
-  <label>End frame (video only, optional)</label>
+  <label>{extra}</label>
   <input type="file" name="photo2" accept="image/*">
   <select name="existing2">{choices2}</select>
+
+  <label>{third}</label>
+  <input type="file" name="photo3" accept="image/*">
+  <select name="existing3">{choices3}</select>
 
   <label>Instruction</label>
   <textarea name="prompt" placeholder="change the shirt to green">{last}</textarea>
@@ -722,7 +746,11 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Frames (video)</label><input type="number" name="length" value="{length}" min="9" max="161"></div>
     <div><label>Size</label><input type="text" name="size" value="{size}"></div>
   </div>
-  <p class="note">Editing: the merged AIO wants 4 steps and CFG 1; the
+  <p class="note">To put two people in one picture, pick one in each
+  image slot and say which is which in the instruction &mdash; &ldquo;the
+  man from image 1 and the woman from image 2, sitting at a table&rdquo;.
+  The first image sets the size of the output.<br><br>
+  Editing: the merged AIO wants 4 steps and CFG 1; the
   separate bf16 wants 20 and CFG 3. Video: 20 steps, CFG 3.5, 81 frames
   (5s, the length Wan was trained on). Identity holds over short clips
   and drifts over long ones.<br><br>
@@ -824,7 +852,7 @@ class H(BaseHTTPRequestHandler):
     last = {"prompt": "", "model": "", "lora": "", "lstr": "1.0",
             "lora2": "", "lstr2": "1.0", "steps": "4", "cfg": "1.0",
             "mode": "image", "length": "81", "size": "832x480",
-            "existing": "", "existing2": ""}
+            "existing": "", "existing2": "", "existing3": ""}
 
     def log_message(self, f, *a):
         sys.stderr.write("%s %s\n" % (self.address_string(), f % a))
@@ -922,13 +950,24 @@ class H(BaseHTTPRequestHandler):
                 html.escape(f), html.escape(f),
                 " selected" if f == L["existing"] else "")
             for f in avail) or "<option value=''>(none)</option>"
-        choices2 = "<option value=''>(none - free motion)</option>" + "".join(
-            '<option value="{0}"{2}>{1}</option>'.format(
-                html.escape(f), html.escape(f),
-                " selected" if f == L["existing2"] else "")
-            for f in avail)
-        if not self.graph.can_end_frame():
-            choices2 = "<option value=''>(not supported by this ComfyUI)</option>"
+        def picker(chosen):
+            return "<option value=''>(none)</option>" + "".join(
+                '<option value="{0}"{2}>{1}</option>'.format(
+                    html.escape(f), html.escape(f),
+                    " selected" if f == chosen else "")
+                for f in avail)
+        choices2, choices3 = picker(L["existing2"]), picker(L["existing3"])
+        slots = len(self.graph.image_fields())
+        if slots >= 2:
+            extra = ("Second image &mdash; another person or object to bring "
+                     "in" + (", or the end frame for video"
+                             if self.graph.can_end_frame() else ""))
+            third = ("Third image" if slots >= 3
+                     else "Third image &mdash; this encoder only takes two")
+        else:
+            extra = ("Second image &mdash; end frame for video only; this "
+                     "encoder takes one image for editing")
+            third = "Third image &mdash; not supported by this encoder"
         outs = "".join(self.cells(self.listing(self.outdir))) \
             or '<p class="note">nothing yet</p>'
         status = "ComfyUI at {} · encoder {}".format(
@@ -942,7 +981,8 @@ class H(BaseHTTPRequestHandler):
                            loras=loras, lstr=html.escape(str(lstr)),
                            loras2=loras2, lstr2=html.escape(str(lstr2)),
                            modes=modes, length=length, size=html.escape(size),
-                           choices2=choices2,
+                           choices2=choices2, choices3=choices3,
+                           extra=extra, third=third,
                            outs=outs, last=html.escape(L["prompt"]),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
         self.send_response(200)
@@ -1144,9 +1184,12 @@ class H(BaseHTTPRequestHandler):
         H.last["length"] = fields.get("length", H.last["length"])
 
         image = stash("photo", "existing")
-        end_image = stash("photo2", "existing2")
+        image2 = stash("photo2", "existing2")
+        image3 = stash("photo3", "existing3")
+        end_image = image2          # in video mode the second one is the last frame
         H.last["existing"] = image or ""
-        H.last["existing2"] = end_image or ""
+        H.last["existing2"] = image2 or ""
+        H.last["existing3"] = image3 or ""
         if not image:
             return self.render('<p class="err">pick or upload a photo</p>')
 
@@ -1231,7 +1274,8 @@ class H(BaseHTTPRequestHandler):
         try:
             if kind == "ckpt":
                 g = self.graph.build(mode="checkpoint", ckpt=name, unet=None,
-                                     clip=None, vae=None, image=image,
+                                     clip=None, vae=None,
+                                     images=[image, image2, image3],
                                      prompt=prompt, steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
                                      sampler="euler", scheduler="simple",
@@ -1247,7 +1291,8 @@ class H(BaseHTTPRequestHandler):
                 g = self.graph.build(mode="separate", unet=name,
                                      clip=next((c for c in mm["clip"] if "2.5_vl" in c or "2.5-vl" in c), mm["clip"][0]),
                                      vae=next((v for v in mm["vae"] if "qwen" in v.lower()), mm["vae"][0]),
-                                     ckpt=None, image=image, prompt=prompt,
+                                     ckpt=None, prompt=prompt,
+                                     images=[image, image2, image3],
                                      steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
                                      sampler="euler", scheduler="simple",
@@ -1297,7 +1342,7 @@ def main():
     H.graph = Graph(api(H.comfy, "/object_info", timeout=120))
     print("  encoder:", H.graph.encoder)
     print("  its inputs:", H.graph.inputs_of(H.graph.encoder) if H.graph.encoder else "-")
-    print("  image field:", H.graph.image_field())
+    print("  image slots:", H.graph.image_fields() or "-")
     for n in H.graph.notes:
         print("  !!", n)
     try:

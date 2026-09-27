@@ -105,6 +105,7 @@ KINDS = {
         "makes money, and what it needs next.")], False),
     "website": ("Website", None, False),      # one shot, raw HTML
     "custom": ("Document", None, False),      # outline supplied by the user
+    "ask": ("Answer", None, False),           # one question, answered
 }
 
 SYSTEM = (
@@ -114,6 +115,29 @@ SYSTEM = (
     "do, and do not add closing remarks. Prefer concrete detail over "
     "adjectives. Where you use a figure the brief did not give you, mark "
     "it as an assumption in the text."
+)
+
+ASK_SYSTEM = (
+    "You are advising someone who runs a business. Answer the question put "
+    "to you, directly and in full. Do not open with a disclaimer. Do not "
+    "substitute 'consult a lawyer' for an answer - they know that, and they "
+    "are asking you. Do not hedge a clear answer into uselessness.\n\n"
+    "Follow these rules:\n"
+    "- Open by naming the jurisdiction your answer is for. If the question "
+    "turns on jurisdiction and none was given, say so and name the one you "
+    "are assuming.\n"
+    "- Name the specific statute, regulation or case where you know it. If "
+    "you are not certain of a name, a section number or a date, say you are "
+    "not certain. Never invent a citation to sound authoritative - a "
+    "plausible wrong reference is worse than no reference.\n"
+    "- Keep settled law apart from what is contested or turns on the facts.\n"
+    "- Where the answer changes with facts you were not given, say which "
+    "facts and which way.\n"
+    "- If a document was supplied, answer from its actual wording and quote "
+    "the clauses you are relying on.\n"
+    "- Finish with what to do next, concretely, and say plainly where a "
+    "real solicitor is genuinely needed rather than as a reflex.\n"
+    "Write in Markdown."
 )
 
 SITE_SYSTEM = (
@@ -270,6 +294,45 @@ def worker(cfg):
                 JOB.active = False
             return
 
+        if kind == "ask":
+            def chunk(p):
+                with JOB.lock:
+                    JOB.tail = (JOB.tail + p)[-400:]
+                    JOB.words += p.count(" ")
+            with JOB.lock:
+                JOB.current = "thinking it through"
+            ask = ""
+            if cfg["jurisdiction"]:
+                ask += "JURISDICTION\n%s\n\n" % cfg["jurisdiction"]
+            if brief:
+                ask += "BACKGROUND ON THE BUSINESS\n%s\n\n" % brief
+            if cfg["document"]:
+                ask += "THE DOCUMENT IN QUESTION\n%s\n\n" % cfg["document"]
+            ask += "THE QUESTION\n%s" % cfg["question"]
+            answer = strip_think(ollama_chat(base, model, ASK_SYSTEM, ask, chunk))
+            with JOB.lock:
+                JOB.sections.append((cfg["question"][:70], answer))
+                JOB.current = "saving"
+            md_path = os.path.join(outdir, stem + ".md")
+            with open(md_path, "w") as fh:
+                fh.write("---\ntitle: %s\ndate: %s\n---\n\n# Question\n\n%s\n\n"
+                         "# Answer\n\n%s\n" % (
+                             (cfg["question"][:60] or "Question").replace(":", " -"),
+                             time.strftime("%d %B %Y"), cfg["question"], answer))
+            try:
+                made = convert(outdir, stem, md_path,
+                               cfg["question"][:60] or "Answer", cfg["formats"])
+                note = ""
+            except Exception as e:
+                made = [("Markdown", os.path.basename(md_path))]
+                note = "the text is fine, but converting it failed: %s" % e
+            with JOB.lock:
+                JOB.files = made
+                JOB.note = note
+                JOB.current = ""
+                JOB.active = False
+            return
+
         outline = cfg["outline"]
         for heading, guidance in outline:
             with JOB.lock:
@@ -390,6 +453,15 @@ a.file{{display:block;padding:12px;margin-top:8px;border:1px solid #8884;
   <label>The brief &mdash; the more you put here, the less it invents</label>
   <textarea name="brief" placeholder="What the business does, who it sells to, what it charges, who else is in the market, what you already know about costs and revenue, where you are based, who is on the team.">{brief}</textarea>
 
+  <label>Your question (for &ldquo;Answer&rdquo;)</label>
+  <textarea name="question" style="min-height:80px" placeholder="Who owns the copyright in a site I build for a client if the contract is silent on it?">{question}</textarea>
+
+  <label>Jurisdiction &mdash; name it, or it will guess and not tell you</label>
+  <input type="text" name="jurisdiction" value="{jurisdiction}" placeholder="England and Wales">
+
+  <label>A document to answer from (paste a contract, a clause, a letter)</label>
+  <textarea name="document" style="min-height:80px">{document}</textarea>
+
   <label>Your own outline (one heading per line, for &ldquo;custom&rdquo; only)</label>
   <textarea name="outline" style="min-height:80px">{outline}</textarea>
 
@@ -403,7 +475,11 @@ a.file{{display:block;padding:12px;margin-top:8px;border:1px solid #8884;
     <label><input type="checkbox" name="fmt_html"> Web page</label>
   </div>
   <p class="note">Markdown is always kept. A business plan runs eleven
-  sections and takes a while &mdash; you can close the page, it carries on.</p>
+  sections and takes a while &mdash; you can close the page, it carries on.
+  <br><br>
+  On &ldquo;Answer&rdquo;: the model is sharp on a document you paste in and
+  unreliable recalling law from memory, where it will produce citations that
+  look right and are not. Check every section number before you rely on it.</p>
   <button type="submit">Write it</button>
 </form>
 <h2 style="font-size:18px">Documents</h2>
@@ -445,7 +521,8 @@ class H(BaseHTTPRequestHandler):
     model = ""
     outdir = ""
     credential = ""
-    last = {"company": "", "brief": "", "outline": ""}
+    last = {"company": "", "brief": "", "outline": "", "question": "",
+            "jurisdiction": "", "document": ""}
 
     def log_message(self, f, *a):
         sys.stderr.write("%s %s\n" % (self.address_string(), f % a))
@@ -492,7 +569,10 @@ class H(BaseHTTPRequestHandler):
             msg=msg, kinds=kinds, lengths=lengths, files=files,
             company=html.escape(self.last["company"]),
             brief=html.escape(self.last["brief"]),
-            outline=html.escape(self.last["outline"])).encode()
+            outline=html.escape(self.last["outline"]),
+            question=html.escape(self.last["question"]),
+            jurisdiction=html.escape(self.last["jurisdiction"]),
+            document=html.escape(self.last["document"])).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -596,14 +676,23 @@ class H(BaseHTTPRequestHandler):
         brief = fields.get("brief", "").strip()
         kind = fields.get("kind", "plan")
         outline_raw = fields.get("outline", "").strip()
-        H.last = {"company": company, "brief": brief, "outline": outline_raw}
+        question = fields.get("question", "").strip()
+        jurisdiction = fields.get("jurisdiction", "").strip()
+        document = fields.get("document", "").strip()
+        H.last = {"company": company, "brief": brief, "outline": outline_raw,
+                  "question": question, "jurisdiction": jurisdiction,
+                  "document": document}
 
-        if len(brief) < 40:
+        if kind not in KINDS:
+            return self.render('<p class="err">unknown document type</p>')
+        if kind == "ask":
+            if len(question) < 15:
+                return self.render('<p class="err">Type the question you want '
+                                   'answered.</p>')
+        elif len(brief) < 40:
             return self.render('<p class="err">The brief is the whole input. '
                                'A couple of sentences is not enough to write '
                                'from - it will invent the rest.</p>')
-        if kind not in KINDS:
-            return self.render('<p class="err">unknown document type</p>')
         with JOB.lock:
             if JOB.active:
                 return self.render('<p class="err">something is already being '
@@ -621,6 +710,8 @@ class H(BaseHTTPRequestHandler):
                 if fields.get("fmt_" + f)]
         cfg = dict(base=self.base, model=self.model, outdir=self.outdir,
                    kind=kind, brief=brief, company=company, title=title,
+                   question=question, jurisdiction=jurisdiction,
+                   document=document,
                    outline=outline or [], exec_summary=exec_summary,
                    length=dict(LENGTHS).get(fields.get("length", "medium"),
                                             "medium"),
@@ -628,12 +719,13 @@ class H(BaseHTTPRequestHandler):
         with JOB.lock:
             JOB.reset()
             JOB.active = True
-            JOB.title = "%s - %s" % (company or "Untitled", title)
+            JOB.title = (question[:70] if kind == "ask"
+                         else "%s - %s" % (company or "Untitled", title))
             JOB.kind = kind
             JOB.started = time.time()
             JOB.planned = ([h for h, _g in (outline or [])]
                            + (["Executive Summary"] if exec_summary else [])
-                           or ["the whole site"])
+                           or ["the answer" if kind == "ask" else "the whole site"])
         threading.Thread(target=worker, args=(cfg,), daemon=True).start()
         self.send_response(303)
         self.send_header("Location", "/status")

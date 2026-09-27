@@ -644,6 +644,7 @@ a.btn.plain{{background:#8883;color:inherit}}
 .card a.dl{{font-size:13px;color:#888;display:block;padding:4px 2px}}
 .card p.said{{font-size:12px;color:#888;margin:4px 2px 0;line-height:1.35;
   -webkit-user-select:text;user-select:text}}
+.live p.said{{font-size:15px;color:inherit;margin:0 0 8px}}
 .note{{color:#888;font-size:14px}} .err{{color:#c55}} .ok{{color:#4a4}}
 </style></head><body>
 <h1>{head}</h1>
@@ -673,6 +674,7 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
 .card a.dl{{font-size:13px;color:#888;display:block;padding:4px 2px}}
 .card p.said{{font-size:12px;color:#888;margin:4px 2px 0;line-height:1.35;
   -webkit-user-select:text;user-select:text}}
+.live p.said{{font-size:15px;color:inherit;margin:0 0 8px}}
 .note{{color:#888;font-size:14px}} .err{{color:#c55}} .ok{{color:#4a4}}
 .live{{border:1px solid #8884;border-radius:12px;padding:14px 16px;margin-bottom:20px}}
 .bar{{height:10px;border-radius:5px;background:#8883;overflow:hidden;margin:4px 0 6px}}
@@ -968,6 +970,11 @@ class H(BaseHTTPRequestHandler):
         elapsed = "%d:%02d" % (el // 60, el % 60)
         out = []
         if running:
+            # With previews off there is otherwise nothing on screen but a
+            # bar, and no way to tell which of two similar attempts is the
+            # one currently running.
+            if s["label"]:
+                out.append('<p class="said">{}</p>'.format(html.escape(s["label"])))
             if s["max"]:
                 pct = min(100, int(100.0 * s["value"] / s["max"]))
                 out.append('<div class="bar"><i style="width:{}%"></i></div>'
@@ -1262,7 +1269,7 @@ class H(BaseHTTPRequestHandler):
 
         # Straight to the progress page rather than back to the form: the
         # whole reason for queueing is to watch it happen.
-        LIVE.queued(str(r.get("prompt_id", "")), prompt[:70])
+        LIVE.queued(str(r.get("prompt_id", "")), prompt[:200])
         self.redirect("/")
 
 

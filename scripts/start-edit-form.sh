@@ -364,7 +364,7 @@ class Graph:
         return None
 
     def build(self, *, mode, unet, clip, vae, ckpt, image, prompt,
-              steps, cfg, seed, sampler, scheduler, lora=None, lora_strength=1.0):
+              steps, cfg, seed, sampler, scheduler, loras=()):
         if not self.encoder:
             raise RuntimeError("no Qwen edit encoder node available")
         g = {}
@@ -383,14 +383,18 @@ class Graph:
             g["va"] = {"class_type": "VAELoader", "inputs": {"vae_name": vae}}
             M, C, V = ["un", 0], ["cl", 0], ["va", 0]
 
-        # A LoRA sits between the loaders and everything downstream: the
-        # sampler takes its model, the encoder its clip. Inserting it here
-        # means the rest of the graph is written once either way.
-        if lora:
-            g["lo"] = {"class_type": "LoraLoader", "inputs": {
-                "model": M, "clip": C, "lora_name": lora,
-                "strength_model": lora_strength, "strength_clip": lora_strength}}
-            M, C = ["lo", 0], ["lo", 1]
+        # LoRAs sit between the loaders and everything downstream: the
+        # sampler takes the model, the encoder the clip. Each one is fed
+        # the output of the one before it, so a speed LoRA and a content
+        # LoRA stack rather than replacing each other.
+        for i, (name, strength) in enumerate(loras or ()):
+            if not name:
+                continue
+            k = "lo%d" % i
+            g[k] = {"class_type": "LoraLoader", "inputs": {
+                "model": M, "clip": C, "lora_name": name,
+                "strength_model": strength, "strength_clip": strength}}
+            M, C = [k, 0], [k, 1]
 
         g["im"] = {"class_type": "LoadImage", "inputs": {"image": image}}
         imgf = self.image_field()
@@ -423,8 +427,8 @@ class Graph:
         return bool(self.flf or self.i2v_end)
 
     def build_video(self, *, high, low, clip, vae, image, prompt, negative,
-                    steps, cfg, seed, width, height, length, lora=None,
-                    lora_low=None, lora_strength=1.0, end_image=None):
+                    steps, cfg, seed, width, height, length, loras=(),
+                    end_image=None):
         """Wan 2.2 I2V: two experts over one latent, high noise then low."""
         if not self.i2v:
             raise RuntimeError("WanImageToVideo node is not available")
@@ -443,18 +447,24 @@ class Graph:
             "va": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
             "im": {"class_type": "LoadImage", "inputs": {"image": image}},
         }
+        # Two parallel chains, one per expert, built in step. Both experts
+        # have to carry every LoRA or the halves disagree halfway through
+        # the same clip. Where a LoRA ships as a high/low pair each expert
+        # gets its own file; otherwise both get the same one. The text
+        # conditioning is shared, so the clip is taken from the high chain
+        # and the low chain's clip output goes unused.
         MH, ML, C = ["uh", 0], ["ul", 0], ["cl", 0]
-        if lora:
-            # Both experts have to carry one, or the halves disagree halfway
-            # through the same clip. Where the LoRA ships as a high/low pair
-            # each expert gets its own file; otherwise both get the same one.
-            g["lh"] = {"class_type": "LoraLoader", "inputs": {
-                "model": MH, "clip": C, "lora_name": lora,
-                "strength_model": lora_strength, "strength_clip": lora_strength}}
-            g["ll"] = {"class_type": "LoraLoader", "inputs": {
-                "model": ML, "clip": C, "lora_name": lora_low or lora,
-                "strength_model": lora_strength, "strength_clip": 1.0}}
-            MH, ML, C = ["lh", 0], ["ll", 0], ["lh", 1]
+        for i, (hi, lo, strength) in enumerate(loras or ()):
+            if not hi:
+                continue
+            a, b = "lh%d" % i, "ll%d" % i
+            g[a] = {"class_type": "LoraLoader", "inputs": {
+                "model": MH, "clip": C, "lora_name": hi,
+                "strength_model": strength, "strength_clip": strength}}
+            g[b] = {"class_type": "LoraLoader", "inputs": {
+                "model": ML, "clip": C, "lora_name": lo or hi,
+                "strength_model": strength, "strength_clip": strength}}
+            MH, ML, C = [a, 0], [b, 0], [a, 1]
 
         g["po"] = {"class_type": "CLIPTextEncode",
                    "inputs": {"clip": C, "text": prompt}}
@@ -577,8 +587,13 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
 
   <label>LoRA (optional)</label>
   <select name="lora">{loras}</select>
-  <label>LoRA strength</label>
+  <label>strength</label>
   <input type="text" name="lora_strength" value="{lstr}">
+
+  <label>Second LoRA &mdash; stacks on the first</label>
+  <select name="lora2">{loras2}</select>
+  <label>strength</label>
+  <input type="text" name="lora_strength2" value="{lstr2}">
 
   <div class="row">
     <div><label>Steps</label><input type="number" name="steps" value="{steps}" min="1" max="60"></div>
@@ -589,8 +604,13 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Size</label><input type="text" name="size" value="{size}"></div>
   </div>
   <p class="note">Editing: the merged AIO wants 4 steps and CFG 1; the
-  separate bf16 wants 20 and CFG 3. Video: 20 steps, CFG 3.5, 49 frames
-  (about 3s). Identity holds over short clips and drifts over long ones.</p>
+  separate bf16 wants 20 and CFG 3. Video: 20 steps, CFG 3.5, 81 frames
+  (5s, the length Wan was trained on). Identity holds over short clips
+  and drifts over long ones.<br><br>
+  Two slots because a speed LoRA and a content LoRA do different jobs:
+  put a Lightning one in either slot and drop to 4 steps at CFG 1, and
+  keep the content LoRA in the other. Picking both halves of the same
+  pair does nothing extra &mdash; the second is ignored.</p>
   <button type="submit">Run</button>
 </form>
 
@@ -730,7 +750,8 @@ class H(BaseHTTPRequestHandler):
                     and m["wan_clip"] and m["wan_vae"])
 
     def render(self, msg="", steps=4, cfg="1.0", lora="", lstr="1.0",
-               mode="image", length=49, size="832x480"):
+               lora2="", lstr2="1.0", mode="image", length=49,
+               size="832x480"):
         m = self.models()
         opts = []
         for c in m["ckpt"]:
@@ -747,11 +768,13 @@ class H(BaseHTTPRequestHandler):
                 return l + "  [half a pair - the other file is missing]"
             hi, lo = lora_pair(l, m["lora"])
             return l + ("  [paired: high + low]" if hi != lo else "")
-        loras = '<option value="">(none)</option>' + "".join(
-            '<option value="{0}"{2}>{1}</option>'.format(
-                html.escape(l), html.escape(lora_label(l)),
-                " selected" if l == lora else "")
-            for l in m["lora"])
+        def lora_menu(chosen):
+            return '<option value="">(none)</option>' + "".join(
+                '<option value="{0}"{2}>{1}</option>'.format(
+                    html.escape(l), html.escape(lora_label(l)),
+                    " selected" if l == chosen else "")
+                for l in m["lora"])
+        loras, loras2 = lora_menu(lora), lora_menu(lora2)
         vsel = " selected" if mode == "video" else ""
         if self.video_ready(m):
             modes = ('<option value="image"{0}>edit an image</option>'
@@ -781,6 +804,7 @@ class H(BaseHTTPRequestHandler):
         body = PAGE.format(status=html.escape(status), msg=msg, choices=choices,
                            models="".join(opts) or "<option value=''>(no Qwen edit model installed)</option>",
                            loras=loras, lstr=html.escape(str(lstr)),
+                           loras2=loras2, lstr2=html.escape(str(lstr2)),
                            modes=modes, length=length, size=html.escape(size),
                            choices2=choices2,
                            outs=outs, last=html.escape(self.last_prompt),
@@ -965,19 +989,37 @@ class H(BaseHTTPRequestHandler):
             steps = max(1, min(60, int(fields.get("steps") or 4)))
             cfg = float(fields.get("cfg") or 1.0)
             lstr = max(0.0, min(2.0, float(fields.get("lora_strength") or 1.0)))
+            lstr2 = max(0.0, min(2.0, float(fields.get("lora_strength2") or 1.0)))
             length = max(9, min(161, int(fields.get("length") or 49)))
             w, _, h = (fields.get("size") or "832x480").lower().partition("x")
             width, height = int(w), int(h)
         except ValueError:
             return self.render('<p class="err">steps, CFG and strength must be numbers</p>')
         lora = fields.get("lora") or None
+        lora2 = fields.get("lora2") or None
         mode = "video" if fields.get("mode") == "video" else "image"
         size = "{}x{}".format(width, height)
         keep = dict(steps=steps, cfg=cfg, lora=lora or "", lstr=lstr,
+                    lora2=lora2 or "", lstr2=lstr2,
                     mode=mode, length=length, size=size)
         mm = self.models()
-        if lora and lora not in mm["lora"]:
-            return self.render('<p class="err">no such LoRA</p>', **keep)
+        for pick in (lora, lora2):
+            if pick and pick not in mm["lora"]:
+                return self.render('<p class="err">no such LoRA</p>', **keep)
+
+        # Both halves of one pair resolve to the same pair, so choosing
+        # them in the two slots would apply it twice at double strength.
+        # The dropdown lists both halves, so this is easy to do by
+        # accident; the second one is dropped rather than compounded.
+        chain, seen = [], set()
+        for pick, strength in ((lora, lstr), (lora2, lstr2)):
+            if not pick:
+                continue
+            hi, lo = lora_pair(pick, mm["lora"])
+            if (hi, lo) in seen:
+                continue
+            seen.add((hi, lo))
+            chain.append((hi, lo, strength))
 
         if mode == "video":
             if not self.video_ready(mm):
@@ -987,7 +1029,7 @@ class H(BaseHTTPRequestHandler):
             # count on 4n+1; ComfyUI errors out unhelpfully otherwise.
             width, height = (width // 16) * 16, (height // 16) * 16
             length = ((length - 1) // 4) * 4 + 1
-            lora_hi, lora_lo = lora_pair(lora, mm["lora"])
+
             try:
                 g = self.graph.build_video(
                     high=mm["wan_high"][0], low=mm["wan_low"][0],
@@ -997,8 +1039,7 @@ class H(BaseHTTPRequestHandler):
                     steps=steps, cfg=cfg,
                     seed=int(time.time() * 1000) % 2**31,
                     width=width, height=height, length=length,
-                    lora=lora_hi, lora_low=lora_lo, lora_strength=lstr,
-                    end_image=end_image or None)
+                    loras=chain, end_image=end_image or None)
             except Exception as e:
                 return self.render('<p class="err">could not build the video '
                                    'graph: {}</p>'.format(html.escape(str(e))), **keep)
@@ -1016,9 +1057,7 @@ class H(BaseHTTPRequestHandler):
                         "{} frames at {}x{}{}{}".format(
                             length, width, height,
                             ", ending on your last frame" if end_image else "",
-                            ", paired LoRA" if lora_hi != lora_lo
-                            else ", UNPAIRED LoRA" if lora_orphan(lora, mm["lora"])
-                            else ""))
+                            ", {} LoRA(s)".format(len(chain)) if chain else ""))
             return self.redirect("/status")
 
         sel = fields.get("model", "")
@@ -1030,7 +1069,7 @@ class H(BaseHTTPRequestHandler):
                                      prompt=prompt, steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
                                      sampler="euler", scheduler="simple",
-                                     lora=lora, lora_strength=lstr)
+                                     loras=[(hi, st) for hi, _lo, st in chain])
             elif "qwen" not in name.lower():
                 return self.render('<p class="err">{} is not a Qwen edit model. '
                                    'This form only drives Qwen editing; Klein '
@@ -1046,7 +1085,7 @@ class H(BaseHTTPRequestHandler):
                                      steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
                                      sampler="euler", scheduler="simple",
-                                     lora=lora, lora_strength=lstr)
+                                     loras=[(hi, st) for hi, _lo, st in chain])
         except Exception as e:
             return self.render('<p class="err">could not build the graph: {}</p>'
                                .format(html.escape(str(e))), **keep)

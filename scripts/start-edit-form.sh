@@ -597,31 +597,57 @@ def safe(n):
     return re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(n or "x"))[:100] or "x"
 
 
+def squash(s):
+    """Lowercase, and drop everything that is not a letter or a digit."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
 def lora_pair(name, available):
     """Wan 2.2 A14B LoRAs often ship as two files, one per expert.
 
-    They are named the same but for 'high'/'low', so the partner can be
-    found from the filename. Matching on a substring would otherwise be
-    reckless - 'highheels.safetensors' contains 'high' - but the partner
-    has to actually be on disk before it counts, and 'lowheels' will not
-    be, so that case falls through to one file on both experts, which is
-    what a single-file LoRA wants anyway.
+    The two are named alike but for 'high'/'low', so the partner can be
+    found from the filename - except that the halves of one pair are
+    rarely punctuated the same way. A real pair on Civitai is uploaded as
+    'highnoise' and 'low noise', which no amount of substring replacement
+    turns into each other. So both names are squashed to letters and
+    digits before they are compared.
+
+    Matching a substring would otherwise be reckless, since
+    'highheels.safetensors' contains 'high'. What makes it safe is that
+    the partner has to actually be on disk: nothing squashes to
+    'lowheels', so that falls through to one file on both experts, which
+    is what a single-file LoRA wants anyway.
 
     Returns (for the high-noise expert, for the low-noise one).
     """
     if not name:
         return None, None
-    have = set(available or ())
-    for hi, lo in (("high", "low"), ("High", "Low"), ("HIGH", "LOW")):
-        if hi in name:
-            other = name.replace(hi, lo)
-            if other in have:
-                return name, other
-        if lo in name:
-            other = name.replace(lo, hi)
-            if other in have:
-                return other, name
+    me = squash(name)
+    for src, dst, mine_is_high in (("high", "low", True), ("low", "high", False)):
+        if src not in me:
+            continue
+        want = me.replace(src, dst)
+        for other in (available or ()):
+            if other != name and squash(other) == want:
+                return (name, other) if mine_is_high else (other, name)
     return name, name
+
+
+# 'high' and 'low' as words of their own, or in front of 'noise'. Bare
+# substrings would call 'highheels' and 'slowmo' halves of a pair.
+HALF = re.compile(r"(?:^|[^a-z])(?:high|low)(?:noise|[^a-z]|$)", re.I)
+
+
+def lora_orphan(name, available):
+    """True when this looks like half of a pair whose other half is absent.
+
+    Worth saying out loud, because it is not an error ComfyUI reports: it
+    loads the file onto both experts and quietly wastes half the adapter.
+    """
+    if not name or not HALF.search(name):
+        return False
+    hi, lo = lora_pair(name, available)
+    return hi == lo
 
 
 class H(BaseHTTPRequestHandler):
@@ -694,8 +720,10 @@ class H(BaseHTTPRequestHandler):
             opts.append('<option value="unet:{0}">{1} (separate, 20 steps)</option>'
                         .format(html.escape(u), html.escape(u)))
         def lora_label(l):
+            if lora_orphan(l, m["lora"]):
+                return l + "  [half a pair - the other file is missing]"
             hi, lo = lora_pair(l, m["lora"])
-            return l + ("  [pairs with its high/low twin]" if hi != lo else "")
+            return l + ("  [paired: high + low]" if hi != lo else "")
         loras = '<option value="">(none)</option>' + "".join(
             '<option value="{0}"{2}>{1}</option>'.format(
                 html.escape(l), html.escape(lora_label(l)),
@@ -939,7 +967,9 @@ class H(BaseHTTPRequestHandler):
                         "{} frames at {}x{}{}{}".format(
                             length, width, height,
                             ", ending on your last frame" if end_image else "",
-                            ", paired LoRA" if lora_hi != lora_lo else ""))
+                            ", paired LoRA" if lora_hi != lora_lo
+                            else ", UNPAIRED LoRA" if lora_orphan(lora, mm["lora"])
+                            else ""))
             return self.redirect("/status")
 
         sel = fields.get("model", "")

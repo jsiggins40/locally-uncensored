@@ -14,6 +14,12 @@
 # hardcoding node names, it reads /object_info at startup and adapts - node
 # signatures move between ComfyUI releases, and a graph that silently wires
 # the wrong input is worse than one that refuses to start.
+#
+# /status shows the image forming. ComfyUI streams step counts and preview
+# frames over a websocket that a browser would normally hold - this server
+# holds it instead and keeps the last frame in memory, so the page itself
+# is static HTML on a meta refresh and still works with JavaScript off.
+# ComfyUI must be started with --preview-method auto for the frames.
 
 set -uo pipefail
 
@@ -45,8 +51,8 @@ and if a required node is absent the page says which one instead of posting
 a graph that fails somewhere inside ComfyUI.
 """
 
-import argparse, base64, hmac, html, json, os, re, sys, time, urllib.parse
-import urllib.request
+import argparse, base64, hmac, html, json, os, re, socket, struct, sys
+import threading, time, urllib.parse, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BYTES = 64 * 1024 * 1024
@@ -60,6 +66,228 @@ def api(url, path, payload=None, timeout=30):
         headers={"Content-Type": "application/json"} if data else {})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
+
+
+# --------------------------------------------------------------- progress
+#
+# ComfyUI reports what it is doing over a websocket: step counts as JSON,
+# and a decoded preview of the latent as a binary frame. Normally the
+# browser holds that socket, but this page runs no JavaScript - that is the
+# whole point of it, because Lockdown Mode makes JavaScript-heavy pages
+# unusable. So this server holds the socket instead and keeps the latest
+# message and frame in memory. The status page is plain HTML with a meta
+# refresh, and each reload reads whatever is here.
+
+CLIENT_ID = uuid.uuid4().hex
+
+
+class Live:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.connected = False
+        self.queue = 0
+        self.seq = 0
+        self.preview = b""
+        self.ptype = "image/jpeg"
+        self._clear("", "")
+
+    def _clear(self, prompt_id, label):
+        self.prompt_id = prompt_id
+        self.label = label
+        self.node = ""
+        self.value = 0
+        self.max = 0
+        self.done = not prompt_id
+        self.error = ""
+        self.outputs = []
+        self.started = time.time()
+
+    def queued(self, prompt_id, label):
+        """Called when this form posts a job, before ComfyUI says anything."""
+        with self.lock:
+            self._clear(prompt_id, label)
+            self.preview = b""
+            self.seq += 1
+
+    def snapshot(self):
+        with self.lock:
+            return dict(connected=self.connected, prompt_id=self.prompt_id,
+                        label=self.label, node=self.node, value=self.value,
+                        max=self.max, queue=self.queue, done=self.done,
+                        error=self.error, outputs=list(self.outputs),
+                        started=self.started, seq=self.seq,
+                        preview=bool(self.preview))
+
+    def frame(self):
+        with self.lock:
+            return self.preview, self.ptype
+
+    # ------------------------------------------------- incoming messages
+    def on_text(self, raw):
+        try:
+            m = json.loads(raw)
+        except Exception:
+            return
+        t = m.get("type")
+        d = m.get("data") or {}
+        with self.lock:
+            if t == "status":
+                try:
+                    self.queue = d["status"]["exec_info"]["queue_remaining"]
+                except Exception:
+                    pass
+            elif t == "execution_start":
+                if d.get("prompt_id"):
+                    self.prompt_id = d["prompt_id"]
+                self.done = False
+                self.error = ""
+                self.started = time.time()
+            elif t == "executing":
+                if d.get("node") is None:
+                    self.done = True
+                    self.preview = b""
+                else:
+                    self.node = str(d.get("node"))
+                    self.done = False
+            elif t == "progress":
+                self.value = int(d.get("value") or 0)
+                self.max = int(d.get("max") or 0)
+                self.done = False
+            elif t == "progress_state":
+                # Newer releases send one entry per node instead; take the
+                # one that is actually running.
+                run = [n for n in (d.get("nodes") or {}).values()
+                       if n.get("state") in (None, "running")]
+                if run:
+                    self.value = int(run[0].get("value") or 0)
+                    self.max = int(run[0].get("max") or 0)
+                    self.done = False
+            elif t == "executed":
+                for key in ("images", "gifs", "videos"):
+                    for it in ((d.get("output") or {}).get(key) or []):
+                        if not isinstance(it, dict) or it.get("type") != "output":
+                            continue
+                        rel = it.get("filename") or ""
+                        if it.get("subfolder"):
+                            rel = it["subfolder"] + "/" + rel
+                        if rel and rel not in self.outputs:
+                            self.outputs.append(rel)
+            elif t in ("execution_error", "execution_interrupted"):
+                self.error = str(d.get("exception_message")
+                                 or d.get("exception_type") or "interrupted")
+                self.done = True
+                self.preview = b""
+            elif t == "execution_success":
+                self.done = True
+                self.preview = b""
+
+    def on_binary(self, blob):
+        # The binary layout has changed across releases - a 4-byte event
+        # type, then either a 4-byte image type or a JSON header. Looking
+        # for the image signature instead works for all of them.
+        for magic, mime in ((b"\xff\xd8\xff", "image/jpeg"),
+                            (b"\x89PNG\r\n\x1a\n", "image/png"),
+                            (b"RIFF", "image/webp")):
+            i = blob.find(magic, 0, 96)
+            if i >= 0:
+                with self.lock:
+                    self.preview = blob[i:]
+                    self.ptype = mime
+                    self.seq += 1
+                return
+
+
+LIVE = Live()
+
+
+def ws_frames(sock, buf):
+    """Yield (opcode, payload) from a server-to-client websocket stream."""
+    def need(n):
+        nonlocal buf
+        while len(buf) < n:
+            chunk = sock.recv(1 << 16)
+            if not chunk:
+                raise ConnectionError("closed")
+            buf += chunk
+        out, buf = buf[:n], buf[n:]
+        return out
+
+    op, acc = 0, b""
+    while True:
+        h = need(2)
+        fin, code, ln = h[0] & 0x80, h[0] & 0x0F, h[1] & 0x7F
+        if h[1] & 0x80:
+            raise ConnectionError("server masked a frame")
+        if ln == 126:
+            ln = struct.unpack(">H", need(2))[0]
+        elif ln == 127:
+            ln = struct.unpack(">Q", need(8))[0]
+        data = need(ln) if ln else b""
+        if code == 0x8:
+            raise ConnectionError("server closed")
+        if code == 0x9:                     # ping; a client must mask its pong
+            k = os.urandom(4)
+            sock.sendall(b"\x8a" + bytes([0x80 | len(data)]) + k
+                         + bytes(b ^ k[i % 4] for i, b in enumerate(data)))
+            continue
+        if code == 0xA:
+            continue
+        if code in (0x1, 0x2):
+            op, acc = code, data
+        elif code == 0x0:
+            acc += data
+        if fin and op:
+            yield op, acc
+            op, acc = 0, b""
+
+
+def ws_listen(base, live):
+    """Hold ComfyUI's websocket open forever, reconnecting when it drops."""
+    u = urllib.parse.urlsplit(base)
+    host = u.hostname or "127.0.0.1"
+    port = u.port or 80
+    delay = 1
+    while True:
+        sock = None
+        try:
+            sock = socket.create_connection((host, port), timeout=10)
+            key = base64.b64encode(os.urandom(16)).decode()
+            sock.sendall((
+                "GET /ws?clientId=%s HTTP/1.1\r\nHost: %s:%d\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                % (CLIENT_ID, host, port, key)).encode())
+            head = b""
+            while b"\r\n\r\n" not in head:
+                c = sock.recv(4096)
+                if not c:
+                    raise ConnectionError("no handshake")
+                head += c
+            head, _, rest = head.partition(b"\r\n\r\n")
+            if b" 101 " not in head.split(b"\r\n")[0] + b" ":
+                raise ConnectionError(head.split(b"\r\n")[0].decode("latin1"))
+            sock.settimeout(None)
+            with live.lock:
+                live.connected = True
+            print("websocket: attached as", CLIENT_ID, file=sys.stderr)
+            delay = 1
+            for op, payload in ws_frames(sock, rest):
+                if op == 0x1:
+                    live.on_text(payload.decode("utf-8", "replace"))
+                else:
+                    live.on_binary(payload)
+        except Exception as e:
+            print("websocket: %s (retry in %ds)" % (e, delay), file=sys.stderr)
+        finally:
+            with live.lock:
+                live.connected = False
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        time.sleep(delay)
+        delay = min(delay * 2, 20)
 
 
 class Graph:
@@ -258,6 +486,29 @@ class Graph:
         return g
 
 
+STATUS = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+{refresh}<title>{head}</title><style>
+:root{{color-scheme:dark light}}
+body{{font:17px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:20px 16px;max-width:640px}}
+h1{{font-size:22px;margin:0 0 2px}} p.sub{{color:#888;margin:0 0 16px;font-size:15px}}
+.bar{{height:10px;border-radius:5px;background:#8883;overflow:hidden;margin:16px 0 6px}}
+.bar>i{{display:block;height:100%;background:#d2691e}}
+.shot{{width:100%;border-radius:10px;display:block;background:#8882}}
+a.btn{{display:block;text-align:center;font-size:17px;padding:13px;margin-top:18px;
+  border-radius:10px;background:#d2691e;color:#fff;text-decoration:none}}
+a.btn.plain{{background:#8883;color:inherit}}
+.grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-top:14px}}
+.card img{{width:100%;border-radius:8px;display:block;background:#8882}}
+.note{{color:#888;font-size:14px}} .err{{color:#c55}} .ok{{color:#4a4}}
+</style></head><body>
+<h1>{head}</h1>
+<p class="sub">{sub}</p>
+{body}
+<a class="btn" href="/status">refresh now</a>
+<a class="btn plain" href="/">back to the form</a>
+</body></html>"""
+
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Edit</title><style>
@@ -280,6 +531,7 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
 <h1>Edit a photo</h1>
 <p class="sub">{status}</p>
 {msg}
+<p class="note"><a href="/status">watch what it is doing &rarr;</a></p>
 <form method="post" enctype="multipart/form-data" action="/">
   <label>Photo — upload one</label>
   <input type="file" name="photo" accept="image/*">
@@ -458,11 +710,94 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def status_page(self):
+        s = LIVE.snapshot()
+        running = bool(s["prompt_id"]) and not s["done"]
+        el = int(time.time() - s["started"])
+        elapsed = "%d:%02d" % (el // 60, el % 60)
+        parts = []
+
+        if running:
+            head, refresh = "Working", '<meta http-equiv="refresh" content="2">'
+            if s["max"]:
+                pct = min(100, int(100.0 * s["value"] / s["max"]))
+                parts.append('<div class="bar"><i style="width:{}%"></i></div>'
+                             '<p class="note">step {} of {} &middot; {} elapsed</p>'
+                             .format(pct, s["value"], s["max"], elapsed))
+            else:
+                parts.append('<p class="note">starting up &middot; {} elapsed. '
+                             'Loading a model off disk takes a while the first '
+                             'time.</p>'.format(elapsed))
+            if s["preview"]:
+                # The seq in the query string is what makes Safari fetch the
+                # new frame rather than the one it already has.
+                parts.append('<img class="shot" src="/preview?s={}" alt="">'
+                             .format(s["seq"]))
+                parts.append('<p class="note">A rough decode of the latent, '
+                             'not the final image - it sharpens as it goes.</p>')
+            elif s["max"]:
+                parts.append('<p class="note">No preview frames are arriving. '
+                             'ComfyUI only sends them when it was started with '
+                             '<code>--preview-method auto</code>; the step count '
+                             'above works either way.</p>')
+        elif s["error"]:
+            head, refresh = "Failed", ""
+            parts.append('<p class="err">{}</p>'.format(html.escape(s["error"][:600])))
+        elif s["prompt_id"]:
+            head, refresh = "Done", ""
+            parts.append('<p class="ok">finished in {}</p>'.format(elapsed))
+            # Fall back to the newest files on disk if ComfyUI reported the
+            # job done without naming its outputs.
+            outs = [o for o in s["outputs"]
+                    if os.path.isfile(os.path.join(self.outdir, o))] \
+                or self.listing(self.outdir, 4)
+            parts.append('<div class="grid">' + "".join(
+                '<div class="card"><a href="/out?n={q}"><img src="/out?n={q}" '
+                'alt=""></a></div>'.format(q=urllib.parse.quote(o))
+                for o in outs) + '</div>')
+        else:
+            head, refresh = "Idle", ""
+            parts.append('<p class="note">Nothing queued. Start something from '
+                         'the form and this page follows it.</p>')
+
+        sub = s["label"] or "no job yet"
+        if not s["connected"]:
+            sub += " \u00b7 not attached to ComfyUI"
+        elif s["queue"] > 1:
+            sub += " \u00b7 {} more waiting".format(s["queue"] - 1)
+        body = STATUS.format(refresh=refresh, head=head,
+                             sub=html.escape(sub),
+                             body="".join(parts)).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def redirect(self, to):
+        self.send_response(303)
+        self.send_header("Location", to)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     # --------------------------------------------------------------- http
     def do_GET(self):
         if not self.authed():
             return
         u = urllib.parse.urlsplit(self.path)
+        if u.path == "/status":
+            return self.status_page()
+        if u.path == "/preview":
+            blob, mime = LIVE.frame()
+            if not blob:
+                self.send_response(404); self.send_header("Content-Length", "0")
+                self.end_headers(); return
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers(); self.wfile.write(blob); return
         if u.path == "/out":
             rel = urllib.parse.parse_qs(u.query).get("n", [""])[0]
             p = os.path.abspath(os.path.join(self.outdir, rel))
@@ -558,7 +893,8 @@ class H(BaseHTTPRequestHandler):
                 return self.render('<p class="err">could not build the video '
                                    'graph: {}</p>'.format(html.escape(str(e))), **keep)
             try:
-                r = api(self.comfy, "/prompt", {"prompt": g})
+                r = api(self.comfy, "/prompt",
+                        {"prompt": g, "client_id": CLIENT_ID})
             except urllib.error.HTTPError as e:
                 return self.render('<p class="err">ComfyUI rejected it:</p>'
                                    '<pre class="note" style="white-space:pre-wrap">{}</pre>'
@@ -566,13 +902,11 @@ class H(BaseHTTPRequestHandler):
                                    **keep)
             except Exception as e:
                 return self.render('<p class="err">{}</p>'.format(html.escape(str(e))), **keep)
-            return self.render('<p class="ok">queued {} frames at {}x{}{} ({}). '
-                               'Video takes minutes, not seconds - reload in a '
-                               'few.</p>'.format(length, width, height,
-                                                 ", ending on your last frame"
-                                                 if end_image else "",
-                                                 html.escape(str(r.get("prompt_id", "?")))),
-                               **keep)
+            LIVE.queued(str(r.get("prompt_id", "")),
+                        "{} frames at {}x{}{}".format(
+                            length, width, height,
+                            ", ending on your last frame" if end_image else ""))
+            return self.redirect("/status")
 
         sel = fields.get("model", "")
         kind, _, name = sel.partition(":")
@@ -605,7 +939,7 @@ class H(BaseHTTPRequestHandler):
                                .format(html.escape(str(e))), **keep)
 
         try:
-            r = api(self.comfy, "/prompt", {"prompt": g})
+            r = api(self.comfy, "/prompt", {"prompt": g, "client_id": CLIENT_ID})
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:800]
             return self.render('<p class="err">ComfyUI rejected it:</p>'
@@ -615,9 +949,10 @@ class H(BaseHTTPRequestHandler):
             return self.render('<p class="err">{}</p>'.format(html.escape(str(e))),
                                **keep)
 
-        self.render('<p class="ok">queued ({}). Reload in a few seconds — it '
-                    'appears under Results.</p>'.format(html.escape(str(r.get("prompt_id", "?")))),
-                    **keep)
+        # Straight to the progress page rather than back to the form: the
+        # whole reason for queueing is to watch it happen.
+        LIVE.queued(str(r.get("prompt_id", "")), prompt[:70])
+        self.redirect("/status")
 
 
 def main():
@@ -647,6 +982,18 @@ def main():
     print("  image field:", H.graph.image_field())
     for n in H.graph.notes:
         print("  !!", n)
+    try:
+        args = os.popen("ps -eo args").read()
+    except Exception:
+        args = "--preview-method"
+    if "main.py" in args and "--preview-method" not in args:
+        print("  !! ComfyUI is running without --preview-method auto, so it\n"
+              "     will not send preview frames. The progress page will show\n"
+              "     step counts but no picture until it is restarted with it.",
+              file=sys.stderr)
+
+    threading.Thread(target=ws_listen, args=(H.comfy, LIVE),
+                     daemon=True).start()
     print("serving on 0.0.0.0:{}".format(o.port))
     ThreadingHTTPServer(("0.0.0.0", o.port), H).serve_forever()
 
@@ -693,6 +1040,10 @@ cat <<EOF
   log           $LOG
 
 Forward port $PORT in the Thunder console and open it.
+
+While something is generating, /status shows a progress bar and a live
+preview of the image forming. It refreshes itself with a meta tag, so it
+works with JavaScript switched off.
 
 What the log says about node discovery matters - if "encoder: None" or any
 !! lines appear above, tell me and I will adjust the graph.

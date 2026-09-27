@@ -164,7 +164,7 @@ pgrep -x nginx >/dev/null || die "nginx is not running after start"
 say "launching"
 tmux kill-session -t =comfy 2>/dev/null
 tmux new-session -d -s comfy \
-  "cd $COMFY && ./venv/bin/python main.py --listen 127.0.0.1 --port $INTERNAL_PORT 2>&1 | tee -a $HOME/comfy-run.log"
+  "cd $COMFY && ./venv/bin/python main.py --listen 127.0.0.1 --port $INTERNAL_PORT --preview-method auto 2>&1 | tee -a $HOME/comfy-run.log"
 
 for _ in $(seq 1 60); do
   sleep 2

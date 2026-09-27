@@ -134,7 +134,7 @@ cat <<'EOF'
 Restart ComfyUI so it sees the new files, then restart the form:
 
   tmux kill-session -t =comfy
-  cd ~/ComfyUI && tmux new -d -s comfy "./venv/bin/python main.py --listen 127.0.0.1 --port 8288 2>&1 | tee -a ~/comfy-run.log"
+  cd ~/ComfyUI && tmux new -d -s comfy "./venv/bin/python main.py --listen 127.0.0.1 --port 8288 --preview-method auto 2>&1 | tee -a ~/comfy-run.log"
 
 then, once it answers:
 

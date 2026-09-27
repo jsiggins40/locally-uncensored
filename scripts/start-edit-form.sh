@@ -403,7 +403,7 @@ class Graph:
 
     def build_video(self, *, high, low, clip, vae, image, prompt, negative,
                     steps, cfg, seed, width, height, length, lora=None,
-                    lora_strength=1.0, end_image=None):
+                    lora_low=None, lora_strength=1.0, end_image=None):
         """Wan 2.2 I2V: two experts over one latent, high noise then low."""
         if not self.i2v:
             raise RuntimeError("WanImageToVideo node is not available")
@@ -424,13 +424,14 @@ class Graph:
         }
         MH, ML, C = ["uh", 0], ["ul", 0], ["cl", 0]
         if lora:
-            # Both experts have to carry it, or the halves disagree halfway
-            # through the same clip.
+            # Both experts have to carry one, or the halves disagree halfway
+            # through the same clip. Where the LoRA ships as a high/low pair
+            # each expert gets its own file; otherwise both get the same one.
             g["lh"] = {"class_type": "LoraLoader", "inputs": {
                 "model": MH, "clip": C, "lora_name": lora,
                 "strength_model": lora_strength, "strength_clip": lora_strength}}
             g["ll"] = {"class_type": "LoraLoader", "inputs": {
-                "model": ML, "clip": C, "lora_name": lora,
+                "model": ML, "clip": C, "lora_name": lora_low or lora,
                 "strength_model": lora_strength, "strength_clip": 1.0}}
             MH, ML, C = ["lh", 0], ["ll", 0], ["lh", 1]
 
@@ -596,6 +597,33 @@ def safe(n):
     return re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(n or "x"))[:100] or "x"
 
 
+def lora_pair(name, available):
+    """Wan 2.2 A14B LoRAs often ship as two files, one per expert.
+
+    They are named the same but for 'high'/'low', so the partner can be
+    found from the filename. Matching on a substring would otherwise be
+    reckless - 'highheels.safetensors' contains 'high' - but the partner
+    has to actually be on disk before it counts, and 'lowheels' will not
+    be, so that case falls through to one file on both experts, which is
+    what a single-file LoRA wants anyway.
+
+    Returns (for the high-noise expert, for the low-noise one).
+    """
+    if not name:
+        return None, None
+    have = set(available or ())
+    for hi, lo in (("high", "low"), ("High", "Low"), ("HIGH", "LOW")):
+        if hi in name:
+            other = name.replace(hi, lo)
+            if other in have:
+                return name, other
+        if lo in name:
+            other = name.replace(lo, hi)
+            if other in have:
+                return other, name
+    return name, name
+
+
 class H(BaseHTTPRequestHandler):
     comfy = "http://127.0.0.1:8288"
     indir = ""
@@ -665,9 +693,13 @@ class H(BaseHTTPRequestHandler):
         for u in [x for x in m["unet"] if "qwen" in x.lower()]:
             opts.append('<option value="unet:{0}">{1} (separate, 20 steps)</option>'
                         .format(html.escape(u), html.escape(u)))
+        def lora_label(l):
+            hi, lo = lora_pair(l, m["lora"])
+            return l + ("  [pairs with its high/low twin]" if hi != lo else "")
         loras = '<option value="">(none)</option>' + "".join(
             '<option value="{0}"{2}>{1}</option>'.format(
-                html.escape(l), html.escape(l), " selected" if l == lora else "")
+                html.escape(l), html.escape(lora_label(l)),
+                " selected" if l == lora else "")
             for l in m["lora"])
         vsel = " selected" if mode == "video" else ""
         if self.video_ready(m):
@@ -878,6 +910,7 @@ class H(BaseHTTPRequestHandler):
             # count on 4n+1; ComfyUI errors out unhelpfully otherwise.
             width, height = (width // 16) * 16, (height // 16) * 16
             length = ((length - 1) // 4) * 4 + 1
+            lora_hi, lora_lo = lora_pair(lora, mm["lora"])
             try:
                 g = self.graph.build_video(
                     high=mm["wan_high"][0], low=mm["wan_low"][0],
@@ -887,7 +920,7 @@ class H(BaseHTTPRequestHandler):
                     steps=steps, cfg=cfg,
                     seed=int(time.time() * 1000) % 2**31,
                     width=width, height=height, length=length,
-                    lora=lora, lora_strength=lstr,
+                    lora=lora_hi, lora_low=lora_lo, lora_strength=lstr,
                     end_image=end_image or None)
             except Exception as e:
                 return self.render('<p class="err">could not build the video '
@@ -903,9 +936,10 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self.render('<p class="err">{}</p>'.format(html.escape(str(e))), **keep)
             LIVE.queued(str(r.get("prompt_id", "")),
-                        "{} frames at {}x{}{}".format(
+                        "{} frames at {}x{}{}{}".format(
                             length, width, height,
-                            ", ending on your last frame" if end_image else ""))
+                            ", ending on your last frame" if end_image else "",
+                            ", paired LoRA" if lora_hi != lora_lo else ""))
             return self.redirect("/status")
 
         sel = fields.get("model", "")

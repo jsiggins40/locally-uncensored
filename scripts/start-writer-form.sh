@@ -23,6 +23,7 @@ CREDS="$HOME/writer-credentials.txt"
 SCRIPT="$HOME/writer-form.py"
 LOG="$HOME/writer-form.log"
 OUTDIR="${OUTDIR:-$HOME/documents}"
+export PATH="$HOME/.local/bin:$PATH"
 
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\nFAILED: %s\n' "$*"; exit 1; }
@@ -783,7 +784,7 @@ P=$(awk '/^pass:/{print $2}' "$CREDS")
 say "starting"
 tmux kill-session -t =writer 2>/dev/null
 tmux new-session -d -s writer \
-  "python3 -u '$SCRIPT' --port $PORT --ollama '$OLLAMA' --model '$MODEL' --outdir '$OUTDIR' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
+  "PATH='$HOME/.local/bin:'\$PATH python3 -u '$SCRIPT' --port $PORT --ollama '$OLLAMA' --model '$MODEL' --outdir '$OUTDIR' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
 sleep 2
 tmux has-session -t =writer 2>/dev/null || { tail -20 "$LOG"; die "did not start"; }
 CODE=$(curl -sS -o /dev/null -w '%{http_code}' -u "$U:$P" "http://127.0.0.1:$PORT/" 2>/dev/null)

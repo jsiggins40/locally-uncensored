@@ -25,6 +25,16 @@ exec > >(tee -a "$LOG") 2>&1
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\nFAILED: %s\n(see %s)\n' "$*" "$LOG"; exit 1; }
 
+# Some images run as root with no sudo installed at all, so "sudo apt-get"
+# fails for the opposite reason to the one it looks like. Nothing here
+# truly needs root anyway - it is only a faster route to pandoc.
+asroot() {
+  if [ "$(id -u)" = "0" ]; then "$@"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then sudo -n "$@"
+  else return 1
+  fi
+}
+
 say "the card"
 VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || die "no GPU"
@@ -106,17 +116,35 @@ say "document tooling"
 if command -v pandoc >/dev/null; then
   echo "  pandoc: $(pandoc --version | head -1)"
 else
-  sudo -n apt-get update -qq 2>/dev/null
-  sudo -n apt-get install -y -qq pandoc 2>/dev/null \
-    || echo "  !! could not apt-get pandoc; Word and PDF will be unavailable"
-  command -v pandoc >/dev/null && echo "  pandoc: $(pandoc --version | head -1)"
+  asroot apt-get update -qq 2>/dev/null
+  asroot apt-get install -y -qq pandoc 2>/dev/null
+  if ! command -v pandoc >/dev/null; then
+    # The release tarball is one static binary and needs no privileges.
+    echo "  no package manager route; fetching the standalone binary"
+    mkdir -p "$HOME/.local/bin"
+    for v in 3.8 3.7.0.2 3.6.4 3.5; do
+      url="https://github.com/jgm/pandoc/releases/download/$v/pandoc-$v-linux-amd64.tar.gz"
+      if curl -fsSL "$url" -o /tmp/pandoc.tgz \
+         && tar -C "$HOME/.local/bin" -xzf /tmp/pandoc.tgz \
+              --strip-components=2 "pandoc-$v/bin/pandoc" 2>/dev/null; then
+        rm -f /tmp/pandoc.tgz
+        echo "  pandoc $v -> $HOME/.local/bin/pandoc"
+        break
+      fi
+      rm -f /tmp/pandoc.tgz
+    done
+  fi
+  command -v pandoc >/dev/null \
+    && echo "  pandoc: $(pandoc --version | head -1)" \
+    || echo "  !! no pandoc; Word and web pages will be unavailable"
 fi
-sudo -n apt-get install -y -qq libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b \
+asroot apt-get install -y -qq libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b \
   libfontconfig1 >/dev/null 2>&1
 if python3 -c 'import weasyprint' 2>/dev/null; then
   echo "  weasyprint: present"
 else
   pip install -q --break-system-packages weasyprint 2>/dev/null \
+    || pip install -q --user weasyprint 2>/dev/null \
     || pip install -q weasyprint 2>/dev/null
   python3 -c 'import weasyprint; print("  weasyprint: installed")' 2>/dev/null \
     || echo "  !! weasyprint missing; PDF will be unavailable (Word still works)"

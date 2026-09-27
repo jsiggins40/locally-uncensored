@@ -63,7 +63,106 @@ MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".webm": "video/webm", ".mp4": "video/mp4"}
 
 
-def cell(rel):
+def png_text(path):
+    """The text chunks PNG carries alongside the pixels.
+
+    ComfyUI writes the whole graph into every image it saves, so the
+    prompt that made a picture is inside the picture. Nothing has to have
+    been recorded when it ran - this works on files that are already
+    there.
+    """
+    out = {}
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(8) != b"\x89PNG\r\n\x1a\n":
+                return out
+            while True:
+                head = fh.read(8)
+                if len(head) < 8:
+                    break
+                n = struct.unpack(">I", head[:4])[0]
+                kind = head[4:8]
+                if kind in (b"IDAT", b"IEND"):
+                    break          # text comes before the pixels; stop early
+                if n > 8 << 20:
+                    break
+                data = fh.read(n)
+                fh.read(4)         # crc
+                if kind == b"tEXt":
+                    k, _, v = data.partition(b"\x00")
+                    out[k.decode("latin1")] = v.decode("utf-8", "replace")
+                elif kind == b"iTXt":
+                    k, _, rest = data.partition(b"\x00")
+                    if len(rest) < 2:
+                        continue
+                    compressed, rest = rest[0], rest[2:]
+                    rest = rest.split(b"\x00", 2)          # lang, translated
+                    if len(rest) < 3:
+                        continue
+                    v = rest[2]
+                    if compressed:
+                        import zlib
+                        try:
+                            v = zlib.decompress(v)
+                        except Exception:
+                            continue
+                    out[k.decode("latin1")] = v.decode("utf-8", "replace")
+    except Exception:
+        pass
+    return out
+
+
+def prompt_of(path, _cache={}):
+    """The positive prompt that produced this image, or ''."""
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError:
+        return ""
+    if key in _cache:
+        return _cache[key]
+    text = ""
+    raw = png_text(path).get("prompt", "")
+    if raw:
+        try:
+            g = json.loads(raw)
+            # Follow the sampler's positive input rather than guessing:
+            # the negative is a text node too, and on a video graph it is
+            # not even the shorter of the two.
+            enc = None
+            for node in g.values():
+                if not isinstance(node, dict):
+                    continue
+                if "KSampler" in str(node.get("class_type", "")):
+                    link = (node.get("inputs") or {}).get("positive")
+                    if isinstance(link, list) and link:
+                        enc = str(link[0])
+                        break
+            src = g.get(enc) if enc else None
+            if isinstance(src, dict):
+                ins = src.get("inputs") or {}
+                text = ins.get("prompt") or ins.get("text") or ""
+                # Conditioning can be wrapped; fall through if it is.
+                if not isinstance(text, str):
+                    text = ""
+            if not text:
+                cands = []
+                for node in g.values():
+                    if isinstance(node, dict) and \
+                            "TextEncode" in str(node.get("class_type", "")):
+                        t = (node.get("inputs") or {}).get("prompt") \
+                            or (node.get("inputs") or {}).get("text") or ""
+                        if isinstance(t, str) and t.strip():
+                            cands.append(t)
+                text = max(cands, key=len) if cands else ""
+        except Exception:
+            text = ""
+    if len(_cache) > 400:
+        _cache.clear()
+    _cache[key] = text.strip()
+    return _cache[key]
+
+
+def cell(rel, prompt=""):
     """One tile in a gallery: a still, or a player for a clip.
 
     A clip in an <img> renders as a broken image, which is what a video
@@ -76,10 +175,18 @@ def cell(rel):
                 ' src="/out?n={q}"></video>'
                 '<a class="dl" href="/out?n={q}&amp;dl=1">save it</a></div>'
                 .format(q=q))
+    extra = ""
+    if prompt:
+        # Shown in full and selectable, because copying by hand is the only
+        # way to get at the clipboard without JavaScript - and the link
+        # beside it is the thing you actually wanted the clipboard for.
+        extra = ('<p class="said">{p}</p>'
+                 '<a class="dl" href="/useprompt?n={q}">use this prompt '
+                 '&rarr;</a>'.format(p=html.escape(prompt), q=q))
     return ('<div class="card"><a href="/out?n={q}">'
             '<img loading="lazy" src="/out?n={q}" alt=""></a>'
-            '<a class="dl" href="/reuse?n={q}">edit this one &rarr;</a>'
-            '</div>'.format(q=q))
+            '<a class="dl" href="/reuse?n={q}">edit this one &rarr;</a>{e}'
+            '</div>'.format(q=q, e=extra))
 
 
 def api(url, path, payload=None, timeout=30):
@@ -535,6 +642,8 @@ a.btn.plain{{background:#8883;color:inherit}}
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-top:14px}}
 .card img,.card video{{width:100%;border-radius:8px;display:block;background:#8882}}
 .card a.dl{{font-size:13px;color:#888;display:block;padding:4px 2px}}
+.card p.said{{font-size:12px;color:#888;margin:4px 2px 0;line-height:1.35;
+  -webkit-user-select:text;user-select:text}}
 .note{{color:#888;font-size:14px}} .err{{color:#c55}} .ok{{color:#4a4}}
 </style></head><body>
 <h1>{head}</h1>
@@ -562,6 +671,8 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
 .card img,.card video{{width:100%;border-radius:8px;display:block;background:#8882}}
 .card a.dl{{font-size:13px;color:#888;display:block;padding:4px 2px}}
+.card p.said{{font-size:12px;color:#888;margin:4px 2px 0;line-height:1.35;
+  -webkit-user-select:text;user-select:text}}
 .note{{color:#888;font-size:14px}} .err{{color:#c55}} .ok{{color:#4a4}}
 .live{{border:1px solid #8884;border-radius:12px;padding:14px 16px;margin-bottom:20px}}
 .bar{{height:10px;border-radius:5px;background:#8883;overflow:hidden;margin:4px 0 6px}}
@@ -816,7 +927,7 @@ class H(BaseHTTPRequestHandler):
             for f in avail)
         if not self.graph.can_end_frame():
             choices2 = "<option value=''>(not supported by this ComfyUI)</option>"
-        outs = "".join(cell(r) for r in self.listing(self.outdir)) \
+        outs = "".join(self.cells(self.listing(self.outdir))) \
             or '<p class="note">nothing yet</p>'
         status = "ComfyUI at {} · encoder {}".format(
             self.comfy, self.graph.encoder or "NONE")
@@ -838,6 +949,10 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def cells(self, rels):
+        for r in rels:
+            yield cell(r, prompt_of(os.path.join(self.outdir, r)))
 
     def live_block(self):
         """What is happening right now, as a fragment above the form.
@@ -881,7 +996,7 @@ class H(BaseHTTPRequestHandler):
                 or self.listing(self.outdir, 1)
             out.append('<p class="ok">done in {}</p>'.format(elapsed))
             out.append('<div class="grid">'
-                       + "".join(cell(o) for o in outs) + '</div>')
+                       + "".join(self.cells(outs)) + '</div>')
             refresh = ""
         else:
             refresh = ""
@@ -903,6 +1018,15 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlsplit(self.path)
         if u.path == "/status":
             return self.redirect("/")     # it all lives on one page now
+        if u.path == "/useprompt":
+            rel = urllib.parse.parse_qs(u.query).get("n", [""])[0]
+            p = os.path.abspath(os.path.join(self.outdir, rel))
+            if p.startswith(os.path.abspath(self.outdir) + os.sep) \
+               and os.path.isfile(p):
+                said = prompt_of(p)
+                if said:
+                    H.last["prompt"] = said
+            return self.redirect("/")
         if u.path == "/reuse":
             # Editing an edit is the normal second step, and it should not
             # mean downloading the result and uploading it again.

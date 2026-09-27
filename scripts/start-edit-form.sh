@@ -57,6 +57,27 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BYTES = 64 * 1024 * 1024
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".webm", ".mp4")
+VID_EXT = (".webm", ".mp4")
+MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".webp": "image/webp", ".gif": "image/gif",
+        ".webm": "video/webm", ".mp4": "video/mp4"}
+
+
+def cell(rel):
+    """One tile in a gallery: a still, or a player for a clip.
+
+    A clip in an <img> renders as a broken image, which is what a video
+    mode does by default if nothing here separates the two. <video
+    controls> needs no JavaScript, so it survives Lockdown Mode.
+    """
+    q = urllib.parse.quote(rel)
+    if rel.lower().endswith(VID_EXT):
+        return ('<div class="card"><video controls playsinline preload="metadata"'
+                ' src="/out?n={q}"></video>'
+                '<a class="dl" href="/out?n={q}&amp;dl=1">save it</a></div>'
+                .format(q=q))
+    return ('<div class="card"><a href="/out?n={q}">'
+            '<img loading="lazy" src="/out?n={q}" alt=""></a></div>'.format(q=q))
 
 
 def api(url, path, payload=None, timeout=30):
@@ -500,7 +521,8 @@ a.btn{{display:block;text-align:center;font-size:17px;padding:13px;margin-top:18
   border-radius:10px;background:#d2691e;color:#fff;text-decoration:none}}
 a.btn.plain{{background:#8883;color:inherit}}
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-top:14px}}
-.card img{{width:100%;border-radius:8px;display:block;background:#8882}}
+.card img,.card video{{width:100%;border-radius:8px;display:block;background:#8882}}
+.card a.dl{{font-size:13px;color:#888;display:block;padding:4px 2px}}
 .note{{color:#888;font-size:14px}} .err{{color:#c55}} .ok{{color:#4a4}}
 </style></head><body>
 <h1>{head}</h1>
@@ -526,7 +548,8 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   border-radius:10px;background:#d2691e;color:#fff}}
 .row{{display:flex;gap:10px}} .row>div{{flex:1}}
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
-.card img{{width:100%;border-radius:8px;display:block;background:#8882}}
+.card img,.card video{{width:100%;border-radius:8px;display:block;background:#8882}}
+.card a.dl{{font-size:13px;color:#888;display:block;padding:4px 2px}}
 .note{{color:#888;font-size:14px}} .err{{color:#c55}} .ok{{color:#4a4}}
 </style></head><body>
 <h1>Edit a photo</h1>
@@ -749,10 +772,8 @@ class H(BaseHTTPRequestHandler):
             for f in avail)
         if not self.graph.can_end_frame():
             choices2 = "<option value=''>(not supported by this ComfyUI)</option>"
-        outs = "".join(
-            '<div class="card"><a href="/out?n={q}"><img loading="lazy" '
-            'src="/out?n={q}" alt=""></a></div>'.format(q=urllib.parse.quote(r))
-            for r in self.listing(self.outdir)) or '<p class="note">nothing yet</p>'
+        outs = "".join(cell(r) for r in self.listing(self.outdir)) \
+            or '<p class="note">nothing yet</p>'
         status = "ComfyUI at {} · encoder {}".format(
             self.comfy, self.graph.encoder or "NONE")
         if self.graph.notes:
@@ -811,10 +832,8 @@ class H(BaseHTTPRequestHandler):
             outs = [o for o in s["outputs"]
                     if os.path.isfile(os.path.join(self.outdir, o))] \
                 or self.listing(self.outdir, 4)
-            parts.append('<div class="grid">' + "".join(
-                '<div class="card"><a href="/out?n={q}"><img src="/out?n={q}" '
-                'alt=""></a></div>'.format(q=urllib.parse.quote(o))
-                for o in outs) + '</div>')
+            parts.append('<div class="grid">'
+                         + "".join(cell(o) for o in outs) + '</div>')
         else:
             head, refresh = "Idle", ""
             parts.append('<p class="note">Nothing queued. Start something from '
@@ -866,11 +885,41 @@ class H(BaseHTTPRequestHandler):
                 self.send_response(404); self.send_header("Content-Length", "0")
                 self.end_headers(); return
             blob = open(p, "rb").read()
-            ext = os.path.splitext(p)[1].lower().lstrip(".")
-            self.send_response(200)
-            self.send_header("Content-Type", "image/" + ("jpeg" if ext == "jpg" else ext))
-            self.send_header("Content-Length", str(len(blob)))
-            self.end_headers(); self.wfile.write(blob); return
+            mime = MIME.get(os.path.splitext(p)[1].lower(),
+                            "application/octet-stream")
+            # Safari asks for a byte range before it will play anything,
+            # and treats a plain 200 as a file it cannot stream. Serving
+            # 206 is what makes a clip playable on the phone rather than
+            # only downloadable.
+            start, end = 0, len(blob) - 1
+            rng = re.match(r"bytes=(\d*)-(\d*)\s*$",
+                           self.headers.get("Range", "") or "")
+            partial = False
+            if rng and blob:
+                if rng.group(1):
+                    start = int(rng.group(1))
+                    if rng.group(2):
+                        end = min(int(rng.group(2)), end)
+                else:                       # bytes=-N means the last N bytes
+                    start = max(0, len(blob) - int(rng.group(2) or 0))
+                if start > end or start >= len(blob):
+                    self.send_response(416)
+                    self.send_header("Content-Range", "bytes */%d" % len(blob))
+                    self.send_header("Content-Length", "0")
+                    self.end_headers(); return
+                partial = True
+            body = blob[start:end + 1]
+            self.send_response(206 if partial else 200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Accept-Ranges", "bytes")
+            if partial:
+                self.send_header("Content-Range", "bytes %d-%d/%d"
+                                 % (start, end, len(blob)))
+            if urllib.parse.parse_qs(u.query).get("dl"):
+                self.send_header("Content-Disposition",
+                                 'attachment; filename="%s"' % os.path.basename(p))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
         self.render()
 
     def do_POST(self):

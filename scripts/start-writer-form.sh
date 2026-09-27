@@ -693,11 +693,15 @@ class H(BaseHTTPRequestHandler):
             return self.render('<p class="err">The brief is the whole input. '
                                'A couple of sentences is not enough to write '
                                'from - it will invent the rest.</p>')
+        # Read the flag and let go before rendering: JOB's lock is not
+        # reentrant, and anything render() later wants from JOB would
+        # hang the request instead of answering it.
         with JOB.lock:
-            if JOB.active:
-                return self.render('<p class="err">something is already being '
-                                   'written. <a href="/status">Watch it</a>, '
-                                   'or wait for it to finish.</p>')
+            busy = JOB.active
+        if busy:
+            return self.render('<p class="err">something is already being '
+                               'written. <a href="/status">Watch it</a>, '
+                               'or wait for it to finish.</p>')
 
         title, outline, exec_summary = KINDS[kind]
         if kind == "custom":

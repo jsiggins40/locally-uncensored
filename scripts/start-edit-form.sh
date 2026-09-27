@@ -77,7 +77,9 @@ def cell(rel):
                 '<a class="dl" href="/out?n={q}&amp;dl=1">save it</a></div>'
                 .format(q=q))
     return ('<div class="card"><a href="/out?n={q}">'
-            '<img loading="lazy" src="/out?n={q}" alt=""></a></div>'.format(q=q))
+            '<img loading="lazy" src="/out?n={q}" alt=""></a>'
+            '<a class="dl" href="/reuse?n={q}">edit this one &rarr;</a>'
+            '</div>'.format(q=q))
 
 
 def api(url, path, payload=None, timeout=30):
@@ -544,7 +546,7 @@ a.btn.plain{{background:#8883;color:inherit}}
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Edit</title><style>
+{refresh}<title>Edit</title><style>
 :root{{color-scheme:dark light}}
 body{{font:17px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:20px 16px;max-width:640px}}
 h1{{font-size:22px;margin:0 0 2px}} p.sub{{color:#888;margin:0 0 20px;font-size:15px}}
@@ -561,11 +563,15 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
 .card img,.card video{{width:100%;border-radius:8px;display:block;background:#8882}}
 .card a.dl{{font-size:13px;color:#888;display:block;padding:4px 2px}}
 .note{{color:#888;font-size:14px}} .err{{color:#c55}} .ok{{color:#4a4}}
+.live{{border:1px solid #8884;border-radius:12px;padding:14px 16px;margin-bottom:20px}}
+.bar{{height:10px;border-radius:5px;background:#8883;overflow:hidden;margin:4px 0 6px}}
+.bar>i{{display:block;height:100%;background:#d2691e}}
+.shot{{width:100%;border-radius:10px;display:block;background:#8882}}
 </style></head><body>
 <h1>Edit a photo</h1>
 <p class="sub">{status}</p>
 {msg}
-<p class="note"><a href="/status">watch what it is doing &rarr;</a></p>
+{live}
 <form method="post" enctype="multipart/form-data" action="/">
   <label>Photo — upload one</label>
   <input type="file" name="photo" accept="image/*">
@@ -699,7 +705,13 @@ class H(BaseHTTPRequestHandler):
     outdir = ""
     credential = ""
     graph = None
-    last_prompt = ""
+    # Every setting, kept between runs. Editing is iterative - the second
+    # attempt is the first one with one thing changed - and a form that
+    # forgets makes you retype the nine things you did not want to change.
+    last = {"prompt": "", "model": "", "lora": "", "lstr": "1.0",
+            "lora2": "", "lstr2": "1.0", "steps": "4", "cfg": "1.0",
+            "mode": "image", "length": "81", "size": "832x480",
+            "existing": "", "existing2": ""}
 
     def log_message(self, f, *a):
         sys.stderr.write("%s %s\n" % (self.address_string(), f % a))
@@ -749,20 +761,25 @@ class H(BaseHTTPRequestHandler):
         return bool(self.graph.i2v and m["wan_high"] and m["wan_low"]
                     and m["wan_clip"] and m["wan_vae"])
 
-    def render(self, msg="", steps=4, cfg="1.0", lora="", lstr="1.0",
-               lora2="", lstr2="1.0", mode="image", length=49,
-               size="832x480"):
+    def render(self, msg=""):
+        L = self.last
+        steps, cfg = L["steps"], L["cfg"]
+        lora, lstr = L["lora"], L["lstr"]
+        lora2, lstr2 = L["lora2"], L["lstr2"]
+        mode, length, size = L["mode"], L["length"], L["size"]
         m = self.models()
         opts = []
+        def sel(v):
+            return " selected" if v == L["model"] else ""
         for c in m["ckpt"]:
-            opts.append('<option value="ckpt:{0}">{1} (merged, 4 steps)</option>'
-                        .format(html.escape(c), html.escape(c)))
+            opts.append('<option value="ckpt:{0}"{2}>{1} (merged, 4 steps)</option>'
+                        .format(html.escape(c), html.escape(c), sel("ckpt:" + c)))
         # diffusion_models holds whatever else is installed - Klein, on this
         # box. Wrapping a Qwen graph around a FLUX model fails in a way that
         # looks like a broken pipeline, so only offer what belongs here.
         for u in [x for x in m["unet"] if "qwen" in x.lower()]:
-            opts.append('<option value="unet:{0}">{1} (separate, 20 steps)</option>'
-                        .format(html.escape(u), html.escape(u)))
+            opts.append('<option value="unet:{0}"{2}>{1} (separate, 20 steps)</option>'
+                        .format(html.escape(u), html.escape(u), sel("unet:" + u)))
         def lora_label(l):
             if lora_orphan(l, m["lora"]):
                 return l + "  [half a pair - the other file is missing]"
@@ -788,10 +805,14 @@ class H(BaseHTTPRequestHandler):
                 modes += '<option value="" disabled>video: WanImageToVideo node missing</option>'
         avail = self.listing(self.indir)
         choices = "".join(
-            '<option value="{0}">{1}</option>'.format(html.escape(f), html.escape(f))
+            '<option value="{0}"{2}>{1}</option>'.format(
+                html.escape(f), html.escape(f),
+                " selected" if f == L["existing"] else "")
             for f in avail) or "<option value=''>(none)</option>"
         choices2 = "<option value=''>(none - free motion)</option>" + "".join(
-            '<option value="{0}">{1}</option>'.format(html.escape(f), html.escape(f))
+            '<option value="{0}"{2}>{1}</option>'.format(
+                html.escape(f), html.escape(f),
+                " selected" if f == L["existing2"] else "")
             for f in avail)
         if not self.graph.can_end_frame():
             choices2 = "<option value=''>(not supported by this ComfyUI)</option>"
@@ -801,82 +822,73 @@ class H(BaseHTTPRequestHandler):
             self.comfy, self.graph.encoder or "NONE")
         if self.graph.notes:
             status += " · " + "; ".join(self.graph.notes)
-        body = PAGE.format(status=html.escape(status), msg=msg, choices=choices,
+        refresh, live = self.live_block()
+        body = PAGE.format(refresh=refresh, live=live,
+                           status=html.escape(status), msg=msg, choices=choices,
                            models="".join(opts) or "<option value=''>(no Qwen edit model installed)</option>",
                            loras=loras, lstr=html.escape(str(lstr)),
                            loras2=loras2, lstr2=html.escape(str(lstr2)),
                            modes=modes, length=length, size=html.escape(size),
                            choices2=choices2,
-                           outs=outs, last=html.escape(self.last_prompt),
+                           outs=outs, last=html.escape(L["prompt"]),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def status_page(self):
-        s = LIVE.snapshot()
-        running = bool(s["prompt_id"]) and not s["done"]
-        el = int(time.time() - s["started"])
-        elapsed = "%d:%02d" % (el // 60, el % 60)
-        parts = []
-
-        if running:
-            head, refresh = "Working", '<meta http-equiv="refresh" content="2">'
-            if s["max"]:
-                pct = min(100, int(100.0 * s["value"] / s["max"]))
-                parts.append('<div class="bar"><i style="width:{}%"></i></div>'
-                             '<p class="note">step {} of {} &middot; {} elapsed</p>'
-                             .format(pct, s["value"], s["max"], elapsed))
-            else:
-                parts.append('<p class="note">starting up &middot; {} elapsed. '
-                             'Loading a model off disk takes a while the first '
-                             'time.</p>'.format(elapsed))
-            if s["preview"]:
-                # The seq in the query string is what makes Safari fetch the
-                # new frame rather than the one it already has.
-                parts.append('<img class="shot" src="/preview?s={}" alt="">'
-                             .format(s["seq"]))
-                parts.append('<p class="note">A rough decode of the latent, '
-                             'not the final image - it sharpens as it goes.</p>')
-            elif s["max"]:
-                parts.append('<p class="note">No preview frames are arriving. '
-                             'ComfyUI only sends them when it was started with '
-                             '<code>--preview-method auto</code>; the step count '
-                             'above works either way.</p>')
-        elif s["error"]:
-            head, refresh = "Failed", ""
-            parts.append('<p class="err">{}</p>'.format(html.escape(s["error"][:600])))
-        elif s["prompt_id"]:
-            head, refresh = "Done", ""
-            parts.append('<p class="ok">finished in {}</p>'.format(elapsed))
-            # Fall back to the newest files on disk if ComfyUI reported the
-            # job done without naming its outputs.
-            outs = [o for o in s["outputs"]
-                    if os.path.isfile(os.path.join(self.outdir, o))] \
-                or self.listing(self.outdir, 4)
-            parts.append('<div class="grid">'
-                         + "".join(cell(o) for o in outs) + '</div>')
-        else:
-            head, refresh = "Idle", ""
-            parts.append('<p class="note">Nothing queued. Start something from '
-                         'the form and this page follows it.</p>')
-
-        sub = s["label"] or "no job yet"
-        if not s["connected"]:
-            sub += " \u00b7 not attached to ComfyUI"
-        elif s["queue"] > 1:
-            sub += " \u00b7 {} more waiting".format(s["queue"] - 1)
-        body = STATUS.format(refresh=refresh, head=head,
-                             sub=html.escape(sub),
-                             body="".join(parts)).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def live_block(self):
+        """What is happening right now, as a fragment above the form.
+
+        This used to be its own page, which meant every run ended on a
+        dead end: read the result, press back, retype. Putting it here
+        costs a meta refresh while something is running and gives back a
+        form that is still filled in when it finishes.
+        """
+        s = LIVE.snapshot()
+        running = bool(s["prompt_id"]) and not s["done"]
+        el = int(time.time() - s["started"])
+        elapsed = "%d:%02d" % (el // 60, el % 60)
+        out = []
+        if running:
+            if s["max"]:
+                pct = min(100, int(100.0 * s["value"] / s["max"]))
+                out.append('<div class="bar"><i style="width:{}%"></i></div>'
+                           '<p class="note">step {} of {} &middot; {} elapsed'
+                           '</p>'.format(pct, s["value"], s["max"], elapsed))
+            else:
+                out.append('<p class="note">starting up &middot; {} elapsed. '
+                           'Loading a model off disk takes a while the first '
+                           'time.</p>'.format(elapsed))
+            if s["preview"]:
+                out.append('<img class="shot" src="/preview?s={}" alt="">'
+                           .format(s["seq"]))
+                out.append('<p class="note">A rough decode of the latent, not '
+                           'the final image - it sharpens as it goes.</p>')
+            elif s["max"]:
+                out.append('<p class="note">No preview frames are arriving. '
+                           'ComfyUI only sends them when started with '
+                           '<code>--preview-method auto</code>.</p>')
+            refresh = '<meta http-equiv="refresh" content="3">'
+        elif s["error"]:
+            out.append('<p class="err">{}</p>'.format(html.escape(s["error"][:600])))
+            refresh = ""
+        elif s["prompt_id"]:
+            outs = [o for o in s["outputs"]
+                    if os.path.isfile(os.path.join(self.outdir, o))] \
+                or self.listing(self.outdir, 1)
+            out.append('<p class="ok">done in {}</p>'.format(elapsed))
+            out.append('<div class="grid">'
+                       + "".join(cell(o) for o in outs) + '</div>')
+            refresh = ""
+        else:
+            refresh = ""
+        if out:
+            out.insert(0, '<div class="live">')
+            out.append('</div>')
+        return refresh, "".join(out)
 
     def redirect(self, to):
         self.send_response(303)
@@ -890,7 +902,21 @@ class H(BaseHTTPRequestHandler):
             return
         u = urllib.parse.urlsplit(self.path)
         if u.path == "/status":
-            return self.status_page()
+            return self.redirect("/")     # it all lives on one page now
+        if u.path == "/reuse":
+            # Editing an edit is the normal second step, and it should not
+            # mean downloading the result and uploading it again.
+            rel = urllib.parse.parse_qs(u.query).get("n", [""])[0]
+            src = os.path.abspath(os.path.join(self.outdir, rel))
+            if src.startswith(os.path.abspath(self.outdir) + os.sep) \
+               and os.path.isfile(src) and not src.lower().endswith(VID_EXT):
+                nm = time.strftime("%H%M%S_") + safe(os.path.basename(src))
+                os.makedirs(self.indir, exist_ok=True)
+                with open(src, "rb") as a:
+                    with open(os.path.join(self.indir, nm), "wb") as b:
+                        b.write(a.read())
+                H.last["existing"] = nm
+            return self.redirect("/")
         if u.path == "/preview":
             blob, mime = LIVE.frame()
             if not blob:
@@ -975,15 +1001,27 @@ class H(BaseHTTPRequestHandler):
                 return nm
             return fields.get(existing) or ""
 
+        # Remember the lot before anything can go wrong, so an error comes
+        # back to a filled-in form rather than an empty one.
+        for k in ("prompt", "model", "lora", "lora2", "mode", "size"):
+            if k in fields:
+                H.last[k] = fields[k]
+        H.last["lstr"] = fields.get("lora_strength", H.last["lstr"])
+        H.last["lstr2"] = fields.get("lora_strength2", H.last["lstr2"])
+        H.last["steps"] = fields.get("steps", H.last["steps"])
+        H.last["cfg"] = fields.get("cfg", H.last["cfg"])
+        H.last["length"] = fields.get("length", H.last["length"])
+
         image = stash("photo", "existing")
         end_image = stash("photo2", "existing2")
+        H.last["existing"] = image or ""
+        H.last["existing2"] = end_image or ""
         if not image:
             return self.render('<p class="err">pick or upload a photo</p>')
 
         prompt = fields.get("prompt", "")
         if not prompt:
             return self.render('<p class="err">type an instruction</p>')
-        self.last_prompt = prompt
 
         try:
             steps = max(1, min(60, int(fields.get("steps") or 4)))
@@ -999,13 +1037,10 @@ class H(BaseHTTPRequestHandler):
         lora2 = fields.get("lora2") or None
         mode = "video" if fields.get("mode") == "video" else "image"
         size = "{}x{}".format(width, height)
-        keep = dict(steps=steps, cfg=cfg, lora=lora or "", lstr=lstr,
-                    lora2=lora2 or "", lstr2=lstr2,
-                    mode=mode, length=length, size=size)
         mm = self.models()
         for pick in (lora, lora2):
             if pick and pick not in mm["lora"]:
-                return self.render('<p class="err">no such LoRA</p>', **keep)
+                return self.render('<p class="err">no such LoRA</p>')
 
         # Both halves of one pair resolve to the same pair, so choosing
         # them in the two slots would apply it twice at double strength.
@@ -1024,7 +1059,7 @@ class H(BaseHTTPRequestHandler):
         if mode == "video":
             if not self.video_ready(mm):
                 return self.render('<p class="err">video is not set up on this '
-                                   'box - run add-wan-video.sh</p>', **keep)
+                                   'box - run add-wan-video.sh</p>')
             # Wan wants both dimensions on a multiple of 16, and the frame
             # count on 4n+1; ComfyUI errors out unhelpfully otherwise.
             width, height = (width // 16) * 16, (height // 16) * 16
@@ -1042,7 +1077,7 @@ class H(BaseHTTPRequestHandler):
                     loras=chain, end_image=end_image or None)
             except Exception as e:
                 return self.render('<p class="err">could not build the video '
-                                   'graph: {}</p>'.format(html.escape(str(e))), **keep)
+                                   'graph: {}</p>'.format(html.escape(str(e))))
             try:
                 r = api(self.comfy, "/prompt",
                         {"prompt": g, "client_id": CLIENT_ID})
@@ -1050,15 +1085,15 @@ class H(BaseHTTPRequestHandler):
                 return self.render('<p class="err">ComfyUI rejected it:</p>'
                                    '<pre class="note" style="white-space:pre-wrap">{}</pre>'
                                    .format(html.escape(e.read().decode("utf-8", "replace")[:800])),
-                                   **keep)
+                                   )
             except Exception as e:
-                return self.render('<p class="err">{}</p>'.format(html.escape(str(e))), **keep)
+                return self.render('<p class="err">{}</p>'.format(html.escape(str(e))))
             LIVE.queued(str(r.get("prompt_id", "")),
                         "{} frames at {}x{}{}{}".format(
                             length, width, height,
                             ", ending on your last frame" if end_image else "",
                             ", {} LoRA(s)".format(len(chain)) if chain else ""))
-            return self.redirect("/status")
+            return self.redirect("/")
 
         sel = fields.get("model", "")
         kind, _, name = sel.partition(":")
@@ -1074,10 +1109,10 @@ class H(BaseHTTPRequestHandler):
                 return self.render('<p class="err">{} is not a Qwen edit model. '
                                    'This form only drives Qwen editing; Klein '
                                    'lives in Forge on 7860.</p>'
-                                   .format(html.escape(name)), **keep)
+                                   .format(html.escape(name)))
             else:
                 if not (mm["clip"] and mm["vae"]):
-                    return self.render('<p class="err">no clip or vae installed</p>', **keep)
+                    return self.render('<p class="err">no clip or vae installed</p>')
                 g = self.graph.build(mode="separate", unet=name,
                                      clip=next((c for c in mm["clip"] if "2.5_vl" in c or "2.5-vl" in c), mm["clip"][0]),
                                      vae=next((v for v in mm["vae"] if "qwen" in v.lower()), mm["vae"][0]),
@@ -1088,7 +1123,7 @@ class H(BaseHTTPRequestHandler):
                                      loras=[(hi, st) for hi, _lo, st in chain])
         except Exception as e:
             return self.render('<p class="err">could not build the graph: {}</p>'
-                               .format(html.escape(str(e))), **keep)
+                               .format(html.escape(str(e))))
 
         try:
             r = api(self.comfy, "/prompt", {"prompt": g, "client_id": CLIENT_ID})
@@ -1096,15 +1131,15 @@ class H(BaseHTTPRequestHandler):
             detail = e.read().decode("utf-8", "replace")[:800]
             return self.render('<p class="err">ComfyUI rejected it:</p>'
                                '<pre class="note" style="white-space:pre-wrap">{}</pre>'
-                               .format(html.escape(detail)), **keep)
+                               .format(html.escape(detail)))
         except Exception as e:
             return self.render('<p class="err">{}</p>'.format(html.escape(str(e))),
-                               **keep)
+                               )
 
         # Straight to the progress page rather than back to the form: the
         # whole reason for queueing is to watch it happen.
         LIVE.queued(str(r.get("prompt_id", "")), prompt[:70])
-        self.redirect("/status")
+        self.redirect("/")
 
 
 def main():

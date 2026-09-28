@@ -607,6 +607,38 @@ class Graph:
                           ", ".join(names) + ")")
         return None
 
+    def fill_required(self, node, given):
+        """Add any required input this ComfyUI wants that we did not set.
+
+        Node signatures drift between releases - ImageScaleToTotalPixels
+        grew a resolution_steps field - and one missing required input has
+        the whole graph rejected. The defaults are sitting in
+        /object_info, so take them from there rather than guess, which is
+        the same reason the rest of this class reads the node list instead
+        of hardcoding it.
+        """
+        spec = (self.info.get(node) or {}).get("input", {}).get("required", {})
+        out = dict(given)
+        for name, meta in spec.items():
+            if name in out:
+                continue
+            kind = meta[0] if isinstance(meta, (list, tuple)) and meta else None
+            opts = (meta[1] if isinstance(meta, (list, tuple)) and len(meta) > 1
+                    and isinstance(meta[1], dict) else {})
+            if "default" in opts:
+                out[name] = opts["default"]
+            elif isinstance(kind, list) and kind:
+                out[name] = kind[0]          # an enum: take its first value
+            elif kind == "INT":
+                out[name] = 0
+            elif kind == "FLOAT":
+                out[name] = 0.0
+            elif kind == "STRING":
+                out[name] = ""
+            # Anything else wants a link from another node, and an invented
+            # one would fail further in, where it is harder to read.
+        return out
+
     def inputs_of(self, node):
         spec = self.info.get(node, {}).get("input", {})
         return list(spec.get("required", {})) + list(spec.get("optional", {}))
@@ -702,14 +734,19 @@ class Graph:
         src = ["im0", 0]
         mp = (width * height) / 1e6 if width and height else 0
         if mp and "ImageScaleToTotalPixels" in self.info:
-            g["sc"] = {"class_type": "ImageScaleToTotalPixels", "inputs": {
-                "image": src, "upscale_method": "lanczos",
-                "megapixels": round(mp, 2)}}
+            g["sc"] = {"class_type": "ImageScaleToTotalPixels",
+                       "inputs": self.fill_required(
+                           "ImageScaleToTotalPixels",
+                           {"image": src, "upscale_method": "lanczos",
+                            "megapixels": round(mp, 2)})}
             src = ["sc", 0]
         elif width and height and "ImageScale" in self.info:
-            g["sc"] = {"class_type": "ImageScale", "inputs": {
-                "image": src, "upscale_method": "lanczos",
-                "width": width, "height": height, "crop": "disabled"}}
+            g["sc"] = {"class_type": "ImageScale",
+                       "inputs": self.fill_required(
+                           "ImageScale",
+                           {"image": src, "upscale_method": "lanczos",
+                            "width": width, "height": height,
+                            "crop": "disabled"})}
             src = ["sc", 0]
         # Note the encoder still gets the untouched images: the reference
         # conditioning is where facial detail comes from, and there is no
@@ -817,8 +854,11 @@ class Graph:
         # that frame out of a finished video file afterwards means decoding
         # vp9 somewhere - here it costs one node.
         if save_last and "ImageFromBatch" in self.info:
-            g["lf"] = {"class_type": "ImageFromBatch", "inputs": {
-                "image": ["de", 0], "batch_index": length - 1, "length": 1}}
+            g["lf"] = {"class_type": "ImageFromBatch",
+                       "inputs": self.fill_required(
+                           "ImageFromBatch",
+                           {"image": ["de", 0], "batch_index": length - 1,
+                            "length": 1})}
             g["ls"] = {"class_type": "SaveImage", "inputs": {
                 "images": ["lf", 0], "filename_prefix": "lastframe"}}
 

@@ -51,8 +51,8 @@ and if a required node is absent the page says which one instead of posting
 a graph that fails somewhere inside ComfyUI.
 """
 
-import argparse, base64, hmac, html, json, os, re, socket, struct, sys
-import threading, time, urllib.parse, urllib.request, uuid
+import argparse, base64, hmac, html, json, os, re, shutil, socket, struct
+import subprocess, sys, threading, time, urllib.parse, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BYTES = 64 * 1024 * 1024
@@ -224,6 +224,9 @@ class Live:
     def _clear(self, prompt_id, label):
         self.prompt_id = prompt_id
         self.label = label
+        self.clip = 0
+        self.clips = 0
+        self.reel = ""
         self.node = ""
         self.value = 0
         self.max = 0
@@ -232,10 +235,11 @@ class Live:
         self.outputs = []
         self.started = time.time()
 
-    def queued(self, prompt_id, label):
+    def queued(self, prompt_id, label, clip=0, clips=0):
         """Called when this form posts a job, before ComfyUI says anything."""
         with self.lock:
             self._clear(prompt_id, label)
+            self.clip, self.clips = clip, clips
             self.preview = b""
             self.seq += 1
 
@@ -246,6 +250,7 @@ class Live:
                         max=self.max, queue=self.queue, done=self.done,
                         error=self.error, outputs=list(self.outputs),
                         started=self.started, seq=self.seq,
+                        clip=self.clip, clips=self.clips, reel=self.reel,
                         preview=bool(self.preview))
 
     def frame(self):
@@ -420,6 +425,156 @@ def ws_listen(base, live):
         delay = min(delay * 2, 20)
 
 
+def wait_done(prompt_id, timeout=7200):
+    """Block until ComfyUI finishes that job, and hand back its outputs."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = LIVE.snapshot()
+        if s["error"]:
+            raise RuntimeError(s["error"])
+        if s["prompt_id"] == prompt_id and s["done"]:
+            return s["outputs"]
+        time.sleep(1.5)
+    raise RuntimeError("gave up waiting for ComfyUI after %d minutes"
+                       % (timeout // 60))
+
+
+PYAV_CONCAT = """
+import av, sys
+out, ins = sys.argv[1], sys.argv[2:]
+o = av.open(out, "w")
+ostream, offset = None, 0
+for path in ins:
+    c = av.open(path)
+    vs = c.streams.video[0]
+    if ostream is None:
+        # This call was renamed between PyAV versions, and ComfyUI's venv
+        # is whatever it happens to be.
+        ostream = (o.add_stream_from_template(vs)
+                   if hasattr(o, "add_stream_from_template")
+                   else o.add_stream(template=vs))
+    end = 0
+    for pkt in c.demux(vs):
+        if pkt.dts is None:
+            continue
+        pkt.stream = ostream
+        pkt.pts += offset
+        pkt.dts += offset
+        end = max(end, pkt.pts + (pkt.duration or 0))
+        o.mux(pkt)
+    offset = end
+    c.close()
+o.close()
+"""
+
+
+def stitch(paths, out, comfy_dir):
+    """Join the clips end to end without re-encoding them.
+
+    ffmpeg if the box has it. Otherwise ComfyUI's own environment, which
+    must have PyAV because that is what ComfyUI writes webm with - so
+    there is no new dependency either way.
+    """
+    ff = shutil.which("ffmpeg")
+    if ff:
+        listing = out + ".txt"
+        with open(listing, "w") as fh:
+            for p in paths:
+                fh.write("file '%s'\n" % p.replace("'", "'\\''"))
+        try:
+            subprocess.run([ff, "-y", "-f", "concat", "-safe", "0",
+                            "-i", listing, "-c", "copy", out],
+                           check=True, capture_output=True, timeout=900)
+            return out
+        finally:
+            try:
+                os.remove(listing)
+            except OSError:
+                pass
+    py = os.path.join(comfy_dir, "venv", "bin", "python")
+    if os.path.exists(py):
+        r = subprocess.run([py, "-c", PYAV_CONCAT, out] + list(paths),
+                           capture_output=True, timeout=900)
+        if r.returncode != 0:
+            # Without this the failure arrives as a bare exit code and the
+            # reason stays inside the subprocess.
+            raise RuntimeError(r.stderr.decode("utf-8", "replace").strip()[-400:]
+                               or "pyav exited %d" % r.returncode)
+        return out
+    raise RuntimeError("no ffmpeg and no ComfyUI venv to borrow PyAV from")
+
+
+def sequence_worker(cfg):
+    """One clip after another, each starting on the last frame of the one
+    before, then joined into a single file.
+
+    Wan was trained on five seconds. Asking it for thirty in one go does
+    not give you thirty good seconds, it gives you five good ones and
+    twenty-five of drift. Chaining keeps every clip inside what the model
+    knows."""
+    outdir, indir = cfg["outdir"], cfg["indir"]
+    prompts = cfg["prompts"]
+    n = len(prompts)
+    clips = []
+    try:
+        current = cfg["image"]
+        for i, prompt in enumerate(prompts):
+            g = cfg["graph"].build_video(
+                high=cfg["high"], low=cfg["low"], clip=cfg["clip"],
+                vae=cfg["vae"], image=current, prompt=prompt,
+                negative="static, still, blurry, distorted",
+                steps=cfg["steps"], cfg=cfg["cfg"],
+                seed=(int(time.time() * 1000) + i * 7919) % 2**31,
+                width=cfg["width"], height=cfg["height"],
+                length=cfg["length"], loras=cfg["loras"],
+                end_image=None, save_last=(i < n - 1))
+            r = api(cfg["comfy"], "/prompt",
+                    {"prompt": g, "client_id": CLIENT_ID})
+            pid = str(r.get("prompt_id", ""))
+            LIVE.queued(pid, "clip %d of %d - %s" % (i + 1, n, prompt[:60]),
+                        i + 1, n)
+            outs = wait_done(pid, cfg["timeout"])
+            vids = [o for o in outs if o.lower().endswith((".webm", ".mp4"))]
+            stills = [o for o in outs
+                      if os.path.basename(o).startswith("lastframe")]
+            if not vids:
+                raise RuntimeError("clip %d produced no video file" % (i + 1))
+            clips.append(os.path.join(outdir, vids[0]))
+            if i < n - 1:
+                if not stills:
+                    raise RuntimeError(
+                        "clip %d gave no last frame, so the next one has "
+                        "nothing to continue from. This ComfyUI has no "
+                        "ImageFromBatch node." % (i + 1))
+                nm = time.strftime("%H%M%S_") + "chain%02d.png" % (i + 1)
+                shutil.copy2(os.path.join(outdir, stills[0]),
+                             os.path.join(indir, nm))
+                current = nm
+
+        with LIVE.lock:
+            LIVE.label = "joining %d clips" % len(clips)
+        reel = os.path.join(outdir, time.strftime("reel_%H%M%S") + ".webm")
+        try:
+            stitch(clips, reel, cfg["comfy_dir"])
+            with LIVE.lock:
+                LIVE.reel = os.path.basename(reel)
+                LIVE.label = "%d clips, about %d seconds" % (
+                    n, n * cfg["length"] // 16)
+        except Exception as e:
+            with LIVE.lock:
+                LIVE.reel = ""
+                LIVE.label = ("the clips are all there, but joining them "
+                              "failed: %s" % str(e)[:200])
+        with LIVE.lock:
+            LIVE.done = True
+            LIVE.clip = n
+    except Exception as e:
+        with LIVE.lock:
+            LIVE.error = "%s (after %d of %d clips)" % (str(e)[:600],
+                                                        len(clips), n)
+            LIVE.done = True
+
+
 class Graph:
     """Builds the Qwen-edit graph against whatever this ComfyUI provides."""
 
@@ -557,7 +712,7 @@ class Graph:
 
     def build_video(self, *, high, low, clip, vae, image, prompt, negative,
                     steps, cfg, seed, width, height, length, loras=(),
-                    end_image=None):
+                    end_image=None, save_last=False):
         """Wan 2.2 I2V: two experts over one latent, high noise then low."""
         if not self.i2v:
             raise RuntimeError("WanImageToVideo node is not available")
@@ -630,6 +785,16 @@ class Graph:
             "end_at_step": 10000, "return_with_leftover_noise": "disable"}}
         g["de"] = {"class_type": "VAEDecode",
                    "inputs": {"samples": ["k2", 0], "vae": ["va", 0]}}
+
+        # The last frame, saved as a still. A clip that starts where the
+        # previous one ended is how you get past five seconds, and pulling
+        # that frame out of a finished video file afterwards means decoding
+        # vp9 somewhere - here it costs one node.
+        if save_last and "ImageFromBatch" in self.info:
+            g["lf"] = {"class_type": "ImageFromBatch", "inputs": {
+                "image": ["de", 0], "batch_index": length - 1, "length": 1}}
+            g["ls"] = {"class_type": "SaveImage", "inputs": {
+                "images": ["lf", 0], "filename_prefix": "lastframe"}}
 
         # Which video writer exists moves between releases; frames are the
         # fallback, and beat failing outright.
@@ -746,7 +911,14 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Frames (video)</label><input type="number" name="length" value="{length}" min="9" max="161"></div>
     <div><label>Size</label><input type="text" name="size" value="{size}"></div>
   </div>
-  <p class="note">To put two people in one picture, pick one in each
+  <label>Clips to chain &mdash; each carries on from the last frame of the one before</label>
+  <input type="number" name="clips" value="{clips}" min="1" max="8">
+  <p class="note">For a long video, raise Clips. At 81 frames each that is
+  5 seconds a clip, so 4 gives 20 seconds and 6 gives 30. Write one line
+  of instruction per clip in the box above and each gets its own; one line
+  is reused for all of them. They are joined into a single file at the
+  end.<br><br>
+  To put two people in one picture, pick one in each
   image slot and say which is which in the instruction &mdash; &ldquo;the
   man from image 1 and the woman from image 2, sitting at a table&rdquo;.
   The first image sets the size of the output.<br><br>
@@ -851,7 +1023,7 @@ class H(BaseHTTPRequestHandler):
     # forgets makes you retype the nine things you did not want to change.
     last = {"prompt": "", "model": "", "lora": "", "lstr": "1.0",
             "lora2": "", "lstr2": "1.0", "steps": "4", "cfg": "1.0",
-            "mode": "image", "length": "81", "size": "832x480",
+            "mode": "image", "length": "81", "size": "832x480", "clips": "1",
             "existing": "", "existing2": "", "existing3": ""}
 
     def log_message(self, f, *a):
@@ -904,6 +1076,7 @@ class H(BaseHTTPRequestHandler):
 
     def render(self, msg=""):
         L = self.last
+        L.setdefault("clips", "1")
         steps, cfg = L["steps"], L["cfg"]
         lora, lstr = L["lora"], L["lstr"]
         lora2, lstr2 = L["lora2"], L["lstr2"]
@@ -981,6 +1154,7 @@ class H(BaseHTTPRequestHandler):
                            loras=loras, lstr=html.escape(str(lstr)),
                            loras2=loras2, lstr2=html.escape(str(lstr2)),
                            modes=modes, length=length, size=html.escape(size),
+                           clips=html.escape(str(L["clips"])),
                            choices2=choices2, choices3=choices3,
                            extra=extra, third=third,
                            outs=outs, last=html.escape(L["prompt"]),
@@ -1013,6 +1187,9 @@ class H(BaseHTTPRequestHandler):
             # With previews off there is otherwise nothing on screen but a
             # bar, and no way to tell which of two similar attempts is the
             # one currently running.
+            if s["clips"] > 1:
+                out.append('<p class="note">clip {} of {}</p>'.format(
+                    s["clip"], s["clips"]))
             if s["label"]:
                 out.append('<p class="said">{}</p>'.format(html.escape(s["label"])))
             if s["max"]:
@@ -1041,6 +1218,12 @@ class H(BaseHTTPRequestHandler):
             outs = [o for o in s["outputs"]
                     if os.path.isfile(os.path.join(self.outdir, o))] \
                 or self.listing(self.outdir, 1)
+            if s["reel"]:
+                out.append('<p class="ok">{} &mdash; the whole thing, joined'
+                           '</p>'.format(html.escape(s["label"])))
+                out.append('<div class="grid">' + cell(s["reel"]) + '</div>')
+            elif s["clips"] > 1:
+                out.append('<p class="ok">{}</p>'.format(html.escape(s["label"])))
             out.append('<p class="ok">done in {}</p>'.format(elapsed))
             out.append('<div class="grid">'
                        + "".join(self.cells(outs)) + '</div>')
@@ -1182,6 +1365,7 @@ class H(BaseHTTPRequestHandler):
         H.last["steps"] = fields.get("steps", H.last["steps"])
         H.last["cfg"] = fields.get("cfg", H.last["cfg"])
         H.last["length"] = fields.get("length", H.last["length"])
+        H.last["clips"] = fields.get("clips", H.last.get("clips", "1"))
 
         image = stash("photo", "existing")
         image2 = stash("photo2", "existing2")
@@ -1203,6 +1387,7 @@ class H(BaseHTTPRequestHandler):
             lstr = max(0.0, min(2.0, float(fields.get("lora_strength") or 1.0)))
             lstr2 = max(0.0, min(2.0, float(fields.get("lora_strength2") or 1.0)))
             length = max(9, min(161, int(fields.get("length") or 49)))
+            clips = max(1, min(8, int(fields.get("clips") or 1)))
             w, _, h = (fields.get("size") or "832x480").lower().partition("x")
             width, height = int(w), int(h)
         except ValueError:
@@ -1238,6 +1423,33 @@ class H(BaseHTTPRequestHandler):
             # count on 4n+1; ComfyUI errors out unhelpfully otherwise.
             width, height = (width // 16) * 16, (height // 16) * 16
             length = ((length - 1) // 4) * 4 + 1
+
+            if clips > 1:
+                # One line of instruction per clip; a single line means the
+                # same thing happens throughout, which is usually what a
+                # one-line answer meant.
+                lines = [l.strip() for l in prompt.splitlines() if l.strip()]
+                while len(lines) < clips:
+                    lines.append(lines[-1])
+                if LIVE.snapshot()["clips"] and not LIVE.snapshot()["done"]:
+                    return self.render('<p class="err">a sequence is already '
+                                       'running</p>')
+                if not self.graph.info.get("ImageFromBatch"):
+                    return self.render('<p class="err">this ComfyUI has no '
+                                       'ImageFromBatch node, so a clip cannot '
+                                       'hand its last frame to the next '
+                                       'one</p>')
+                LIVE.queued("", "starting %d clips" % clips, 1, clips)
+                threading.Thread(target=sequence_worker, args=(dict(
+                    graph=self.graph, comfy=self.comfy,
+                    comfy_dir=os.path.dirname(self.outdir),
+                    outdir=self.outdir, indir=self.indir,
+                    high=mm["wan_high"][0], low=mm["wan_low"][0],
+                    clip=mm["wan_clip"][0], vae=mm["wan_vae"][0],
+                    image=image, prompts=lines[:clips], steps=steps, cfg=cfg,
+                    width=width, height=height, length=length, loras=chain,
+                    timeout=7200),), daemon=True).start()
+                return self.redirect("/")
 
             try:
                 g = self.graph.build_video(

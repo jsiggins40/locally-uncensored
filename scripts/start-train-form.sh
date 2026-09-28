@@ -67,6 +67,22 @@ def parse_multipart(body, boundary):
                data[:-2] if data.endswith(b"\r\n") else data)
 
 
+def gpu_state():
+    """Free VRAM in MB and whatever is holding the rest, or (-1, "")."""
+    try:
+        free = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, timeout=10).stdout.decode().strip().split("\n")[0]
+        apps = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=used_memory,process_name",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, timeout=10).stdout.decode().strip()
+        return int(free), apps
+    except Exception:
+        return -1, ""
+
+
 def safe(n):
     return re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(n or "x"))[:80] or "x"
 
@@ -562,6 +578,24 @@ class H(BaseHTTPRequestHandler):
             return self.render('<p class="err">something is already '
                                'training. One at a time - they each want '
                                'the whole card.</p>')
+        # Training wants the card to itself. ComfyUI holding a 39GB model
+        # while this stages a 20B base is how the box runs out of memory
+        # and reboots - and that happens well after the photos are up and
+        # the wait has started.
+        free, apps = gpu_state()
+        if 0 <= free < 40000:
+            holders = "".join(
+                "<br>&nbsp;&nbsp;%s" % html.escape(l.strip())
+                for l in apps.splitlines() if l.strip())
+            return self.render(
+                '<p class="err">Only {:.0f}GB of VRAM is free, and training '
+                'needs about 40GB. Something else is holding it:{}</p>'
+                '<p class="note">Stop ComfyUI first &mdash; '
+                '<code>tmux kill-session -t =comfy</code> &mdash; then start '
+                'this, and put everything back afterwards with '
+                '<code>bash ~/r.sh</code>. Editing and training cannot share '
+                'the card.</p>'.format(free / 1024.0, holders or " (unknown)"))
+
         name = slug(fields.get("name", ""))
         trigger = fields.get("trigger", "").strip()
         if not name:

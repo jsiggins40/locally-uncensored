@@ -75,7 +75,8 @@ fi
 # Plain PyPI rather than a pinned CUDA index: the pinned one has repeatedly
 # resolved to a torch too old for what these repos annotate.
 echo "  torch (this is the slow part)"
-./venv/bin/pip install -q torch torchvision 2>&1 | tail -3
+# torchaudio too: ai-toolkit imports it on startup and does not ask for it.
+./venv/bin/pip install -q torch torchvision torchaudio 2>&1 | tail -3
 ./venv/bin/python -c 'import torch;print("  torch",torch.__version__,"cuda",torch.cuda.is_available())' \
   || die "torch did not install"
 echo "  the rest"
@@ -104,6 +105,32 @@ if ! ./venv/bin/python -c 'import cv2' 2>/dev/null; then
 fi
 ./venv/bin/python -c 'import cv2; print("  cv2", cv2.__version__)' \
   || die "opencv will not import, and the trainer needs it"
+
+say "can the trainer start"
+# Its requirements file is not the whole story - the import chain reaches
+# torchaudio and opencv, neither of which is listed. Rather than name them
+# one at a time as each new one surfaces, do the import the trainer does
+# at startup and install whatever it complains about. Ninety minutes into
+# a run is a bad time to find the next one.
+for _ in 1 2 3 4 5 6; do
+  MISSING=$(./venv/bin/python -c "from jobs import ExtensionJob" 2>&1 \
+            | sed -n "s/.*No module named '\([^']*\)'.*/\1/p" | head -1)
+  [ -z "$MISSING" ] && break
+  # A few import names differ from what you install to get them.
+  case "$MISSING" in
+    cv2)     PKG=opencv-python-headless ;;
+    PIL)     PKG=pillow ;;
+    yaml)    PKG=pyyaml ;;
+    skimage) PKG=scikit-image ;;
+    *)       PKG="$MISSING" ;;
+  esac
+  echo "  missing $MISSING; installing $PKG"
+  ./venv/bin/pip install -q "$PKG" 2>&1 | tail -1
+done
+./venv/bin/python -c "from jobs import ExtensionJob" 2>/dev/null \
+  && echo "  the trainer imports cleanly" \
+  || die "the trainer still will not start:
+$(./venv/bin/python -c 'from jobs import ExtensionJob' 2>&1 | tail -4)"
 
 # adamw8bit needs bitsandbytes and it is not always pulled in.
 ./venv/bin/python -c 'import bitsandbytes' 2>/dev/null \

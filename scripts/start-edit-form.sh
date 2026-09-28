@@ -226,6 +226,7 @@ class Live:
         self.label = label
         self.clip = 0
         self.clips = 0
+        self.unit = "clip"
         self.reel = ""
         self.node = ""
         self.value = 0
@@ -235,11 +236,11 @@ class Live:
         self.outputs = []
         self.started = time.time()
 
-    def queued(self, prompt_id, label, clip=0, clips=0):
+    def queued(self, prompt_id, label, clip=0, clips=0, unit="clip"):
         """Called when this form posts a job, before ComfyUI says anything."""
         with self.lock:
             self._clear(prompt_id, label)
-            self.clip, self.clips = clip, clips
+            self.clip, self.clips, self.unit = clip, clips, unit
             self.preview = b""
             self.seq += 1
 
@@ -251,6 +252,7 @@ class Live:
                         error=self.error, outputs=list(self.outputs),
                         started=self.started, seq=self.seq,
                         clip=self.clip, clips=self.clips, reel=self.reel,
+                        unit=self.unit,
                         preview=bool(self.preview))
 
     def frame(self):
@@ -504,6 +506,41 @@ def stitch(paths, out, comfy_dir):
     raise RuntimeError("no ffmpeg and no ComfyUI venv to borrow PyAV from")
 
 
+def batch_worker(cfg):
+    """Several stills from one submission, queued one at a time.
+
+    Either a storyboard - one line of prompt per frame - or the same
+    instruction several times over, which with a different seed each time
+    is how you get variations to choose between rather than one roll of
+    the dice.
+    """
+    made = []
+    prompts = cfg["prompts"]
+    n = len(prompts)
+    try:
+        for i, prompt in enumerate(prompts):
+            g = cfg["build"](prompt,
+                             (int(time.time() * 1000) + i * 7919) % 2**31)
+            r = api(cfg["comfy"], "/prompt",
+                    {"prompt": g, "client_id": CLIENT_ID})
+            pid = str(r.get("prompt_id", ""))
+            LIVE.queued(pid, "image %d of %d - %s" % (i + 1, n, prompt[:60]),
+                        i + 1, n, "image")
+            outs = wait_done(pid, cfg["timeout"])
+            made += [o for o in outs
+                     if o.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+        with LIVE.lock:
+            LIVE.outputs = made
+            LIVE.label = "%d images" % n
+            LIVE.done = True
+            LIVE.clip = n
+    except Exception as e:
+        with LIVE.lock:
+            LIVE.outputs = made          # keep whatever did come out
+            LIVE.error = "%s (after %d of %d)" % (str(e)[:600], len(made), n)
+            LIVE.done = True
+
+
 def sequence_worker(cfg):
     """One clip after another, each starting on the last frame of the one
     before, then joined into a single file.
@@ -532,7 +569,7 @@ def sequence_worker(cfg):
                     {"prompt": g, "client_id": CLIENT_ID})
             pid = str(r.get("prompt_id", ""))
             LIVE.queued(pid, "clip %d of %d - %s" % (i + 1, n, prompt[:60]),
-                        i + 1, n)
+                        i + 1, n, "clip")
             outs = wait_done(pid, cfg["timeout"])
             vids = [o for o in outs if o.lower().endswith((".webm", ".mp4"))]
             stills = [o for o in outs
@@ -976,6 +1013,10 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Steps</label><input type="number" name="steps" value="{steps}" min="1" max="60"></div>
     <div><label>CFG</label><input type="text" name="cfg" value="{cfg}"></div>
   </div>
+  <p class="note">Six images from one press: put six lines in the
+  instruction box and you get six frames of a scene, or leave one line and
+  you get six goes at it with different seeds, to pick from. Each keeps
+  its own prompt underneath it in Results.</p>
   <p class="note">Size applies to editing as well as video: the photo is
   scaled to that many pixels before it is worked on. A phone photo left
   alone is twelve megapixels, which is twelve times the work for a picture
@@ -986,7 +1027,11 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Frames (video)</label><input type="number" name="length" value="{length}" min="9" max="161"></div>
     <div><label>Size</label><input type="text" name="size" value="{size}"></div>
   </div>
-  <label>Clips to chain &mdash; each carries on from the last frame of the one before</label>
+  <label>Images to make (editing) &mdash; one prompt line each, or one line
+  repeated for variations</label>
+  <input type="number" name="count" value="{count}" min="1" max="6">
+
+  <label>Clips to chain (video) &mdash; each carries on from the last frame of the one before</label>
   <input type="number" name="clips" value="{clips}" min="1" max="8">
   <p class="note">If an edit changes a face you wanted kept, lower Denoise
   before anything else. At 1.0 the whole picture is regenerated and the
@@ -1118,10 +1163,12 @@ class H(BaseHTTPRequestHandler):
     modes = {
         "image": {"steps": "4", "cfg": "1.0", "size": "1024x1024",
                   "length": "81", "lora": "", "lstr": "1.0",
-                  "lora2": "", "lstr2": "1.0", "denoise": "1.0"},
+                  "lora2": "", "lstr2": "1.0", "denoise": "1.0",
+                  "count": "1"},
         "video": {"steps": "20", "cfg": "3.5", "size": "832x480",
                   "length": "81", "lora": "", "lstr": "1.0",
-                  "lora2": "", "lstr2": "1.0", "denoise": "1.0"},
+                  "lora2": "", "lstr2": "1.0", "denoise": "1.0",
+                  "count": "1"},
     }
 
     def log_message(self, f, *a):
@@ -1255,6 +1302,7 @@ class H(BaseHTTPRequestHandler):
                            loras2=loras2, lstr2=html.escape(str(lstr2)),
                            modes=modes, length=length, size=html.escape(size),
                            clips=html.escape(str(L["clips"])),
+                           count=html.escape(str(M.get("count", "1"))),
                            choices2=choices2, choices3=choices3,
                            extra=extra, third=third,
                            outs=outs, last=html.escape(L["prompt"]),
@@ -1281,7 +1329,12 @@ class H(BaseHTTPRequestHandler):
         form that is still filled in when it finishes.
         """
         s = LIVE.snapshot()
-        running = bool(s["prompt_id"]) and not s["done"]
+        # Between the images of a batch the current job is finished while
+        # the batch is not, and without this the page flashes "done" with
+        # one result in it before carrying on.
+        mid_batch = bool(s["clips"]) and s["clip"] < s["clips"]
+        running = (bool(s["prompt_id"]) or mid_batch) and \
+                  (not s["done"] or mid_batch)
         el = int(time.time() - s["started"])
         elapsed = "%d:%02d" % (el // 60, el % 60)
         out = []
@@ -1290,8 +1343,8 @@ class H(BaseHTTPRequestHandler):
             # bar, and no way to tell which of two similar attempts is the
             # one currently running.
             if s["clips"] > 1:
-                out.append('<p class="note">clip {} of {}</p>'.format(
-                    s["clip"], s["clips"]))
+                out.append('<p class="note">{} {} of {}</p>'.format(
+                    s.get("unit", "clip"), s["clip"], s["clips"]))
             if s["label"]:
                 out.append('<p class="said">{}</p>'.format(html.escape(s["label"])))
             if s["max"]:
@@ -1475,7 +1528,7 @@ class H(BaseHTTPRequestHandler):
                                ("lstr", "lora_strength"),
                                ("lstr2", "lora_strength2"),
                                ("steps", "steps"), ("cfg", "cfg"),
-                               ("denoise", "denoise"),
+                               ("denoise", "denoise"), ("count", "count"),
                                ("length", "length"), ("size", "size")):
                 if field in fields:
                     M[key] = fields[field]
@@ -1507,6 +1560,7 @@ class H(BaseHTTPRequestHandler):
             denoise = max(0.1, min(1.0, float(M.get("denoise") or 1.0)))
             length = max(9, min(161, int(M["length"])))
             clips = max(1, min(8, int(fields.get("clips") or 1)))
+            count = max(1, min(6, int(M.get("count") or 1)))
             w, _, h = (M["size"] or "832x480").lower().partition("x")
             width, height = int(w), int(h)
         except ValueError:
@@ -1626,34 +1680,56 @@ class H(BaseHTTPRequestHandler):
 
         sel = fields.get("model", "")
         kind, _, name = sel.partition(":")
-        try:
-            if kind == "ckpt":
-                g = self.graph.build(mode="checkpoint", ckpt=name, unet=None,
-                                     clip=None, vae=None,
-                                     images=[image, image2, image3],
-                                     prompt=prompt, steps=steps, cfg=cfg,
-                                     seed=int(time.time() * 1000) % 2**31,
-                                     sampler="euler", scheduler="simple",
-                                     denoise=denoise, width=width, height=height,
-                                     loras=[(hi, st) for hi, _lo, st in chain])
-            elif "qwen" not in name.lower():
+        if kind != "ckpt":
+            if "qwen" not in name.lower():
                 return self.render('<p class="err">{} is not a Qwen edit model. '
                                    'This form only drives Qwen editing; Klein '
                                    'lives in Forge on 7860.</p>'
                                    .format(html.escape(name)))
-            else:
-                if not (mm["clip"] and mm["vae"]):
-                    return self.render('<p class="err">no clip or vae installed</p>')
-                g = self.graph.build(mode="separate", unet=name,
-                                     clip=next((c for c in mm["clip"] if "2.5_vl" in c or "2.5-vl" in c), mm["clip"][0]),
-                                     vae=next((v for v in mm["vae"] if "qwen" in v.lower()), mm["vae"][0]),
-                                     ckpt=None, prompt=prompt,
-                                     images=[image, image2, image3],
-                                     steps=steps, cfg=cfg,
-                                     seed=int(time.time() * 1000) % 2**31,
-                                     sampler="euler", scheduler="simple",
-                                     denoise=denoise, width=width, height=height,
-                                     loras=[(hi, st) for hi, _lo, st in chain])
+            if not (mm["clip"] and mm["vae"]):
+                return self.render('<p class="err">no clip or vae installed</p>')
+
+        # The graph differs only by prompt and seed between one image and
+        # six, so it is built on demand rather than once.
+        common = dict(images=[image, image2, image3], steps=steps, cfg=cfg,
+                      sampler="euler", scheduler="simple", denoise=denoise,
+                      width=width, height=height,
+                      loras=[(hi, st) for hi, _lo, st in chain])
+
+        def mk(text, seed):
+            if kind == "ckpt":
+                return self.graph.build(mode="checkpoint", ckpt=name,
+                                        unet=None, clip=None, vae=None,
+                                        prompt=text, seed=seed, **common)
+            return self.graph.build(
+                mode="separate", unet=name,
+                clip=next((c for c in mm["clip"]
+                           if "2.5_vl" in c or "2.5-vl" in c), mm["clip"][0]),
+                vae=next((v for v in mm["vae"] if "qwen" in v.lower()),
+                         mm["vae"][0]),
+                ckpt=None, prompt=text, seed=seed, **common)
+
+        if count > 1:
+            lines = [l.strip() for l in prompt.splitlines() if l.strip()]
+            while len(lines) < count:
+                lines.append(lines[-1])     # one instruction, several rolls
+            snap = LIVE.snapshot()
+            if snap["clips"] and not snap["done"]:
+                return self.render('<p class="err">a batch is already '
+                                   'running</p>')
+            try:
+                mk(lines[0], 1)             # fail here, not in a thread
+            except Exception as e:
+                return self.render('<p class="err">could not build the graph: '
+                                   '{}</p>'.format(html.escape(str(e))))
+            LIVE.queued("", "starting %d images" % count, 1, count, "image")
+            threading.Thread(target=batch_worker, args=(dict(
+                build=mk, comfy=self.comfy, prompts=lines[:count],
+                timeout=1800),), daemon=True).start()
+            return self.redirect("/")
+
+        try:
+            g = mk(prompt, int(time.time() * 1000) % 2**31)
         except Exception as e:
             return self.render('<p class="err">could not build the graph: {}</p>'
                                .format(html.escape(str(e))))

@@ -1021,10 +1021,21 @@ class H(BaseHTTPRequestHandler):
     # Every setting, kept between runs. Editing is iterative - the second
     # attempt is the first one with one thing changed - and a form that
     # forgets makes you retype the nine things you did not want to change.
-    last = {"prompt": "", "model": "", "lora": "", "lstr": "1.0",
-            "lora2": "", "lstr2": "1.0", "steps": "4", "cfg": "1.0",
-            "mode": "image", "length": "81", "size": "832x480", "clips": "1",
+    last = {"prompt": "", "model": "", "mode": "image", "clips": "1",
             "existing": "", "existing2": "", "existing3": ""}
+
+    # ...but the sampler settings are per mode, and sharing them was a
+    # quiet way to ruin a video. Four steps at CFG 1 is right for the
+    # merged image model and is two steps per expert on Wan, which comes
+    # out as mush. Switching mode now brings that mode's numbers with it.
+    modes = {
+        "image": {"steps": "4", "cfg": "1.0", "size": "1024x1024",
+                  "length": "81", "lora": "", "lstr": "1.0",
+                  "lora2": "", "lstr2": "1.0"},
+        "video": {"steps": "20", "cfg": "3.5", "size": "832x480",
+                  "length": "81", "lora": "", "lstr": "1.0",
+                  "lora2": "", "lstr2": "1.0"},
+    }
 
     def log_message(self, f, *a):
         sys.stderr.write("%s %s\n" % (self.address_string(), f % a))
@@ -1077,10 +1088,12 @@ class H(BaseHTTPRequestHandler):
     def render(self, msg=""):
         L = self.last
         L.setdefault("clips", "1")
-        steps, cfg = L["steps"], L["cfg"]
-        lora, lstr = L["lora"], L["lstr"]
-        lora2, lstr2 = L["lora2"], L["lstr2"]
-        mode, length, size = L["mode"], L["length"], L["size"]
+        mode = L["mode"]
+        M = self.modes[mode if mode in self.modes else "image"]
+        steps, cfg = M["steps"], M["cfg"]
+        lora, lstr = M["lora"], M["lstr"]
+        lora2, lstr2 = M["lora2"], M["lstr2"]
+        length, size = M["length"], M["size"]
         m = self.models()
         opts = []
         def sel(v):
@@ -1357,15 +1370,25 @@ class H(BaseHTTPRequestHandler):
 
         # Remember the lot before anything can go wrong, so an error comes
         # back to a filled-in form rather than an empty one.
-        for k in ("prompt", "model", "lora", "lora2", "mode", "size"):
+        for k in ("prompt", "model", "clips"):
             if k in fields:
                 H.last[k] = fields[k]
-        H.last["lstr"] = fields.get("lora_strength", H.last["lstr"])
-        H.last["lstr2"] = fields.get("lora_strength2", H.last["lstr2"])
-        H.last["steps"] = fields.get("steps", H.last["steps"])
-        H.last["cfg"] = fields.get("cfg", H.last["cfg"])
-        H.last["length"] = fields.get("length", H.last["length"])
-        H.last["clips"] = fields.get("clips", H.last.get("clips", "1"))
+        was = H.last["mode"]
+        now = "video" if fields.get("mode") == "video" else "image"
+        H.last["mode"] = now
+        switched = (now != was)
+        M = H.modes[now]
+        if not switched:
+            # Only trust the numbers on the form when the form was drawn
+            # for this mode. On a switch they are the other mode's, which
+            # the person never chose and cannot see they are sending.
+            for key, field in (("lora", "lora"), ("lora2", "lora2"),
+                               ("lstr", "lora_strength"),
+                               ("lstr2", "lora_strength2"),
+                               ("steps", "steps"), ("cfg", "cfg"),
+                               ("length", "length"), ("size", "size")):
+                if field in fields:
+                    M[key] = fields[field]
 
         image = stash("photo", "existing")
         image2 = stash("photo2", "existing2")
@@ -1380,26 +1403,46 @@ class H(BaseHTTPRequestHandler):
         prompt = fields.get("prompt", "")
         if not prompt:
             return self.render('<p class="err">type an instruction</p>')
+        if switched:
+            return self.render(
+                '<p class="ok">switched to {}, so the settings below are the '
+                'ones that mode wants ({} steps, CFG {}). Check them and '
+                'press Run.</p>'.format(now, M["steps"], M["cfg"]))
 
         try:
-            steps = max(1, min(60, int(fields.get("steps") or 4)))
-            cfg = float(fields.get("cfg") or 1.0)
-            lstr = max(0.0, min(2.0, float(fields.get("lora_strength") or 1.0)))
-            lstr2 = max(0.0, min(2.0, float(fields.get("lora_strength2") or 1.0)))
-            length = max(9, min(161, int(fields.get("length") or 49)))
+            steps = max(1, min(60, int(M["steps"])))
+            cfg = float(M["cfg"])
+            lstr = max(0.0, min(2.0, float(M["lstr"])))
+            lstr2 = max(0.0, min(2.0, float(M["lstr2"])))
+            length = max(9, min(161, int(M["length"])))
             clips = max(1, min(8, int(fields.get("clips") or 1)))
-            w, _, h = (fields.get("size") or "832x480").lower().partition("x")
+            w, _, h = (M["size"] or "832x480").lower().partition("x")
             width, height = int(w), int(h)
         except ValueError:
             return self.render('<p class="err">steps, CFG and strength must be numbers</p>')
-        lora = fields.get("lora") or None
-        lora2 = fields.get("lora2") or None
-        mode = "video" if fields.get("mode") == "video" else "image"
-        size = "{}x{}".format(width, height)
+        lora = M["lora"] or None
+        lora2 = M["lora2"] or None
+        mode = now
+        M["size"] = "{}x{}".format(width, height)
         mm = self.models()
         for pick in (lora, lora2):
             if pick and pick not in mm["lora"]:
                 return self.render('<p class="err">no such LoRA</p>')
+            if not pick:
+                continue
+            low = pick.lower()
+            wrong = (["qwen", "flux", "klein", "sdxl"] if mode == "video"
+                     else ["wan"])
+            hit = next((w for w in wrong if w in low), None)
+            if hit:
+                M["lora"] = M["lora2"] = ""
+                return self.render(
+                    '<p class="err">{} looks like a <b>{}</b> LoRA and this '
+                    'is {} mode. ComfyUI will not refuse it - it loads what '
+                    'matches, which is almost nothing, and degrades the rest. '
+                    'That is what a ruined clip usually is. I have cleared '
+                    'both LoRA slots; pick again.</p>'
+                    .format(html.escape(pick), html.escape(hit), mode))
 
         # Both halves of one pair resolve to the same pair, so choosing
         # them in the two slots would apply it twice at double strength.
@@ -1421,6 +1464,14 @@ class H(BaseHTTPRequestHandler):
                                    'box - run add-wan-video.sh</p>')
             # Wan wants both dimensions on a multiple of 16, and the frame
             # count on 4n+1; ComfyUI errors out unhelpfully otherwise.
+            if steps < 8 and not any("light" in (n or "").lower()
+                                     for n, _l, _st in chain):
+                return self.render(
+                    '<p class="err">{} steps is too few for Wan. It runs two '
+                    'experts in sequence, so that is {} steps each, and the '
+                    'result is mush. Use 20 - or 4 with a Lightning LoRA, '
+                    'which is trained for it.</p>'
+                    .format(steps, max(1, steps // 2)))
             width, height = (width // 16) * 16, (height // 16) * 16
             length = ((length - 1) // 4) * 4 + 1
 

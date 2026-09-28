@@ -640,7 +640,7 @@ class Graph:
         return ["image"] if "image" in fields else []
 
     def build(self, *, mode, unet, clip, vae, ckpt, images, prompt,
-              steps, cfg, seed, sampler, scheduler, loras=()):
+              steps, cfg, seed, sampler, scheduler, loras=(), denoise=1.0):
         if not self.encoder:
             raise RuntimeError("no Qwen edit encoder node available")
         g = {}
@@ -695,11 +695,16 @@ class Graph:
         # also what sets the size of the output.
         g["la"] = {"class_type": "VAEEncode",
                    "inputs": {"pixels": ["im0", 0], "vae": V}}
+        # Denoise is what decides whether the photo is a starting point or
+        # merely a suggestion. At 1.0 every pixel is regenerated and the
+        # face is redrawn from the encoder's idea of it; below that the
+        # sampler starts from the actual image and the face survives as
+        # pixels. Too low and the edit simply does not happen.
         g["ks"] = {"class_type": "KSampler", "inputs": {
             "model": M, "positive": ["po", 0], "negative": ["ne", 0],
             "latent_image": ["la", 0], "seed": seed, "steps": steps,
             "cfg": cfg, "sampler_name": sampler, "scheduler": scheduler,
-            "denoise": 1.0}}
+            "denoise": denoise}}
         g["de"] = {"class_type": "VAEDecode",
                    "inputs": {"samples": ["ks", 0], "vae": V}}
         g["sv"] = {"class_type": "SaveImage",
@@ -910,13 +915,20 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Steps</label><input type="number" name="steps" value="{steps}" min="1" max="60"></div>
     <div><label>CFG</label><input type="text" name="cfg" value="{cfg}"></div>
   </div>
+  <label>Denoise (image editing) &mdash; lower keeps more of the photo</label>
+  <input type="text" name="denoise" value="{denoise}">
   <div class="row">
     <div><label>Frames (video)</label><input type="number" name="length" value="{length}" min="9" max="161"></div>
     <div><label>Size</label><input type="text" name="size" value="{size}"></div>
   </div>
   <label>Clips to chain &mdash; each carries on from the last frame of the one before</label>
   <input type="number" name="clips" value="{clips}" min="1" max="8">
-  <p class="note">Faces hold at 1280x720 and drift at 832x480 &mdash; at
+  <p class="note">If an edit changes a face you wanted kept, lower Denoise
+  before anything else. At 1.0 the whole picture is regenerated and the
+  face is redrawn from scratch; at 0.85 the sampler starts from your actual
+  photo and the face survives as pixels. Below about 0.6 the edit stops
+  happening at all &mdash; work down from 0.9.<br><br>
+  Faces hold at 1280x720 and drift at 832x480 &mdash; at
   480p there are barely eighty pixels of face for the model to keep, so it
   invents the rest. Crop your start image close for the same reason, and
   describe only the motion: every word about how someone looks is an
@@ -1041,10 +1053,10 @@ class H(BaseHTTPRequestHandler):
     modes = {
         "image": {"steps": "4", "cfg": "1.0", "size": "1024x1024",
                   "length": "81", "lora": "", "lstr": "1.0",
-                  "lora2": "", "lstr2": "1.0"},
+                  "lora2": "", "lstr2": "1.0", "denoise": "1.0"},
         "video": {"steps": "20", "cfg": "3.5", "size": "832x480",
                   "length": "81", "lora": "", "lstr": "1.0",
-                  "lora2": "", "lstr2": "1.0"},
+                  "lora2": "", "lstr2": "1.0", "denoise": "1.0"},
     }
 
     def log_message(self, f, *a):
@@ -1182,6 +1194,7 @@ class H(BaseHTTPRequestHandler):
                            extra=extra, third=third,
                            outs=outs, last=html.escape(L["prompt"]),
                            negative=html.escape(L.get("negative", "")),
+                           denoise=html.escape(str(M.get("denoise", "1.0"))),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1397,6 +1410,7 @@ class H(BaseHTTPRequestHandler):
                                ("lstr", "lora_strength"),
                                ("lstr2", "lora_strength2"),
                                ("steps", "steps"), ("cfg", "cfg"),
+                               ("denoise", "denoise"),
                                ("length", "length"), ("size", "size")):
                 if field in fields:
                     M[key] = fields[field]
@@ -1425,6 +1439,7 @@ class H(BaseHTTPRequestHandler):
             cfg = float(M["cfg"])
             lstr = max(0.0, min(2.0, float(M["lstr"])))
             lstr2 = max(0.0, min(2.0, float(M["lstr2"])))
+            denoise = max(0.1, min(1.0, float(M.get("denoise") or 1.0)))
             length = max(9, min(161, int(M["length"])))
             clips = max(1, min(8, int(fields.get("clips") or 1)))
             w, _, h = (M["size"] or "832x480").lower().partition("x")
@@ -1554,6 +1569,7 @@ class H(BaseHTTPRequestHandler):
                                      prompt=prompt, steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
                                      sampler="euler", scheduler="simple",
+                                     denoise=denoise,
                                      loras=[(hi, st) for hi, _lo, st in chain])
             elif "qwen" not in name.lower():
                 return self.render('<p class="err">{} is not a Qwen edit model. '
@@ -1571,6 +1587,7 @@ class H(BaseHTTPRequestHandler):
                                      steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
                                      sampler="euler", scheduler="simple",
+                                     denoise=denoise,
                                      loras=[(hi, st) for hi, _lo, st in chain])
         except Exception as e:
             return self.render('<p class="err">could not build the graph: {}</p>'

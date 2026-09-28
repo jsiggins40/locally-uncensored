@@ -183,12 +183,12 @@ def cell(rel, prompt=""):
         extra = ('<p class="said">{p}</p>'
                  '<a class="dl" href="/useprompt?n={q}">use this prompt '
                  '&rarr;</a>'.format(p=html.escape(prompt), q=q))
-    # The picture is deliberately not a link. It used to open the raw
-    # file, which on a phone is a dead end: a bare image with nothing to
-    # tap to get back. Saving goes through dl=1 instead, which downloads
-    # rather than navigating, so the form is never left behind.
+    # Tapping goes to a page, not to the raw file. The file itself is a
+    # dead end on a phone - a bare image with nothing to tap to get back -
+    # but a picture you cannot tap at all is its own kind of useless.
     return ('<div class="card">'
-            '<img loading="lazy" src="/out?n={q}" alt="">'
+            '<a href="/view?n={q}"><img loading="lazy" src="/out?n={q}" '
+            'alt=""></a>'
             '<a class="dl" href="/reuse?n={q}">edit this one &rarr;</a>'
             '<a class="dl" href="/out?n={q}&amp;dl=1">save it</a>{e}'
             '</div>'.format(q=q, e=extra))
@@ -920,6 +920,26 @@ class Graph:
         return g
 
 
+VIEW = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{name}</title><style>
+:root{{color-scheme:dark light}}
+body{{font:17px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:12px;
+  max-width:900px}}
+img,video{{width:100%;border-radius:10px;display:block;background:#8882}}
+a.btn{{display:block;text-align:center;font-size:17px;padding:13px;margin-top:10px;
+  border-radius:10px;background:#d2691e;color:#fff;text-decoration:none}}
+a.btn.plain{{background:#8883;color:inherit}}
+p.said{{color:#888;font-size:14px;margin:12px 2px;-webkit-user-select:text;
+  user-select:text}}
+</style></head><body>
+{media}
+{said}
+<a class="btn" href="/">back to the form</a>
+{reuse}
+<a class="btn plain" href="/out?n={q}&amp;dl=1">save it</a>
+</body></html>"""
+
 STATUS = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {refresh}<title>{head}</title><style>
@@ -1408,6 +1428,31 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlsplit(self.path)
         if u.path == "/status":
             return self.redirect("/")     # it all lives on one page now
+        if u.path == "/view":
+            rel = urllib.parse.parse_qs(u.query).get("n", [""])[0]
+            p = os.path.abspath(os.path.join(self.outdir, rel))
+            if not p.startswith(os.path.abspath(self.outdir) + os.sep) \
+               or not os.path.isfile(p):
+                self.send_response(404); self.send_header("Content-Length", "0")
+                self.end_headers(); return
+            q = urllib.parse.quote(rel)
+            is_video = rel.lower().endswith(VID_EXT)
+            media = ('<video controls playsinline preload="metadata" '
+                     'src="/out?n={q}"></video>' if is_video
+                     else '<img src="/out?n={q}" alt="">').format(q=q)
+            said = prompt_of(p)
+            body = VIEW.format(
+                name=html.escape(os.path.basename(rel)), q=q, media=media,
+                said='<p class="said">%s</p>' % html.escape(said) if said else "",
+                reuse=("" if is_video else
+                       '<a class="btn plain" href="/reuse?n=%s">edit this one'
+                       '</a>' % q)
+                      + ('<a class="btn plain" href="/useprompt?n=%s">use this '
+                         'prompt</a>' % q if said else "")).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
         if u.path == "/useprompt":
             rel = urllib.parse.parse_qs(u.query).get("n", [""])[0]
             p = os.path.abspath(os.path.join(self.outdir, rel))

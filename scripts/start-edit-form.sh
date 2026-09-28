@@ -183,9 +183,14 @@ def cell(rel, prompt=""):
         extra = ('<p class="said">{p}</p>'
                  '<a class="dl" href="/useprompt?n={q}">use this prompt '
                  '&rarr;</a>'.format(p=html.escape(prompt), q=q))
-    return ('<div class="card"><a href="/out?n={q}">'
-            '<img loading="lazy" src="/out?n={q}" alt=""></a>'
-            '<a class="dl" href="/reuse?n={q}">edit this one &rarr;</a>{e}'
+    # The picture is deliberately not a link. It used to open the raw
+    # file, which on a phone is a dead end: a bare image with nothing to
+    # tap to get back. Saving goes through dl=1 instead, which downloads
+    # rather than navigating, so the form is never left behind.
+    return ('<div class="card">'
+            '<img loading="lazy" src="/out?n={q}" alt="">'
+            '<a class="dl" href="/reuse?n={q}">edit this one &rarr;</a>'
+            '<a class="dl" href="/out?n={q}&amp;dl=1">save it</a>{e}'
             '</div>'.format(q=q, e=extra))
 
 

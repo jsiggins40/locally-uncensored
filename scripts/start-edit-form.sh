@@ -29,6 +29,11 @@ COMFY_DIR="${COMFY_DIR:-$HOME/ComfyUI}"
 CREDS="$HOME/edit-form-credentials.txt"
 SCRIPT="$HOME/edit-form.py"
 LOG="$HOME/edit-form.log"
+# One session name per port, so a second copy on another port does not
+# kill the first. The default port keeps the plain name, which is what
+# the bootstrap and every earlier instruction refer to.
+SESSION="editform"
+[ "$PORT" = "7862" ] || { SESSION="editform$PORT"; LOG="$HOME/edit-form-$PORT.log"; }
 exec > >(tee -a "$LOG") 2>&1
 
 say() { printf '\n=== %s ===\n' "$*"; }
@@ -1869,11 +1874,11 @@ if [ -d "$HOME/photo-inbox" ] && [ ! -L "$COMFY_DIR/input" ]; then
 fi
 
 say "starting"
-tmux kill-session -t =editform 2>/dev/null
-tmux new-session -d -s editform \
+tmux kill-session -t "=$SESSION" 2>/dev/null
+tmux new-session -d -s "$SESSION" \
   "python3 -u '$SCRIPT' --port $PORT --comfy '$COMFY_URL' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
 sleep 4
-tmux has-session -t =editform 2>/dev/null || { tail -20 "$LOG"; die "did not start"; }
+tmux has-session -t "=$SESSION" 2>/dev/null || { tail -20 "$LOG"; die "did not start"; }
 CODE=$(curl -sS -o /dev/null -w '%{http_code}' -u "$U:$P" "http://127.0.0.1:$PORT/" 2>/dev/null)
 
 cat <<EOF
@@ -1882,7 +1887,8 @@ cat <<EOF
 
   local check   HTTP $CODE   (200 means serving)
   login         $U / $P    (also in $CREDS)
-  stop          tmux kill-session -t =editform
+  session       $SESSION
+  stop          tmux kill-session -t =$SESSION
   log           $LOG
 
 Forward port $PORT in the Thunder console and open it.

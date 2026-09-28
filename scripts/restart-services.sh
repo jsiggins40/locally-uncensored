@@ -61,17 +61,27 @@ if [ "${SKIP_OLLAMA:-}" != "1" ] && [ -x "$HOME/.local/bin/ollama" ]; then
 fi
 
 # The forms check their own dependencies and refuse politely, so a
-# missing one is reported rather than fatal.
-start() {  # start <session> <script> <what>
-  up "$1" && { echo "  $3 already up"; return; }
-  [ -s "$2" ] || { echo "  $3: no $2 on this box"; return; }
-  say "$3"
-  bash "$2" 2>&1 | tail -6
+# missing one is reported rather than fatal. Two names each, because the
+# bootstrap saves them under their full names and everything since has
+# fetched them as one letter - both end up on a box that has been through
+# a few rounds of this.
+start() {  # start <session> <what> <script>...
+  local session=$1 what=$2; shift 2
+  up "$session" && { echo "  $what already up"; return; }
+  for f in "$@"; do
+    if [ -s "$f" ]; then
+      say "$what"
+      bash "$f" 2>&1 | tail -6
+      up "$session" || echo "  !! $what did not start"
+      return
+    fi
+  done
+  echo "  $what: not installed here (looked for: $*)"
 }
-start inbox     "$HOME/start-photo-inbox.sh" "photo inbox"
-start editform  "$HOME/e.sh"                 "edit form"
-start writer    "$HOME/w2.sh"                "writing form"
-start trainform "$HOME/t2.sh"                "training form"
+start inbox     "photo inbox"   "$HOME/start-photo-inbox.sh"
+start editform  "edit form"     "$HOME/e.sh"  "$HOME/start-edit-form.sh"
+start writer    "writing form"  "$HOME/w2.sh" "$HOME/start-writer-form.sh"
+start trainform "training form" "$HOME/t2.sh" "$HOME/start-train-form.sh"
 
 say "now running"
 tmux ls 2>/dev/null || echo "  (nothing)"

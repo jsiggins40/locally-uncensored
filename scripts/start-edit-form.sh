@@ -640,7 +640,8 @@ class Graph:
         return ["image"] if "image" in fields else []
 
     def build(self, *, mode, unet, clip, vae, ckpt, images, prompt,
-              steps, cfg, seed, sampler, scheduler, loras=(), denoise=1.0):
+              steps, cfg, seed, sampler, scheduler, loras=(), denoise=1.0,
+              width=0, height=0):
         if not self.encoder:
             raise RuntimeError("no Qwen edit encoder node available")
         g = {}
@@ -692,9 +693,29 @@ class Graph:
         g["po"] = enc(prompt)
         g["ne"] = enc("")
         # The first image is what the latent is encoded from, so it is
-        # also what sets the size of the output.
+        # also what sets the size of the output - which means an untouched
+        # phone photo has been quietly asking for twelve megapixels, and
+        # getting them: minutes of sampling and a twenty-megabyte png
+        # nobody wanted. The Size field is what was actually chosen, so
+        # scale to it. By total pixels rather than to exact dimensions,
+        # because squashing someone's aspect ratio is its own bug.
+        src = ["im0", 0]
+        mp = (width * height) / 1e6 if width and height else 0
+        if mp and "ImageScaleToTotalPixels" in self.info:
+            g["sc"] = {"class_type": "ImageScaleToTotalPixels", "inputs": {
+                "image": src, "upscale_method": "lanczos",
+                "megapixels": round(mp, 2)}}
+            src = ["sc", 0]
+        elif width and height and "ImageScale" in self.info:
+            g["sc"] = {"class_type": "ImageScale", "inputs": {
+                "image": src, "upscale_method": "lanczos",
+                "width": width, "height": height, "crop": "disabled"}}
+            src = ["sc", 0]
+        # Note the encoder still gets the untouched images: the reference
+        # conditioning is where facial detail comes from, and there is no
+        # reason to hand it less than it was given.
         g["la"] = {"class_type": "VAEEncode",
-                   "inputs": {"pixels": ["im0", 0], "vae": V}}
+                   "inputs": {"pixels": src, "vae": V}}
         # Denoise is what decides whether the photo is a starting point or
         # merely a suggestion. At 1.0 every pixel is regenerated and the
         # face is redrawn from the encoder's idea of it; below that the
@@ -915,6 +936,10 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Steps</label><input type="number" name="steps" value="{steps}" min="1" max="60"></div>
     <div><label>CFG</label><input type="text" name="cfg" value="{cfg}"></div>
   </div>
+  <p class="note">Size applies to editing as well as video: the photo is
+  scaled to that many pixels before it is worked on. A phone photo left
+  alone is twelve megapixels, which is twelve times the work for a picture
+  you cannot tell apart on a phone screen.</p>
   <label>Denoise (image editing) &mdash; lower keeps more of the photo</label>
   <input type="text" name="denoise" value="{denoise}">
   <div class="row">
@@ -1569,7 +1594,7 @@ class H(BaseHTTPRequestHandler):
                                      prompt=prompt, steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
                                      sampler="euler", scheduler="simple",
-                                     denoise=denoise,
+                                     denoise=denoise, width=width, height=height,
                                      loras=[(hi, st) for hi, _lo, st in chain])
             elif "qwen" not in name.lower():
                 return self.render('<p class="err">{} is not a Qwen edit model. '
@@ -1587,7 +1612,7 @@ class H(BaseHTTPRequestHandler):
                                      steps=steps, cfg=cfg,
                                      seed=int(time.time() * 1000) % 2**31,
                                      sampler="euler", scheduler="simple",
-                                     denoise=denoise,
+                                     denoise=denoise, width=width, height=height,
                                      loras=[(hi, st) for hi, _lo, st in chain])
         except Exception as e:
             return self.render('<p class="err">could not build the graph: {}</p>'

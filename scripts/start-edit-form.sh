@@ -522,7 +522,7 @@ def sequence_worker(cfg):
             g = cfg["graph"].build_video(
                 high=cfg["high"], low=cfg["low"], clip=cfg["clip"],
                 vae=cfg["vae"], image=current, prompt=prompt,
-                negative="static, still, blurry, distorted",
+                negative=cfg.get("negative") or "static, still, blurry",
                 steps=cfg["steps"], cfg=cfg["cfg"],
                 seed=(int(time.time() * 1000) + i * 7919) % 2**31,
                 width=cfg["width"], height=cfg["height"],
@@ -887,6 +887,9 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   <label>Instruction</label>
   <textarea name="prompt" placeholder="change the shirt to green">{last}</textarea>
 
+  <label>Negative &mdash; what to keep out (video)</label>
+  <textarea name="negative" style="min-height:52px">{negative}</textarea>
+
   <label>What to do</label>
   <select name="mode">{modes}</select>
 
@@ -913,7 +916,12 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   </div>
   <label>Clips to chain &mdash; each carries on from the last frame of the one before</label>
   <input type="number" name="clips" value="{clips}" min="1" max="8">
-  <p class="note">For a long video, raise Clips. At 81 frames each that is
+  <p class="note">Faces hold at 1280x720 and drift at 832x480 &mdash; at
+  480p there are barely eighty pixels of face for the model to keep, so it
+  invents the rest. Crop your start image close for the same reason, and
+  describe only the motion: every word about how someone looks is an
+  invitation to redraw them.<br><br>
+  For a long video, raise Clips. At 81 frames each that is
   5 seconds a clip, so 4 gives 20 seconds and 6 gives 30. Write one line
   of instruction per clip in the box above and each gets its own; one line
   is reused for all of them. They are joined into a single file at the
@@ -1022,7 +1030,9 @@ class H(BaseHTTPRequestHandler):
     # attempt is the first one with one thing changed - and a form that
     # forgets makes you retype the nine things you did not want to change.
     last = {"prompt": "", "model": "", "mode": "image", "clips": "1",
-            "existing": "", "existing2": "", "existing3": ""}
+            "existing": "", "existing2": "", "existing3": "",
+            "negative": "static, still, blurry, distorted, deformed face, "
+                        "changing face, extra limbs, watermark"}
 
     # ...but the sampler settings are per mode, and sharing them was a
     # quiet way to ruin a video. Four steps at CFG 1 is right for the
@@ -1171,6 +1181,7 @@ class H(BaseHTTPRequestHandler):
                            choices2=choices2, choices3=choices3,
                            extra=extra, third=third,
                            outs=outs, last=html.escape(L["prompt"]),
+                           negative=html.escape(L.get("negative", "")),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1370,7 +1381,7 @@ class H(BaseHTTPRequestHandler):
 
         # Remember the lot before anything can go wrong, so an error comes
         # back to a filled-in form rather than an empty one.
-        for k in ("prompt", "model", "clips"):
+        for k in ("prompt", "model", "clips", "negative"):
             if k in fields:
                 H.last[k] = fields[k]
         was = H.last["mode"]
@@ -1498,6 +1509,7 @@ class H(BaseHTTPRequestHandler):
                     high=mm["wan_high"][0], low=mm["wan_low"][0],
                     clip=mm["wan_clip"][0], vae=mm["wan_vae"][0],
                     image=image, prompts=lines[:clips], steps=steps, cfg=cfg,
+                    negative=H.last.get("negative", ""),
                     width=width, height=height, length=length, loras=chain,
                     timeout=7200),), daemon=True).start()
                 return self.redirect("/")
@@ -1507,7 +1519,7 @@ class H(BaseHTTPRequestHandler):
                     high=mm["wan_high"][0], low=mm["wan_low"][0],
                     clip=mm["wan_clip"][0], vae=mm["wan_vae"][0],
                     image=image, prompt=prompt,
-                    negative="static, still, blurry, distorted",
+                    negative=H.last.get("negative") or "static, still, blurry",
                     steps=steps, cfg=cfg,
                     seed=int(time.time() * 1000) % 2**31,
                     width=width, height=height, length=length,

@@ -83,6 +83,28 @@ echo "  the rest"
 ./venv/bin/python -c 'import diffusers, transformers, peft; print("  diffusers", diffusers.__version__)' \
   || die "requirements did not install"
 
+# opencv-python links against a desktop graphics library that a headless
+# box has no reason to carry, and the import blows up on libGL.so.1 the
+# first time a training run touches it - which is well after you have
+# uploaded photos and pressed go. Settle it now.
+if ! ./venv/bin/python -c 'import cv2' 2>/dev/null; then
+  echo "  opencv needs libGL; installing it"
+  if [ "$(id -u)" = "0" ]; then SUDO=""
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SUDO="sudo -n"
+  else SUDO="false"; fi
+  $SUDO apt-get install -y -qq libgl1 libglib2.0-0 2>/dev/null \
+    || $SUDO apt-get install -y -qq libgl1-mesa-glx libglib2.0-0 2>/dev/null
+  if ! ./venv/bin/python -c 'import cv2' 2>/dev/null; then
+    # The headless build of the same library wants none of it, and
+    # nothing here draws to a screen anyway.
+    echo "  no luck; using the headless opencv instead"
+    ./venv/bin/pip uninstall -y -q opencv-python opencv-python-headless 2>/dev/null
+    ./venv/bin/pip install -q opencv-python-headless 2>&1 | tail -2
+  fi
+fi
+./venv/bin/python -c 'import cv2; print("  cv2", cv2.__version__)' \
+  || die "opencv will not import, and the trainer needs it"
+
 # adamw8bit needs bitsandbytes and it is not always pulled in.
 ./venv/bin/python -c 'import bitsandbytes' 2>/dev/null \
   || ./venv/bin/pip install -q bitsandbytes 2>&1 | tail -2

@@ -138,6 +138,8 @@ config:
         max_step_saves_to_keep: 2
       datasets:
         - folder_path: "{dataset}"
+          control_path:
+            - "{control}"
           caption_ext: "txt"
           caption_dropout_rate: 0.05
           resolution: [ 512, 768, 1024 ]
@@ -245,11 +247,12 @@ def trainer(cfg):
     try:
         name, root = cfg["name"], cfg["root"]
         dataset = os.path.join(root, "datasets", name)
+        control = os.path.join(root, "datasets", name + "_control")
         outdir = os.path.join(root, "output")
-        os.makedirs(dataset, exist_ok=True)
-        os.makedirs(outdir, exist_ok=True)
+        for d in (dataset, control, outdir):
+            os.makedirs(d, exist_ok=True)
 
-        kept = 0
+        saved = []
         for i, (fn, blob) in enumerate(cfg["photos"]):
             dst = os.path.join(dataset, "%03d.png" % i)
             try:
@@ -259,18 +262,30 @@ def trainer(cfg):
                 continue
             with open(dst[:-4] + ".txt", "w") as fh:
                 fh.write(cfg["caption"])
-            kept += 1
+            saved.append(dst)
         with RUN.lock:
-            RUN.images = kept
-        if kept < 5:
-            raise RuntimeError("only %d usable photos - train on 15 to 30" % kept)
+            RUN.images = len(saved)
+        if len(saved) < 5:
+            raise RuntimeError("only %d usable photos - train on 15 to 30"
+                               % len(saved))
+
+        # This is an editing model: it wants a control image with every
+        # target and refuses outright without one. For a face that is a
+        # gift rather than a nuisance - pair each photo with a different
+        # photo of the same person, and what it learns is "given this
+        # face, render this face", which is the job at edit time. The
+        # control file has to carry the target's name, not its own.
+        for i, dst in enumerate(saved):
+            other = saved[(i + 1) % len(saved)]
+            shutil.copy2(other, os.path.join(control, os.path.basename(dst)))
 
         first = os.path.join(dataset, "000.png")
         sample = (SAMPLE_ON.format(every=cfg["save_every"],
                                    trigger=cfg["trigger"], ctrl=first)
                   if cfg["samples"] else SAMPLE_OFF)
         text = CONFIG.format(
-            name=name, outdir=outdir, dataset=dataset, base=cfg["base"],
+            name=name, outdir=outdir, dataset=dataset, control=control,
+            base=cfg["base"],
             steps=cfg["steps"], save_every=cfg["save_every"],
             rank=cfg["rank"], trigger=cfg["trigger"],
             qtype=QTYPE[cfg["profile"]], sample=sample)
@@ -369,7 +384,9 @@ pre{{white-space:pre-wrap;background:#8881;border-radius:9px;padding:10px;
   <p class="note">Varied is what matters: different angles, lighting,
   distances, expressions; no sunglasses, no heavy filters, nobody else in
   frame. Twenty good photos beat fifty similar ones. Crop to the head and
-  shoulders where you can.<br><br>
+  shoulders where you can. Each photo is paired with another of the same
+  person, so the model learns to carry a face across rather than just to
+  draw it &mdash; which is why variety matters more than count.<br><br>
   About 1500 steps for a face, an hour or two. It keeps going if you close
   the page.</p>
   <button type="submit">Start training</button>

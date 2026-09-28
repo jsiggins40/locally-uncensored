@@ -42,7 +42,7 @@ cat > "$SCRIPT" <<'PYEOF'
 """A JavaScript-free form that drives a local model, section by section."""
 
 import argparse, base64, hmac, html, json, os, re, subprocess, sys, threading
-import time, urllib.parse, urllib.request
+import time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BYTES = 4 * 1024 * 1024
@@ -179,7 +179,21 @@ def ollama_chat(base, model, system, user, on_chunk, timeout=1800):
     req = urllib.request.Request(base + "/api/chat", data=body,
                                  headers={"Content-Type": "application/json"})
     out = []
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        # Ollama puts the reason in the body - out of memory, no such
+        # model, context too long. Without this it arrives as a bare
+        # "500 Internal Server Error", which says nothing.
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:400].strip()
+            detail = json.loads(detail).get("error", detail)
+        except Exception:
+            pass
+        raise RuntimeError("ollama refused it (%s): %s"
+                           % (e.code, detail or "no reason given"))
+    with r:
         for line in r:
             line = line.strip()
             if not line:

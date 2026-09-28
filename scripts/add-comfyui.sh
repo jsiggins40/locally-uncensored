@@ -33,7 +33,16 @@ die() { printf '\nFAILED: %s\n(see %s)\n' "$*" "$LOG"; exit 1; }
 say "started $(date -u +%FT%TZ)"
 [ -d "$FORGE/models" ] || die "no Forge models at $FORGE (set FORGE_DIR=...)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || die "no GPU"
-sudo -n true 2>/dev/null || die "sudo wants a password; run 'sudo true' once, then re-run"
+# Some images run as root with sudo not installed at all, where "sudo: not
+# found" reads as too few privileges and means the opposite. Work out once
+# how to become root, and only give up if neither route exists.
+if [ "$(id -u)" = "0" ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO="sudo -n"
+else
+  die "this needs root: run as root, or make sudo passwordless (run 'sudo true' once), then start again"
+fi
 
 AVAIL=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')
 echo "free: ${AVAIL}G, want ${NEED_GB}G (torch and deps; models are linked)"
@@ -112,8 +121,8 @@ done
 # ComfyUI has no login. On a public forwarded port that means anyone who
 # finds it can drive the GPU and read every image on it.
 say "password in front"
-sudo apt-get update -qq
-sudo apt-get install -y -qq nginx apache2-utils || die "nginx"
+$SUDO apt-get update -qq
+$SUDO apt-get install -y -qq nginx apache2-utils || die "nginx"
 
 if [ ! -s "$CREDS" ]; then
   printf 'user: comfy\npass: %s\n' "$(openssl rand -base64 15 | tr -d '/+=')" > "$CREDS"
@@ -121,11 +130,11 @@ if [ ! -s "$CREDS" ]; then
 fi
 U=$(awk '/^user:/{print $2}' "$CREDS")
 P=$(awk '/^pass:/{print $2}' "$CREDS")
-sudo htpasswd -bc /etc/nginx/.comfy_htpasswd "$U" "$P" >/dev/null 2>&1 || die "htpasswd"
+$SUDO htpasswd -bc /etc/nginx/.comfy_htpasswd "$U" "$P" >/dev/null 2>&1 || die "htpasswd"
 
 # ComfyUI reports progress over a WebSocket, so the proxy has to carry the
 # upgrade through or the UI connects and then silently never updates.
-sudo tee /etc/nginx/sites-available/comfy >/dev/null <<NGINX
+$SUDO tee /etc/nginx/sites-available/comfy >/dev/null <<NGINX
 server {
     listen $PUBLIC_PORT;
     client_max_body_size 64M;
@@ -142,20 +151,20 @@ server {
     }
 }
 NGINX
-sudo ln -sf /etc/nginx/sites-available/comfy /etc/nginx/sites-enabled/comfy
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t || die "nginx config rejected"
+$SUDO ln -sf /etc/nginx/sites-available/comfy /etc/nginx/sites-enabled/comfy
+$SUDO rm -f /etc/nginx/sites-enabled/default
+$SUDO nginx -t || die "nginx config rejected"
 # This box is a container: systemctl has no init to talk to, and -s reload
 # needs a master process that does not exist on a first install. So try the
 # service manager, then a reload, then simply starting it.
-if sudo systemctl restart nginx 2>/dev/null; then
+if $SUDO systemctl restart nginx 2>/dev/null; then
   echo "  started via systemctl"
-elif sudo nginx -s reload 2>/dev/null; then
+elif $SUDO nginx -s reload 2>/dev/null; then
   echo "  reloaded running nginx"
 else
-  sudo pkill -x nginx 2>/dev/null
+  $SUDO pkill -x nginx 2>/dev/null
   sleep 1
-  sudo nginx && echo "  started directly" || die "could not start nginx"
+  $SUDO nginx && echo "  started directly" || die "could not start nginx"
 fi
 sleep 1
 pgrep -x nginx >/dev/null || die "nginx is not running after start"

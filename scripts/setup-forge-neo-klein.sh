@@ -26,13 +26,22 @@ die() { printf '\nFAILED: %s\n(see %s)\n' "$*" "$LOG"; exit 1; }
 
 say "started $(date -u +%FT%TZ)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || die "no GPU visible"
-sudo -n true 2>/dev/null || die "sudo wants a password; run 'sudo true' once first, then re-run this"
+# Some images run as root with sudo not installed at all, where "sudo: not
+# found" reads as too few privileges and means the opposite. Work out once
+# how to become root, and only give up if neither route exists.
+if [ "$(id -u)" = "0" ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO="sudo -n"
+else
+  die "this needs root: run as root, or make sudo passwordless (run 'sudo true' once), then start again"
+fi
 
 # Tens of GB of weights outlast a phone's SSH session, so get out of the
 # foreground before downloading anything. tmux has to exist before it can
 # hold us, hence the install above the re-exec.
 if [ -z "${TMUX:-}" ] && [ "${NO_TMUX:-}" != "1" ]; then
-  command -v tmux >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq tmux; }
+  command -v tmux >/dev/null || { $SUDO apt-get update -qq; $SUDO apt-get install -y -qq tmux; }
   if command -v tmux >/dev/null; then
     self=$(readlink -f "$0")
     say "re-running inside tmux session 'setup' (attach: tmux attach -t setup)"
@@ -48,8 +57,8 @@ fi
 
 # ---------------------------------------------------------------- packages
 say "system packages"
-sudo apt-get update -qq || die "apt update"
-sudo apt-get install -y -qq tmux git curl python3-pip python3-venv || die "apt install"
+$SUDO apt-get update -qq || die "apt update"
+$SUDO apt-get install -y -qq tmux git curl python3-pip python3-venv || die "apt install"
 
 say "huggingface_hub"
 # Ubuntu 24.04 marks the system python as externally managed; older ones do not.

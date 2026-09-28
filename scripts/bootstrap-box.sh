@@ -2,13 +2,17 @@
 #
 # A whole box from nothing, in one command.
 #
-#   bash b.sh               everything
-#   SKIP_COMFY=1 bash b.sh  Forge and Klein only
-#   SKIP_QWEN=1 bash b.sh   no Qwen editor (saves 28GB)
+#   bash b.sh                 everything
+#   SKIP_COMFY=1 bash b.sh    Forge and Klein only
+#   SKIP_QWEN=1 bash b.sh     no Qwen editor (saves 28GB)
+#   SKIP_WAN=1 bash b.sh      no video (saves 45GB)
+#   SKIP_WRITER=1 bash b.sh   no LLM (saves 25GB)
+#   SKIP_TRAINER=1 bash b.sh  no LoRA training
 #
 # Runs, in order: Forge Neo with Klein and its uncensored encoder; ComfyUI
-# with the models symlinked across; the photo inbox; the edit form. Then
-# prints every port and password in one place.
+# with the models symlinked across; the Qwen editor; Wan video; the photo
+# inbox; the edit form; the local LLM and its document tooling; the LoRA
+# trainer. Then prints every port and password in one place.
 #
 # One command rather than four because these get pasted on a phone keyboard,
 # where a truncated URL quietly downloads a web page instead of a script -
@@ -30,14 +34,34 @@ die()  { printf '\nSTOPPED: %s\n(see %s)\n' "$*" "$LOG"; exit 1; }
 
 say "checks"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || die "no GPU"
-sudo -n true 2>/dev/null || die "sudo wants a password; run 'sudo true' once, then re-run"
+# Some images run as root with sudo not installed at all, where "sudo: not
+# found" reads as too few privileges and means the opposite. Work out once
+# how to become root, and only give up if neither route exists.
+if [ "$(id -u)" = "0" ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO="sudo -n"
+else
+  die "this needs root: run as root, or make sudo passwordless (run 'sudo true' once), then start again"
+fi
 
+# What is actually going to be pulled, so the number means something.
+NEED=60                                        # forge, klein, its encoder
+[ "${SKIP_COMFY:-}"   = "1" ] || NEED=$((NEED + 15))
+[ "${SKIP_QWEN:-}"    = "1" ] || NEED=$((NEED + 30))
+[ "${SKIP_WAN:-}"     = "1" ] || NEED=$((NEED + 45))
+[ "${SKIP_WRITER:-}"  = "1" ] || NEED=$((NEED + 25))
+[ "${SKIP_TRAINER:-}" = "1" ] || NEED=$((NEED + 15))
+NEED=$((NEED + 40))                            # room to actually work in
 AVAIL=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')
-echo "disk free: ${AVAIL}G"
-if [ "${AVAIL:-0}" -lt 150 ]; then
-  die "only ${AVAIL}G free. Klein and Qwen together need about 120G plus room
-     to work. Resize the instance to 250G first - disk can only be grown,
-     so pick generously."
+echo "disk free: ${AVAIL}G, this run wants about ${NEED}G"
+if [ "${AVAIL:-0}" -lt "$NEED" ]; then
+  die "only ${AVAIL}G free, and this needs about ${NEED}G. Either resize the
+     instance (disk can only be grown, so pick generously - 400G covers
+     everything) or leave parts out:
+       SKIP_WAN=1      no video, -45G
+       SKIP_TRAINER=1  no LoRA training, -15G now and -60G later
+       SKIP_WRITER=1   no LLM, -25G"
 fi
 
 # Checked first because without it the gated uncensored encoder silently
@@ -76,7 +100,7 @@ wait_for() {  # wait_for <tmux-session> <minutes>
   return 0
 }
 
-say "1/5  Forge Neo, Klein, uncensored encoder"
+say "1/8  Forge Neo, Klein, uncensored encoder"
 fetch setup-forge-neo-klein.sh
 bash "$HOME/setup-forge-neo-klein.sh" || die "forge setup"
 wait_for setup 60
@@ -84,16 +108,16 @@ grep -q 'text encoder is the STOCK one' "$HOME/forge-setup.log" 2>/dev/null \
   && echo "   !! the uncensored encoder did not download; prompts will be refused"
 
 if [ "${SKIP_COMFY:-}" != "1" ]; then
-  say "2/5  ComfyUI"
+  say "2/8  ComfyUI"
   fetch add-comfyui.sh
   bash "$HOME/add-comfyui.sh" || echo "   (comfy setup returned an error; continuing)"
   wait_for comfysetup 40
 else
-  say "2/5  ComfyUI - skipped"
+  say "2/8  ComfyUI - skipped"
 fi
 
 if [ "${SKIP_COMFY:-}" != "1" ] && [ "${SKIP_QWEN:-}" != "1" ]; then
-  say "3/5  Qwen image editor"
+  say "3/8  Qwen image editor"
   # One merged file carrying model, encoder, VAE and the Lightning
   # accelerators. Forge Neo could not drive it; ComfyUI is what it is built
   # for. v19 is the version its author rates best for edit consistency.
@@ -133,16 +157,48 @@ if [ "${SKIP_COMFY:-}" != "1" ] && [ "${SKIP_QWEN:-}" != "1" ]; then
   fi
 fi
 
-say "4/5  photo inbox"
+if [ "${SKIP_COMFY:-}" != "1" ] && [ "${SKIP_WAN:-}" != "1" ]; then
+  say "4/8  Wan 2.2 video"
+  fetch add-wan-video.sh
+  bash "$HOME/add-wan-video.sh" || echo "   (wan setup returned an error; continuing)"
+  wait_for wansetup 60
+else
+  say "4/8  Wan video - skipped"
+fi
+
+say "5/8  photo inbox"
 fetch start-photo-inbox.sh
 bash "$HOME/start-photo-inbox.sh" || echo "   (inbox failed; continuing)"
 
 if [ "${SKIP_COMFY:-}" != "1" ] && tmux has-session -t =comfy 2>/dev/null; then
-  say "5/5  edit form"
+  say "6/8  edit form"
   fetch start-edit-form.sh
   bash "$HOME/start-edit-form.sh" || echo "   (edit form failed; continuing)"
 else
-  say "5/5  edit form - skipped (needs ComfyUI running)"
+  say "6/8  edit form - skipped (needs ComfyUI running)"
+fi
+
+if [ "${SKIP_WRITER:-}" != "1" ]; then
+  say "7/8  the local model, and what turns its text into documents"
+  fetch add-writer.sh
+  bash "$HOME/add-writer.sh" || echo "   (writer setup returned an error; continuing)"
+  fetch start-writer-form.sh
+  bash "$HOME/start-writer-form.sh" || echo "   (writer form failed; continuing)"
+else
+  say "7/8  LLM - skipped"
+fi
+
+if [ "${SKIP_TRAINER:-}" != "1" ]; then
+  # Last, deliberately: it is the one that can run the disk down, and by
+  # here everything else is already serving.
+  say "8/8  LoRA trainer"
+  fetch add-trainer.sh
+  bash "$HOME/add-trainer.sh" || echo "   (trainer setup returned an error; continuing)"
+  wait_for trainsetup 40
+  fetch start-train-form.sh
+  bash "$HOME/start-train-form.sh" || echo "   (train form failed; continuing)"
+else
+  say "8/8  LoRA trainer - skipped"
 fi
 
 # ------------------------------------------------------------------ report
@@ -157,11 +213,16 @@ show "Forge"      7860 "$HOME/forge-credentials.txt"      forge
 show "photo inbox" 7861 "$HOME/photo-inbox-credentials.txt" inbox
 show "edit form"  7862 "$HOME/edit-form-credentials.txt"  editform
 show "ComfyUI"    8188 "$HOME/comfy-credentials.txt"      comfy
+show "write"      7863 "$HOME/writer-credentials.txt"    writer
+show "train"      7864 "$HOME/train-credentials.txt"     trainform
+printf '\n  %-12s %s\n' "ollama" "$(tmux has-session -t =ollama 2>/dev/null && echo 'up on 11434' || echo 'down')"
 
 cat <<EOF
 
 
-  Forward those ports in the Thunder console, one URL each.
+  Forward those ports in the Thunder console, one URL each. 11434 is the
+  model's own API and stays private - the writing form on 7863 is the way
+  in to it.
 
   Klein, in Forge on 7860:
     checkpoint     flux-2-klein-base-9b

@@ -55,6 +55,22 @@ export PATH="$HOME/.local/bin:$PATH"
 cd "$COMFY" || die "cd $COMFY"
 mkdir -p models/diffusion_models models/text_encoders models/vae
 
+# On a box built only for this, nothing has installed the hub client
+# yet - the full bootstrap does it on the way past. And a token that is
+# missing or revoked shows up as a 401 partway through a forty gigabyte
+# download, which is the worst moment to find out.
+say "hugging face"
+command -v hf >/dev/null || python3 -c 'import huggingface_hub' 2>/dev/null || {
+  echo "  installing the hub client"
+  pip install -q --break-system-packages "huggingface_hub[cli]" 2>/dev/null \
+    || pip install -q --user "huggingface_hub[cli]" 2>/dev/null \
+    || pip install -q "huggingface_hub[cli]" 2>/dev/null
+}
+python3 -c 'import huggingface_hub' 2>/dev/null \
+  || die "could not install huggingface_hub"
+python3 -c 'from huggingface_hub import whoami; print("  as", whoami()["name"])' \
+  || echo "  !! no working token - public models will still download, gated ones will not"
+
 say "resolving"
 python3 -u - "$COMFY" "$QUALITY" <<'PY' || die "download"
 import os, sys

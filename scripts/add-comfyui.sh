@@ -57,6 +57,15 @@ AVAIL=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')
 echo "free: ${AVAIL}G, want ${NEED_GB}G (torch and deps; models are linked)"
 [ "${AVAIL:-0}" -ge "$NEED_GB" ] || die "not enough disk"
 
+# Without tmux this runs in the foreground and dies with the terminal,
+# and the "detached, you can close this" habit becomes a trap. It is a
+# few hundred kilobytes; install it rather than silently not detaching.
+command -v tmux >/dev/null || {
+  echo "installing tmux so this can detach"
+  $SUDO apt-get update -qq 2>/dev/null
+  $SUDO apt-get install -y -qq tmux 2>/dev/null || true
+}
+
 if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null; then
   self=$(readlink -f "$0")
   say "re-running inside tmux session 'comfysetup'"

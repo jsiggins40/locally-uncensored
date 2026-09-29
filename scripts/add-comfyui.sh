@@ -31,7 +31,16 @@ say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\nFAILED: %s\n(see %s)\n' "$*" "$LOG"; exit 1; }
 
 say "started $(date -u +%FT%TZ)"
-[ -d "$FORGE/models" ] || die "no Forge models at $FORGE (set FORGE_DIR=...)"
+# Forge is where this started, and its models get linked across rather
+# than downloaded twice. But a box can perfectly well have ComfyUI and no
+# Forge at all - a machine stood up to try one model, say - and refusing
+# to install over that was wrong.
+if [ -d "$FORGE/models" ]; then
+  HAVE_FORGE=1
+else
+  HAVE_FORGE=0
+  echo "no Forge at $FORGE - installing ComfyUI on its own, nothing to link"
+fi
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || die "no GPU"
 # Some images run as root with sudo not installed at all, where "sudo: not
 # found" reads as too few privileges and means the opposite. Work out once
@@ -99,6 +108,7 @@ link() {  # link <src> <dest-dir>
   ln -s "$1" "$dst" && echo "  + $2/$(basename "$1")"
 }
 
+if [ "$HAVE_FORGE" = "1" ]; then
 for f in "$FORGE"/models/Stable-diffusion/*.safetensors; do
   [ -f "$f" ] || continue
   b=$(basename "$f" | tr 'A-Z' 'a-z')
@@ -110,6 +120,7 @@ done
 for f in "$FORGE"/models/text_encoder/*.safetensors; do link "$f" models/text_encoders; done
 for f in "$FORGE"/models/VAE/*.safetensors;          do link "$f" models/vae; done
 for f in "$FORGE"/models/Lora/*.safetensors;         do link "$f" models/loras; done
+fi
 
 say "what ComfyUI can see"
 for d in checkpoints diffusion_models text_encoders vae loras; do

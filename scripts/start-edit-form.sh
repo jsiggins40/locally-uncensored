@@ -167,7 +167,7 @@ def prompt_of(path, _cache={}):
     return _cache[key]
 
 
-def cell(rel, prompt=""):
+def cell(rel, prompt="", converting=False):
     """One tile in a gallery: a still, or a player for a clip.
 
     A clip in an <img> renders as a broken image, which is what a video
@@ -176,10 +176,12 @@ def cell(rel, prompt=""):
     """
     q = urllib.parse.quote(rel)
     if rel.lower().endswith(VID_EXT):
+        note = ('<p class="said">converting to mp4 so it plays on a '
+                'phone&hellip;</p>' if converting else "")
         return ('<div class="card"><video controls playsinline preload="metadata"'
                 ' src="/out?n={q}"></video>'
-                '<a class="dl" href="/out?n={q}&amp;dl=1">save it</a></div>'
-                .format(q=q))
+                '<a class="dl" href="/out?n={q}&amp;dl=1">save it</a>{n}</div>'
+                .format(q=q, n=note))
     extra = ""
     if prompt:
         # Shown in full and selectable, because copying by hand is the only
@@ -478,6 +480,69 @@ for path in ins:
     c.close()
 o.close()
 """
+
+
+PYAV_TO_MP4 = """
+import av, sys
+src, dst = sys.argv[1], sys.argv[2]
+i = av.open(src)
+vs = i.streams.video[0]
+o = av.open(dst, "w", format="mp4")
+st = None
+for name in ("libx264", "h264"):
+    try:
+        st = o.add_stream(name, rate=vs.average_rate or 16)
+        break
+    except Exception:
+        continue
+if st is None:
+    raise SystemExit("no h264 encoder in this pyav")
+st.width = vs.codec_context.width
+st.height = vs.codec_context.height
+st.pix_fmt = "yuv420p"
+st.options = {"crf": "20"}
+for frame in i.decode(vs):
+    frame.pts = None
+    for pkt in st.encode(frame):
+        o.mux(pkt)
+for pkt in st.encode():
+    o.mux(pkt)
+o.close()
+i.close()
+"""
+
+MP4_JOBS = set()
+MP4_LOCK = threading.Lock()
+
+
+def to_mp4(src, dst, comfy_dir):
+    """Re-encode a clip to H.264 in MP4.
+
+    ComfyUI writes vp9 in webm, which an iPhone will not play - it
+    downloads instead, and then sits in Files doing nothing. H.264 is what
+    every Apple device decodes in hardware. ffmpeg if the box has it,
+    otherwise ComfyUI's own PyAV, which must be there because that is
+    what wrote the webm.
+    """
+    tmp = dst + ".part"
+    ff = shutil.which("ffmpeg")
+    if ff:
+        r = subprocess.run([ff, "-y", "-i", src, "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p", "-crf", "20",
+                            "-movflags", "+faststart", "-f", "mp4", tmp],
+                           capture_output=True, timeout=3600)
+        if r.returncode:
+            raise RuntimeError(r.stderr.decode("utf-8", "replace")[-300:])
+    else:
+        py = os.path.join(comfy_dir, "venv", "bin", "python")
+        if not os.path.exists(py):
+            raise RuntimeError("no ffmpeg and no ComfyUI venv to borrow PyAV from")
+        r = subprocess.run([py, "-c", PYAV_TO_MP4, src, tmp],
+                           capture_output=True, timeout=3600)
+        if r.returncode:
+            raise RuntimeError(r.stderr.decode("utf-8", "replace")[-300:])
+    os.replace(tmp, dst)           # only ever appears finished
+    return dst
 
 
 def stitch(paths, out, comfy_dir):
@@ -1228,7 +1293,12 @@ class H(BaseHTTPRequestHandler):
                     except OSError:
                         pass
         out.sort(reverse=True)
-        return [r for _m, r in out[:limit]]
+        names = {r for _m, r in out}
+        # A clip and its mp4 are the same clip; show only the one that
+        # plays.
+        return [r for _m, r in out
+                if not (r.lower().endswith(".webm")
+                        and r[:-5] + ".mp4" in names)][:limit]
 
     def models(self):
         o = self.graph.info
@@ -1346,9 +1416,39 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def ensure_mp4(self, rel):
+        """The playable mp4 for a clip, or None while one is being made."""
+        if not rel.lower().endswith(".webm"):
+            return rel
+        mp4 = rel[:-5] + ".mp4"
+        if os.path.isfile(os.path.join(self.outdir, mp4)):
+            return mp4
+        src = os.path.join(self.outdir, rel)
+        with MP4_LOCK:
+            if rel in MP4_JOBS or not os.path.isfile(src):
+                return None
+            MP4_JOBS.add(rel)
+        comfy_dir = os.path.dirname(self.outdir)
+        dst = os.path.join(self.outdir, mp4)
+
+        def run():
+            try:
+                to_mp4(src, dst, comfy_dir)
+            except Exception as e:
+                print("mp4 of %s: %s" % (rel, e), file=sys.stderr)
+            finally:
+                with MP4_LOCK:
+                    MP4_JOBS.discard(rel)
+
+        threading.Thread(target=run, daemon=True).start()
+        return None
+
     def cells(self, rels):
         for r in rels:
-            yield cell(r, prompt_of(os.path.join(self.outdir, r)))
+            better = self.ensure_mp4(r)
+            yield cell(better or r,
+                       prompt_of(os.path.join(self.outdir, better or r)),
+                       converting=(better is None))
 
     def live_block(self):
         """What is happening right now, as a fragment above the form.

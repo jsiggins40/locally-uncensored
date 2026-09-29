@@ -119,13 +119,26 @@ EOF
   if [ -s "$OUT" ]; then echo "  already have it"; continue; fi
 
   echo "  downloading..."
-  # The token goes in the URL as well as the header. The metadata
-  # endpoint is happy with the header alone; the download endpoint
-  # answers 401 without the query parameter, which reads like a bad key
-  # right after a request that proved the key is fine.
+  # Two things the obvious URL gets wrong. The token has to be in the
+  # query string as well as the header - the metadata endpoint is happy
+  # with the header alone and the download one is not, which reads like a
+  # bad key immediately after a request that proved the key is good. And
+  # the generic /download/models/<id> answers 401 for some versions even
+  # so, where the per-file URL the API hands over works; that one carries
+  # a fileId.
+  DL="${URL:-https://civitai.com/api/download/models/$VID}"
+  case "$DL" in *\?*) DL="$DL&token=$TOKEN";; *) DL="$DL?token=$TOKEN";; esac
   if curl -fL --progress-bar -H "Authorization: Bearer $TOKEN" \
-       "https://civitai.com/api/download/models/$VID?token=$TOKEN" \
-       -o "$OUT.part"; then
+       "$DL" -o "$OUT.part"; then
+    # Uploaders name files whatever they like, and one of them called a
+    # safetensors ".zip". The first eight bytes are a length, then the
+    # JSON header opens - that is what says what this is. ComfyUI goes by
+    # extension, so a mislabelled file is simply invisible to it.
+    if head -c 16 "$OUT.part" | tail -c 8 | grep -q '{"' \
+       && [ "${OUT##*.}" != "safetensors" ]; then
+      echo "  (a safetensors despite the name; renaming)"
+      OUT="${OUT%.*}.safetensors"
+    fi
     mv "$OUT.part" "$OUT"
     echo "  -> $OUT ($(du -h "$OUT" | cut -f1))"
   else

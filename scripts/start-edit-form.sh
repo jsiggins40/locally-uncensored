@@ -61,6 +61,10 @@ import subprocess, sys, threading, time, urllib.parse, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BYTES = 64 * 1024 * 1024
+# A LoRA is a few hundred megabytes, and some of them will not come down
+# over Civitai's API at all - only a signed-in browser gets them. So the
+# form takes one as an upload.
+MAX_LORA = 800 * 1024 * 1024
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".webm", ".mp4")
 VID_EXT = (".webm", ".mp4")
 MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -1094,6 +1098,9 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   <label>Model (image editing only)</label>
   <select name="model">{models}</select>
 
+  <label>Add a LoRA from your phone (.safetensors)</label>
+  <input type="file" name="lora_file" accept=".safetensors">
+
   <label>LoRA (optional)</label>
   <select name="lora">{loras}</select>
   <label>strength</label>
@@ -1108,6 +1115,10 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Steps</label><input type="number" name="steps" value="{steps}" min="1" max="60"></div>
     <div><label>CFG</label><input type="text" name="cfg" value="{cfg}"></div>
   </div>
+  <p class="note">Some LoRAs will not download over an API at all and
+  only come to a signed-in browser. Save one on your phone and put it in
+  the box above; it lands in ComfyUI's folder and appears in the list
+  without a restart.</p>
   <p class="note">Six images from one press: put six lines in the
   instruction box and you get six frames of a scene, or leave one line and
   you get six goes at it with different seeds, to pick from. Each keeps
@@ -1659,7 +1670,7 @@ class H(BaseHTTPRequestHandler):
         if not m:
             return self.render('<p class="err">not a form post</p>')
         n = int(self.headers.get("Content-Length") or 0)
-        if n <= 0 or n > MAX_BYTES:
+        if n <= 0 or n > MAX_LORA:
             return self.render('<p class="err">too large</p>')
         body = self.rfile.read(n)
 
@@ -1702,6 +1713,27 @@ class H(BaseHTTPRequestHandler):
                                ("length", "length"), ("size", "size")):
                 if field in fields:
                     M[key] = fields[field]
+
+        # A LoRA upload is its own errand: no photo, no prompt, nothing
+        # generated. Handled before any of that is required.
+        up = uploads.get("lora_file")
+        if up:
+            name, blob = up
+            if not name.lower().endswith(".safetensors"):
+                name += ".safetensors"
+            if not (len(blob) > 16 and b'{"' in blob[8:16]):
+                return self.render('<p class="err">that is not a safetensors '
+                                   'file &mdash; the header does not look '
+                                   'right. Nothing was saved.</p>')
+            d = os.path.join(os.path.dirname(self.outdir), "models", "loras")
+            os.makedirs(d, exist_ok=True)
+            tmp = os.path.join(d, name + ".part")
+            with open(tmp, "wb") as fh:
+                fh.write(blob)
+            os.replace(tmp, os.path.join(d, name))
+            return self.render('<p class="ok">saved {} ({:.0f}MB). It is in '
+                               'the list below.</p>'.format(
+                                   html.escape(name), len(blob) / 1e6))
 
         image = stash("photo", "existing")
         image2 = stash("photo2", "existing2")

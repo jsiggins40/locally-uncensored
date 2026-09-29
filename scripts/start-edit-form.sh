@@ -1098,7 +1098,10 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   <label>Model (image editing only)</label>
   <select name="model">{models}</select>
 
-  <label>Add a LoRA from your phone (.safetensors)</label>
+  <label>Add a LoRA by link &mdash; paste the download URL</label>
+  <input type="text" name="lora_url" placeholder="https://...">
+
+  <label>&hellip;or from your phone (small ones only)</label>
   <input type="file" name="lora_file">
 
   <label>LoRA (optional)</label>
@@ -1115,10 +1118,11 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
     <div><label>Steps</label><input type="number" name="steps" value="{steps}" min="1" max="60"></div>
     <div><label>CFG</label><input type="text" name="cfg" value="{cfg}"></div>
   </div>
-  <p class="note">Some LoRAs will not download over an API at all and
-  only come to a signed-in browser. Save one on your phone and put it in
-  the box above; it lands in ComfyUI's folder and appears in the list
-  without a restart.</p>
+  <p class="note">Some LoRAs only come to a signed-in browser, not to an
+  API. Open the download in Safari, long-press and copy the link, and
+  paste it above &mdash; the box fetches it itself, which avoids sending a
+  few hundred megabytes up from your phone through a proxy that will
+  refuse it. The file picker below is for small ones only.</p>
   <p class="note">Six images from one press: put six lines in the
   instruction box and you get six frames of a scene, or leave one line and
   you get six goes at it with different seeds, to pick from. Each keeps
@@ -1714,8 +1718,67 @@ class H(BaseHTTPRequestHandler):
                 if field in fields:
                     M[key] = fields[field]
 
-        # A LoRA upload is its own errand: no photo, no prompt, nothing
+        # Adding a LoRA is its own errand: no photo, no prompt, nothing
         # generated. Handled before any of that is required.
+        #
+        # By link rather than by upload wherever possible: a forwarding
+        # proxy sits between the phone and this box and refuses a body of
+        # a few hundred megabytes, which is what a LoRA is. Fetching it
+        # here has no such limit and runs at the box's speed rather than
+        # the phone's.
+        link = (fields.get("lora_url") or "").strip()
+        if link:
+            if not re.match(r"https?://", link):
+                return self.render('<p class="err">that is not an http '
+                                   'link</p>')
+            d = os.path.join(os.path.dirname(self.outdir), "models", "loras")
+            os.makedirs(d, exist_ok=True)
+            tmp = os.path.join(d, "incoming.part")
+            try:
+                req = urllib.request.Request(
+                    link, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=600) as r:
+                    # The server's own name for it beats the one in the
+                    # path, which for a signed CDN link is usually junk.
+                    disp = r.headers.get("Content-Disposition", "")
+                    m = re.search(r'filename\*?=(?:UTF-8'')?"?([^";]+)',
+                                  disp)
+                    name = (m.group(1) if m else
+                            os.path.basename(urllib.parse.urlsplit(link).path))
+                    got = 0
+                    with open(tmp, "wb") as fh:
+                        while True:
+                            chunk = r.read(1 << 20)
+                            if not chunk:
+                                break
+                            got += len(chunk)
+                            if got > MAX_LORA:
+                                raise RuntimeError("bigger than %dMB"
+                                                   % (MAX_LORA // 2**20))
+                            fh.write(chunk)
+            except Exception as e:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                return self.render('<p class="err">could not fetch it: {}</p>'
+                                   .format(html.escape(str(e)[:300])))
+            with open(tmp, "rb") as fh:
+                head = fh.read(16)
+            if not (len(head) == 16 and b'{"' in head[8:16]):
+                os.remove(tmp)
+                return self.render('<p class="err">what came back is not a '
+                                   'safetensors file. That usually means the '
+                                   'link needed a login and you were handed a '
+                                   'web page instead.</p>')
+            name = safe(name) or "lora.safetensors"
+            if not name.lower().endswith(".safetensors"):
+                name = os.path.splitext(name)[0] + ".safetensors"
+            os.replace(tmp, os.path.join(d, name))
+            return self.render('<p class="ok">fetched {} ({:.0f}MB). It is in '
+                               'the list below.</p>'.format(
+                                   html.escape(name), got / 1e6))
+
         up = uploads.get("lora_file")
         if up:
             name, blob = up

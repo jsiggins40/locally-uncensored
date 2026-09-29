@@ -1379,9 +1379,24 @@ class H(BaseHTTPRequestHandler):
                 out.append('<p class="said">{}</p>'.format(html.escape(s["label"])))
             if s["max"]:
                 pct = min(100, int(100.0 * s["value"] / s["max"]))
+                # Elapsed alone answers the wrong question. Once a few
+                # steps have gone by their rate is a decent guide to the
+                # rest - and on a chained video, to the clips after this
+                # one as well.
+                eta = ""
+                if s["value"] >= 2 and el > 0:
+                    per = el / float(s["value"])
+                    rest = per * (s["max"] - s["value"])
+                    if s["clips"] > 1:
+                        rest += per * s["max"] * (s["clips"] - s["clip"])
+                    m, sec = int(rest) // 60, int(rest) % 60
+                    eta = (" &middot; about %dm left" % m if m
+                           else " &middot; under a minute left")
+                    if m > 90:
+                        eta = " &middot; about %dh%02dm left" % (m // 60, m % 60)
                 out.append('<div class="bar"><i style="width:{}%"></i></div>'
-                           '<p class="note">step {} of {} &middot; {} elapsed'
-                           '</p>'.format(pct, s["value"], s["max"], elapsed))
+                           '<p class="note">step {} of {} &middot; {} elapsed{}'
+                           '</p>'.format(pct, s["value"], s["max"], elapsed, eta))
             else:
                 out.append('<p class="note">starting up &middot; {} elapsed. '
                            'Loading a model off disk takes a while the first '

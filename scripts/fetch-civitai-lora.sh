@@ -119,8 +119,13 @@ EOF
   if [ -s "$OUT" ]; then echo "  already have it"; continue; fi
 
   echo "  downloading..."
+  # The token goes in the URL as well as the header. The metadata
+  # endpoint is happy with the header alone; the download endpoint
+  # answers 401 without the query parameter, which reads like a bad key
+  # right after a request that proved the key is fine.
   if curl -fL --progress-bar -H "Authorization: Bearer $TOKEN" \
-       "https://civitai.com/api/download/models/$VID" -o "$OUT.part"; then
+       "https://civitai.com/api/download/models/$VID?token=$TOKEN" \
+       -o "$OUT.part"; then
     mv "$OUT.part" "$OUT"
     echo "  -> $OUT ($(du -h "$OUT" | cut -f1))"
   else

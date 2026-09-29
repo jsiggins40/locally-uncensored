@@ -1099,7 +1099,7 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   <select name="model">{models}</select>
 
   <label>Add a LoRA from your phone (.safetensors)</label>
-  <input type="file" name="lora_file" accept=".safetensors">
+  <input type="file" name="lora_file">
 
   <label>LoRA (optional)</label>
   <select name="lora">{loras}</select>

@@ -256,8 +256,26 @@ class Live:
         self.max = 0
         self.done = not prompt_id
         self.error = ""
+        self.cancelled = False
         self.outputs = []
         self.started = time.time()
+
+    def request_cancel(self):
+        """Stop was pressed. The workers read this between jobs."""
+        with self.lock:
+            self.cancelled = True
+
+    def stopped(self):
+        """A stop finished. Not an error - nothing went wrong, it ended.
+
+        `cancelled` deliberately stays set: a worker may still be between
+        jobs and has to see it. The next run clears it, in _clear().
+        """
+        with self.lock:
+            self.done = True
+            self.label = "stopped"
+            self.clip = self.clips = 0
+            self.value = self.max = 0
 
     def forget_error(self):
         """Drop the last failure, because a new attempt is being made.
@@ -272,6 +290,7 @@ class Live:
         """
         with self.lock:
             self.error = ""
+            self.cancelled = False
 
     def queued(self, prompt_id, label, clip=0, clips=0, unit="clip"):
         """Called when this form posts a job, before ComfyUI says anything."""
@@ -287,6 +306,7 @@ class Live:
                         label=self.label, node=self.node, value=self.value,
                         max=self.max, queue=self.queue, done=self.done,
                         error=self.error, outputs=list(self.outputs),
+                        cancelled=self.cancelled,
                         started=self.started, seq=self.seq,
                         clip=self.clip, clips=self.clips, reel=self.reel,
                         unit=self.unit,
@@ -346,9 +366,14 @@ class Live:
                             rel = it["subfolder"] + "/" + rel
                         if rel and rel not in self.outputs:
                             self.outputs.append(rel)
-            elif t in ("execution_error", "execution_interrupted"):
+            elif t == "execution_interrupted":
+                self.done = True
+                self.label = "stopped"
+                self.value = self.max = 0
+                self.preview = b""
+            elif t == "execution_error":
                 self.error = str(d.get("exception_message")
-                                 or d.get("exception_type") or "interrupted")
+                                 or d.get("exception_type") or "failed")
                 self.done = True
                 self.preview = b""
             elif t == "execution_success":
@@ -464,11 +489,17 @@ def ws_listen(base, live):
         delay = min(delay * 2, 20)
 
 
+class Cancelled(Exception):
+    """Someone pressed Stop. Not a failure, and not reported as one."""
+
+
 def wait_done(prompt_id, timeout=7200):
     """Block until ComfyUI finishes that job, and hand back its outputs."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         s = LIVE.snapshot()
+        if s["cancelled"]:
+            raise Cancelled()
         if s["error"]:
             raise RuntimeError(s["error"])
         if s["prompt_id"] == prompt_id and s["done"]:
@@ -630,6 +661,8 @@ def batch_worker(cfg):
     n = len(prompts)
     try:
         for i, prompt in enumerate(prompts):
+            if LIVE.snapshot()["cancelled"]:
+                raise Cancelled()
             g = cfg["build"](prompt, seed_for(cfg.get("seed"), i))
             r = api(cfg["comfy"], "/prompt",
                     {"prompt": g, "client_id": CLIENT_ID})
@@ -644,6 +677,10 @@ def batch_worker(cfg):
             LIVE.label = "%d images" % n
             LIVE.done = True
             LIVE.clip = n
+    except Cancelled:
+        with LIVE.lock:
+            LIVE.outputs = made          # whatever finished before the stop
+        LIVE.stopped()
     except Exception as e:
         with LIVE.lock:
             LIVE.outputs = made          # keep whatever did come out
@@ -715,6 +752,8 @@ def sequence_worker(cfg):
         with LIVE.lock:
             LIVE.done = True
             LIVE.clip = n
+    except Cancelled:
+        LIVE.stopped()
     except Exception as e:
         with LIVE.lock:
             LIVE.error = "%s (after %d of %d clips)" % (str(e)[:600],
@@ -1109,6 +1148,8 @@ select,input[type=text],input[type=number],textarea,input[type=file]{{
 textarea{{min-height:76px}}
 button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   border-radius:10px;background:#d2691e;color:#fff}}
+form.stop{{margin:10px 0 0}}
+form.stop button{{margin:0;background:#8883;color:inherit}}
 .row{{display:flex;gap:10px}} .row>div{{flex:1}}
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
 .card img,.card video{{width:100%;border-radius:8px;display:block;background:#8882}}
@@ -1589,6 +1630,8 @@ class H(BaseHTTPRequestHandler):
                 out.append('<p class="note">No preview frames are arriving. '
                            'ComfyUI only sends them when started with '
                            '<code>--preview-method auto</code>.</p>')
+            out.append('<form class="stop" method="post" action="/stop">'
+                       '<button type="submit">Stop</button></form>')
             refresh = '<meta http-equiv="refresh" content="3">'
         elif s["error"]:
             out.append('<p class="err">{}</p>'.format(html.escape(s["error"][:600])))
@@ -1730,9 +1773,28 @@ class H(BaseHTTPRequestHandler):
             self.end_headers(); self.wfile.write(body); return
         self.render()
 
+    def stop_run(self):
+        """Interrupt what is running now, and drop whatever is queued behind.
+
+        Both halves are needed: /interrupt ends only the job in flight, so
+        a batch of six would carry straight on to the seventh. The flag is
+        what stops our own workers, which sit between jobs where ComfyUI
+        cannot reach them.
+        """
+        LIVE.request_cancel()
+        for path, payload in (("/interrupt", {}), ("/queue", {"clear": True})):
+            try:
+                api(self.comfy, path, payload, timeout=10)
+            except Exception:
+                pass     # both answer with an empty body, which api() cannot read
+        LIVE.stopped()
+        return self.redirect("/")
+
     def do_POST(self):
         if not self.authed():
             return
+        if urllib.parse.urlsplit(self.path).path == "/stop":
+            return self.stop_run()
         ctype = self.headers.get("Content-Type", "")
         m = re.search(r'boundary=(?:"([^"]+)"|([^;]+))', ctype)
         if not m:

@@ -5,6 +5,13 @@
 #   bash r.sh
 #   SKIP_OLLAMA=1 bash r.sh    leave the language model down
 #   COMFY_ARGS=--highvram bash r.sh   keep models in VRAM (remembered)
+#   COMFY_ARGS=none bash r.sh        forget them again
+#
+# --highvram never releases a model. With two editors installed that
+# is ~30GB and ~38GB pinned at once, and the second one to load OOMs
+# on an 80GB card. It suits a box running one model; with two, the
+# default already keeps the model resident between runs and evicts
+# only when it has to.
 #
 # Everything here lives in a tmux session, which is what lets a job
 # survive a closed phone - and what does not survive the box restarting.
@@ -26,11 +33,11 @@ COMFY="${COMFY_DIR:-$HOME/ComfyUI}"
 #
 #   COMFY_ARGS=--highvram bash <this script>
 ARGS_FILE="$HOME/.comfy-args"
-if [ -n "${COMFY_ARGS:-}" ]; then
-  printf '%s' "$COMFY_ARGS" > "$ARGS_FILE"
-else
-  COMFY_ARGS="$(cat "$ARGS_FILE" 2>/dev/null || true)"
-fi
+case "${COMFY_ARGS:-}" in
+  "")    COMFY_ARGS="$(cat "$ARGS_FILE" 2>/dev/null || true)" ;;
+  none)  rm -f "$ARGS_FILE"; COMFY_ARGS="" ;;   # the way back out
+  *)     printf '%s' "$COMFY_ARGS" > "$ARGS_FILE" ;;
+esac
 [ -n "$COMFY_ARGS" ] && echo "  extra ComfyUI flags: $COMFY_ARGS"
 say() { printf '\n=== %s ===\n' "$*"; }
 

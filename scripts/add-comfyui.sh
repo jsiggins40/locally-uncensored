@@ -35,11 +35,11 @@ NEED_GB=25
 #
 #   COMFY_ARGS=--highvram bash <this script>
 ARGS_FILE="$HOME/.comfy-args"
-if [ -n "${COMFY_ARGS:-}" ]; then
-  printf '%s' "$COMFY_ARGS" > "$ARGS_FILE"
-else
-  COMFY_ARGS="$(cat "$ARGS_FILE" 2>/dev/null || true)"
-fi
+case "${COMFY_ARGS:-}" in
+  "")    COMFY_ARGS="$(cat "$ARGS_FILE" 2>/dev/null || true)" ;;
+  none)  rm -f "$ARGS_FILE"; COMFY_ARGS="" ;;   # the way back out
+  *)     printf '%s' "$COMFY_ARGS" > "$ARGS_FILE" ;;
+esac
 [ -n "$COMFY_ARGS" ] && echo "  extra ComfyUI flags: $COMFY_ARGS"
 
 exec > >(tee -a "$LOG") 2>&1

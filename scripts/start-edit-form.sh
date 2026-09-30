@@ -87,10 +87,23 @@ MASK = """
   <div class="maskwrap"><img src="/src?n={src}" alt="">
     <div class="cells" style="grid-template-columns:repeat({cols},1fr)">{cells}</div>
   </div>
-  <p class="note">{n} of {cols}&times;{rows} cells marked. Nothing outside them
-  is touched at all, so Denoise applies only inside &mdash; which is what lets
-  you put it to 1.0 on a shirt and keep the face exactly as photographed.
-  Leave every cell clear to edit the whole picture as before.</p>
+  <div class="row ops">
+    <button type="submit" formaction="/mask?op=box" class="second">Fill box</button>
+    <button type="submit" formaction="/mask?op=grow" class="second">Grow</button>
+  </div>
+  <div class="row ops">
+    <button type="submit" formaction="/mask?op=invert" class="second">Invert</button>
+    <button type="submit" formaction="/mask?op=clear" class="second">Clear</button>
+  </div>
+  <p class="note">{n} of {cols}&times;{rows} cells marked. <b>Fill box</b> is the
+  quick way: tap one corner of the area and the opposite one, then press it and
+  everything between fills in. <b>Grow</b> widens what is marked by a cell all
+  round, <b>Invert</b> swaps marked for unmarked &mdash; useful when it is the
+  background you want changed.</p>
+  <p class="note">Nothing outside the marked cells is touched at all, so Denoise
+  applies only inside. That is what lets you put it to 1.0 on a shirt and keep
+  the face exactly as photographed. Leave every cell clear to edit the whole
+  picture as before.</p>
 """
 
 
@@ -133,6 +146,35 @@ def image_size(path):
                 fh.seek(size - 2, 1)
     except Exception:
         return 0, 0
+
+
+def mask_op(op, marks, cols, rows):
+    """Tapping 220 cells one at a time is nobody's idea of a good evening.
+
+    Every one of these is worked out on the server from the ticks that
+    came with the form, which is the only place a page with no JavaScript
+    can do anything at all.
+    """
+    cur = set()
+    for v in marks or ():
+        r, _, c = str(v).partition("-")
+        if r.isdigit() and c.isdigit():
+            cur.add((int(r), int(c)))
+    if op == "clear":
+        cur = set()
+    elif op == "invert":
+        cur = {(r, c) for r in range(rows) for c in range(cols)} - cur
+    elif op == "box" and cur:
+        rs = [r for r, _ in cur]
+        cs = [c for _, c in cur]
+        cur = {(r, c)
+               for r in range(min(rs), max(rs) + 1)
+               for c in range(min(cs), max(cs) + 1)}
+    elif op == "grow" and cur:
+        cur = {(r + dr, c + dc) for r, c in cur
+               for dr in (-1, 0, 1) for dc in (-1, 0, 1)
+               if 0 <= r + dr < rows and 0 <= c + dc < cols}
+    return sorted("%d-%d" % rc for rc in cur)
 
 
 def write_mask_png(path, cols, rows, cells, w=0, h=0):
@@ -1283,6 +1325,7 @@ form.stop button{{margin:0;background:#8883;color:inherit}}
 .cells input:checked+span{{background:#d2691eaa;
   box-shadow:inset 0 0 0 1px #d2691e}}
 .row{{display:flex;gap:10px}} .row>div{{flex:1}}
+.row.ops{{margin-top:8px}} .row.ops>button{{flex:1;margin-top:0;font-size:15px;padding:10px}}
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
 .card img,.card video{{width:100%;border-radius:8px;display:block;background:#8882}}
 .card a.dl{{font-size:13px;color:#888;display:block;padding:4px 2px}}
@@ -2032,6 +2075,13 @@ class H(BaseHTTPRequestHandler):
             picked = stash("photo", "existing")
             H.last["existing"] = picked or ""
             H.last["mask"] = sorted(set(marks))
+            if picked:
+                op = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query).get("op", [""])[0]
+                if op:
+                    w, h = image_size(os.path.join(self.indir, picked))
+                    H.last["mask"] = mask_op(op, H.last["mask"],
+                                             MASK_COLS, self.mask_rows(w, h))
             if not picked:
                 return self.render('<p class="err">pick or upload a photo '
                                    'first, then press Mask.</p>')

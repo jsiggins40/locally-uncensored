@@ -26,6 +26,13 @@ set -uo pipefail
 PORT="${PORT:-7862}"
 COMFY_URL="${COMFY_URL:-http://127.0.0.1:8288}"
 COMFY_DIR="${COMFY_DIR:-$HOME/ComfyUI}"
+# The form's input and output folders are passed explicitly, derived from
+# COMFY_DIR, because its own defaults expand ~ at runtime - and the form
+# and ComfyUI need not agree on what ~ is. tmux hands a session the
+# environment its *server* started with, so a form launched through tmux
+# can hold a different HOME than the ComfyUI it talks to. That put uploads
+# in /home/ComfyUI/input while ComfyUI read /home/work/ComfyUI/input, and
+# every edit failed with "Invalid image file" for a file that was fine.
 CREDS="$HOME/edit-form-credentials.txt"
 SCRIPT="$HOME/edit-form.py"
 LOG="$HOME/edit-form.log"
@@ -2148,7 +2155,8 @@ fi
 say "starting"
 tmux kill-session -t "=$SESSION" 2>/dev/null
 tmux new-session -d -s "$SESSION" \
-  "python3 -u '$SCRIPT' --port $PORT --comfy '$COMFY_URL' --user '$U' --password '$P' 2>&1 | tee -a '$LOG'"
+  "python3 -u '$SCRIPT' --port $PORT --comfy '$COMFY_URL' --user '$U' --password '$P' \
+     --indir '$COMFY_DIR/input' --outdir '$COMFY_DIR/output' 2>&1 | tee -a '$LOG'"
 sleep 4
 tmux has-session -t "=$SESSION" 2>/dev/null || { tail -20 "$LOG"; die "did not start"; }
 CODE=$(curl -sS -o /dev/null -w '%{http_code}' -u "$U:$P" "http://127.0.0.1:$PORT/" 2>/dev/null)

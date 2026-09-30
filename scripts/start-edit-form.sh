@@ -252,6 +252,20 @@ class Live:
         self.outputs = []
         self.started = time.time()
 
+    def forget_error(self):
+        """Drop the last failure, because a new attempt is being made.
+
+        Only queued() and execution_start cleared it, and both happen after
+        ComfyUI has accepted the job. Everything that fails earlier - a
+        rejected prompt, a model that has since been moved away, a graph
+        that will not build - returned without clearing, so the page went
+        on showing the previous failure. Read three times over, one OOM
+        looks like three OOMs, and you go hunting a fault that is no
+        longer there.
+        """
+        with self.lock:
+            self.error = ""
+
     def queued(self, prompt_id, label, clip=0, clips=0, unit="clip"):
         """Called when this form posts a job, before ComfyUI says anything."""
         with self.lock:
@@ -1860,6 +1874,7 @@ class H(BaseHTTPRequestHandler):
                 'ones that mode wants ({} steps, CFG {}). Check them and '
                 'press Run.</p>'.format(now, M["steps"], M["cfg"]))
 
+        LIVE.forget_error()
         try:
             steps = max(1, min(60, int(M["steps"])))
             cfg = float(M["cfg"])

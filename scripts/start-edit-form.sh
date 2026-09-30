@@ -1270,11 +1270,18 @@ form.stop{{margin:10px 0 0}}
 form.stop button{{margin:0;background:#8883;color:inherit}}
 .maskwrap{{position:relative;margin-top:8px;border-radius:10px;overflow:hidden}}
 .maskwrap img{{width:100%;display:block}}
-.cells{{position:absolute;inset:0;display:grid}}
-.cells label{{display:block;box-shadow:inset 0 0 0 1px #fff3}}
+/* grid-auto-rows is not optional: the rows are implicit, and without a
+   size they fall back to auto - which for a label holding nothing but an
+   empty span is no height at all. The overlay then exists but cannot be
+   seen or tapped. */
+.cells{{position:absolute;top:0;left:0;right:0;bottom:0;display:grid;
+  grid-auto-rows:1fr}}
+.cells label{{display:block;box-shadow:inset 0 0 0 1px #fff3;
+  touch-action:manipulation}}
 .cells input{{position:absolute;opacity:0;width:0;height:0}}
 .cells span{{display:block;width:100%;height:100%}}
-.cells input:checked+span{{background:#d2691ea0}}
+.cells input:checked+span{{background:#d2691eaa;
+  box-shadow:inset 0 0 0 1px #d2691e}}
 .row{{display:flex;gap:10px}} .row>div{{flex:1}}
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
 .card img,.card video{{width:100%;border-radius:8px;display:block;background:#8882}}

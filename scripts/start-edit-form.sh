@@ -585,6 +585,17 @@ def stitch(paths, out, comfy_dir):
     raise RuntimeError("no ffmpeg and no ComfyUI venv to borrow PyAV from")
 
 
+def seed_for(base, i=0):
+    """The seed for run i: the one that was typed, or the clock.
+
+    A fixed seed with the same prompt six times over would give six
+    identical pictures, so the offset stays either way - what a typed seed
+    buys is that the same number gives the same six again tomorrow.
+    """
+    root = int(time.time() * 1000) if base is None else int(base)
+    return (root + i * 7919) % 2**31
+
+
 def batch_worker(cfg):
     """Several stills from one submission, queued one at a time.
 
@@ -598,8 +609,7 @@ def batch_worker(cfg):
     n = len(prompts)
     try:
         for i, prompt in enumerate(prompts):
-            g = cfg["build"](prompt,
-                             (int(time.time() * 1000) + i * 7919) % 2**31)
+            g = cfg["build"](prompt, seed_for(cfg.get("seed"), i))
             r = api(cfg["comfy"], "/prompt",
                     {"prompt": g, "client_id": CLIENT_ID})
             pid = str(r.get("prompt_id", ""))
@@ -640,7 +650,7 @@ def sequence_worker(cfg):
                 vae=cfg["vae"], image=current, prompt=prompt,
                 negative=cfg.get("negative") or "static, still, blurry",
                 steps=cfg["steps"], cfg=cfg["cfg"],
-                seed=(int(time.time() * 1000) + i * 7919) % 2**31,
+                seed=seed_for(cfg.get("seed"), i),
                 width=cfg["width"], height=cfg["height"],
                 length=cfg["length"], loras=cfg["loras"],
                 end_image=None, save_last=(i < n - 1))
@@ -1154,8 +1164,17 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   scaled to that many pixels before it is worked on. A phone photo left
   alone is twelve megapixels, which is twelve times the work for a picture
   you cannot tell apart on a phone screen.</p>
-  <label>Denoise (image editing) &mdash; lower keeps more of the photo</label>
-  <input type="text" name="denoise" value="{denoise}">
+  <div class="row">
+    <div><label>Denoise (editing) &mdash; lower keeps more of the photo</label>
+    <input type="text" name="denoise" value="{denoise}"></div>
+    <div><label>Seed &mdash; blank for a new one each time</label>
+    <input type="text" name="seed" value="{seed}"></div>
+  </div>
+  <p class="note">Put a number in Seed while you are tuning Denoise or LoRA
+  strength. With it blank every run also draws fresh noise, so a picture
+  that came out better may have come out better by luck, and you cannot
+  tell that from the dial you just moved. Any number will do; clear it
+  again when you go back to wanting variety.</p>
   <div class="row">
     <div><label>Frames (video)</label><input type="number" name="length" value="{length}" min="9" max="161"></div>
     <div><label>Size</label><input type="text" name="size" value="{size}"></div>
@@ -1297,11 +1316,11 @@ class H(BaseHTTPRequestHandler):
         "image": {"steps": "4", "cfg": "1.0", "size": "1024x1024",
                   "length": "81", "lora": "", "lstr": "1.0",
                   "lora2": "", "lstr2": "1.0", "denoise": "1.0",
-                  "count": "1"},
+                  "count": "1", "seed": ""},
         "video": {"steps": "20", "cfg": "3.5", "size": "832x480",
                   "length": "81", "lora": "", "lstr": "1.0",
                   "lora2": "", "lstr2": "1.0", "denoise": "1.0",
-                  "count": "1"},
+                  "count": "1", "seed": ""},
     }
 
     def log_message(self, f, *a):
@@ -1446,6 +1465,7 @@ class H(BaseHTTPRequestHandler):
                            outs=outs, last=html.escape(L["prompt"]),
                            negative=html.escape(L.get("negative", "")),
                            denoise=html.escape(str(M.get("denoise", "1.0"))),
+                           seed=html.escape(str(M.get("seed", ""))),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1849,10 +1869,13 @@ class H(BaseHTTPRequestHandler):
             length = max(9, min(161, int(M["length"])))
             clips = max(1, min(8, int(fields.get("clips") or 1)))
             count = max(1, min(6, int(M.get("count") or 1)))
+            typed = (M.get("seed") or "").strip()
+            base_seed = int(typed) % 2**31 if typed else None
             w, _, h = (M["size"] or "832x480").lower().partition("x")
             width, height = int(w), int(h)
         except ValueError:
-            return self.render('<p class="err">steps, CFG and strength must be numbers</p>')
+            return self.render('<p class="err">steps, CFG, strength and seed '
+                               'must be numbers</p>')
         lora = M["lora"] or None
         lora2 = M["lora2"] or None
         mode = now
@@ -1931,6 +1954,7 @@ class H(BaseHTTPRequestHandler):
                     high=mm["wan_high"][0], low=mm["wan_low"][0],
                     clip=mm["wan_clip"][0], vae=mm["wan_vae"][0],
                     image=image, prompts=lines[:clips], steps=steps, cfg=cfg,
+                    seed=base_seed,
                     negative=H.last.get("negative", ""),
                     width=width, height=height, length=length, loras=chain,
                     timeout=7200),), daemon=True).start()
@@ -1943,7 +1967,7 @@ class H(BaseHTTPRequestHandler):
                     image=image, prompt=prompt,
                     negative=H.last.get("negative") or "static, still, blurry",
                     steps=steps, cfg=cfg,
-                    seed=int(time.time() * 1000) % 2**31,
+                    seed=seed_for(base_seed),
                     width=width, height=height, length=length,
                     loras=chain, end_image=end_image or None)
             except Exception as e:
@@ -2013,11 +2037,11 @@ class H(BaseHTTPRequestHandler):
             LIVE.queued("", "starting %d images" % count, 1, count, "image")
             threading.Thread(target=batch_worker, args=(dict(
                 build=mk, comfy=self.comfy, prompts=lines[:count],
-                timeout=1800),), daemon=True).start()
+                seed=base_seed, timeout=1800),), daemon=True).start()
             return self.redirect("/")
 
         try:
-            g = mk(prompt, int(time.time() * 1000) % 2**31)
+            g = mk(prompt, seed_for(base_seed))
         except Exception as e:
             return self.render('<p class="err">could not build the graph: {}</p>'
                                .format(html.escape(str(e))))

@@ -4,6 +4,7 @@
 #
 #   bash b.sh                 everything
 #   SKIP_COMFY=1 bash b.sh    Forge and Klein only
+#   SKIP_FORGE=1 bash b.sh    no Forge/Klein (saves 60GB)
 #   SKIP_QWEN=1 bash b.sh     no Qwen editor (saves 28GB)
 #   SKIP_WAN=1 bash b.sh      no video (saves 45GB)
 #   SKIP_WRITER=1 bash b.sh   no LLM (saves 25GB)
@@ -18,8 +19,9 @@
 # where a truncated URL quietly downloads a web page instead of a script -
 # which has now happened twice.
 #
-# Wants: an A100 (or anything with ~24GB), 250GB of disk, and a Hugging Face
-# token already stored. It checks all three before downloading anything.
+# Wants: an A100 (or anything with ~24GB), the disk the chosen parts need
+# (230GB for all of it, 170GB with SKIP_FORGE=1), and a Hugging Face token
+# already stored. It checks all three before downloading anything.
 
 set -uo pipefail
 
@@ -46,7 +48,8 @@ else
 fi
 
 # What is actually going to be pulled, so the number means something.
-NEED=60                                        # forge, klein, its encoder
+NEED=0
+[ "${SKIP_FORGE:-}"   = "1" ] || NEED=$((NEED + 60))  # forge, klein, its encoder
 [ "${SKIP_COMFY:-}"   = "1" ] || NEED=$((NEED + 15))
 [ "${SKIP_QWEN:-}"    = "1" ] || NEED=$((NEED + 30))
 [ "${SKIP_WAN:-}"     = "1" ] || NEED=$((NEED + 45))
@@ -59,12 +62,14 @@ if [ "${AVAIL:-0}" -lt "$NEED" ]; then
   die "only ${AVAIL}G free, and this needs about ${NEED}G. Either resize the
      instance (disk can only be grown, so pick generously - 400G covers
      everything) or leave parts out:
+       SKIP_FORGE=1    no Forge/Klein, -60G
        SKIP_WAN=1      no video, -45G
        SKIP_TRAINER=1  no LoRA training, -15G now and -60G later
        SKIP_WRITER=1   no LLM, -25G"
 fi
 
-# Checked first because without it the gated uncensored encoder silently
+# Checked first because every weight below comes from Hugging Face, and the
+# gated uncensored encoder is worse than a failure without it: it silently
 # falls back to the stock one, and you find out three prompts into a session.
 step "hugging face token"
 export PATH="$HOME/.local/bin:$PATH"
@@ -100,12 +105,16 @@ wait_for() {  # wait_for <tmux-session> <minutes>
   return 0
 }
 
-say "1/8  Forge Neo, Klein, uncensored encoder"
-fetch setup-forge-neo-klein.sh
-bash "$HOME/setup-forge-neo-klein.sh" || die "forge setup"
-wait_for setup 60
-grep -q 'text encoder is the STOCK one' "$HOME/forge-setup.log" 2>/dev/null \
-  && echo "   !! the uncensored encoder did not download; prompts will be refused"
+if [ "${SKIP_FORGE:-}" != "1" ]; then
+  say "1/8  Forge Neo, Klein, uncensored encoder"
+  fetch setup-forge-neo-klein.sh
+  bash "$HOME/setup-forge-neo-klein.sh" || die "forge setup"
+  wait_for setup 60
+  grep -q 'text encoder is the STOCK one' "$HOME/forge-setup.log" 2>/dev/null \
+    && echo "   !! the uncensored encoder did not download; prompts will be refused"
+else
+  say "1/8  Forge Neo and Klein - skipped"
+fi
 
 if [ "${SKIP_COMFY:-}" != "1" ]; then
   say "2/8  ComfyUI"
@@ -209,7 +218,8 @@ show() {  # show <label> <port> <credentials-file> <tmux-session>
   printf '\n  %-12s port %-6s [%s]\n' "$1" "$2" "$up"
   [ -s "$3" ] && sed 's/^/                /' "$3"
 }
-show "Forge"      7860 "$HOME/forge-credentials.txt"      forge
+[ "${SKIP_FORGE:-}" = "1" ] \
+  || show "Forge" 7860 "$HOME/forge-credentials.txt" forge
 show "photo inbox" 7861 "$HOME/photo-inbox-credentials.txt" inbox
 show "edit form"  7862 "$HOME/edit-form-credentials.txt"  editform
 show "ComfyUI"    8188 "$HOME/comfy-credentials.txt"      comfy
@@ -223,6 +233,10 @@ cat <<EOF
   Forward those ports in the Thunder console, one URL each. 11434 is the
   model's own API and stays private - the writing form on 7863 is the way
   in to it.
+EOF
+
+if [ "${SKIP_FORGE:-}" != "1" ]; then
+cat <<'EOF'
 
   Klein, in Forge on 7860:
     checkpoint     flux-2-klein-base-9b
@@ -233,6 +247,8 @@ cat <<EOF
   Then, before generating anything: expand "Never OOM Integrated" in the
   Forge settings panel and switch it off. It tiles the VAE, which puts
   seams through every image, and it is on by default.
-
-  Full log: $LOG
 EOF
+fi
+
+echo
+echo "  Full log: $LOG"

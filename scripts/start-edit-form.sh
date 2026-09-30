@@ -759,6 +759,29 @@ class Graph:
         spec = self.info.get(node, {}).get("input", {})
         return list(spec.get("required", {})) + list(spec.get("optional", {}))
 
+    # The full /object_info is read once at startup, which was fine until
+    # a model got installed while the form was already running: the
+    # dropdown kept the list it had and the new file was invisible, with
+    # nothing on the page to say why. ComfyUI will describe one node at a
+    # time, which is small enough to re-read on a render, so the loaders
+    # get refreshed and everything else stays as it was.
+    LOADERS = ("UNETLoader", "CLIPLoader", "VAELoader", "LoraLoader",
+               "CheckpointLoaderSimple")
+
+    def refresh_loaders(self, comfy, max_age=20):
+        now = time.time()
+        if now - getattr(self, "_refreshed", 0) < max_age:
+            return
+        self._refreshed = now
+        for node in self.LOADERS:
+            try:
+                got = api(comfy, "/object_info/" + node, timeout=10)
+            except Exception:
+                continue          # keep what we had; a stale list beats none
+            spec = got.get(node)
+            if isinstance(spec, dict) and spec.get("input"):
+                self.info[node] = spec
+
     def enum_for(self, node, field):
         spec = self.info.get(node, {}).get("input", {})
         for grp in ("required", "optional"):
@@ -1316,7 +1339,7 @@ class H(BaseHTTPRequestHandler):
                         and r[:-5] + ".mp4" in names)][:limit]
 
     def models(self):
-        o = self.graph.info
+        self.graph.refresh_loaders(self.comfy)
         def enum(node, field):
             return self.graph.enum_for(node, field)
         unets = enum("UNETLoader", "unet_name")

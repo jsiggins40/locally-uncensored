@@ -4,6 +4,7 @@
 #
 #   bash r.sh
 #   SKIP_OLLAMA=1 bash r.sh    leave the language model down
+#   COMFY_ARGS=--highvram bash r.sh   keep models in VRAM (remembered)
 #
 # Everything here lives in a tmux session, which is what lets a job
 # survive a closed phone - and what does not survive the box restarting.
@@ -15,6 +16,22 @@
 set -uo pipefail
 
 COMFY="${COMFY_DIR:-$HOME/ComfyUI}"
+
+# Extra flags for ComfyUI, remembered in a file so a restart keeps them.
+# --highvram is the one that matters here: it leaves the model in VRAM
+# between runs. Most of an edit's wall clock is loading, not sampling -
+# 33s of a 40s edit - so it is the single biggest win available. It was
+# reverted once for OOMing at 71.8GB, but that was a box holding Wan and
+# Qwen at the same time; on a Qwen-only box it fits. Off unless asked for.
+#
+#   COMFY_ARGS=--highvram bash <this script>
+ARGS_FILE="$HOME/.comfy-args"
+if [ -n "${COMFY_ARGS:-}" ]; then
+  printf '%s' "$COMFY_ARGS" > "$ARGS_FILE"
+else
+  COMFY_ARGS="$(cat "$ARGS_FILE" 2>/dev/null || true)"
+fi
+[ -n "$COMFY_ARGS" ] && echo "  extra ComfyUI flags: $COMFY_ARGS"
 say() { printf '\n=== %s ===\n' "$*"; }
 
 up() { tmux has-session -t "=$1" 2>/dev/null; }
@@ -28,7 +45,7 @@ if [ -d "$COMFY" ]; then
   else
     say "ComfyUI"
     cd "$COMFY" && tmux new-session -d -s comfy \
-      "./venv/bin/python main.py --listen 127.0.0.1 --port 8288 --preview-method auto 2>&1 | tee -a $HOME/comfy-run.log"
+      "./venv/bin/python main.py --listen 127.0.0.1 --port 8288 --preview-method auto $COMFY_ARGS 2>&1 | tee -a $HOME/comfy-run.log"
     printf '  waiting'
     for _ in $(seq 60); do
       sleep 3

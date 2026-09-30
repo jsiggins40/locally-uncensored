@@ -167,8 +167,12 @@ cat <<EOF
 Restart ComfyUI so it sees them, then the form:
 
   tmux kill-session -t =comfy
-  cd ~/ComfyUI && tmux new -d -s comfy "./venv/bin/python main.py --listen 127.0.0.1 --port 8288 --preview-method auto 2>&1 | tee -a ~/comfy-run.log"
+  COMFY_ARGS=--highvram bash ~/r.sh
   bash ~/e.sh
+
+--highvram leaves the model in VRAM between runs, which is where most of
+an edit's wall clock goes. Drop it if this box also runs Wan - the two
+model sets do not fit on one card together.
 
 It appears in the Model dropdown as "(separate, 20 steps)". Use 20 steps
 and CFG 3.0 with it - the 4 steps and CFG 1 the merged model wants will

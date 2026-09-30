@@ -26,6 +26,22 @@ CREDS="$HOME/comfy-credentials.txt"
 LOG="$HOME/comfy-setup.log"
 NEED_GB=25
 
+# Extra flags for ComfyUI, remembered in a file so a restart keeps them.
+# --highvram is the one that matters here: it leaves the model in VRAM
+# between runs. Most of an edit's wall clock is loading, not sampling -
+# 33s of a 40s edit - so it is the single biggest win available. It was
+# reverted once for OOMing at 71.8GB, but that was a box holding Wan and
+# Qwen at the same time; on a Qwen-only box it fits. Off unless asked for.
+#
+#   COMFY_ARGS=--highvram bash <this script>
+ARGS_FILE="$HOME/.comfy-args"
+if [ -n "${COMFY_ARGS:-}" ]; then
+  printf '%s' "$COMFY_ARGS" > "$ARGS_FILE"
+else
+  COMFY_ARGS="$(cat "$ARGS_FILE" 2>/dev/null || true)"
+fi
+[ -n "$COMFY_ARGS" ] && echo "  extra ComfyUI flags: $COMFY_ARGS"
+
 exec > >(tee -a "$LOG") 2>&1
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\nFAILED: %s\n(see %s)\n' "$*" "$LOG"; exit 1; }
@@ -193,7 +209,7 @@ pgrep -x nginx >/dev/null || die "nginx is not running after start"
 say "launching"
 tmux kill-session -t =comfy 2>/dev/null
 tmux new-session -d -s comfy \
-  "cd $COMFY && ./venv/bin/python main.py --listen 127.0.0.1 --port $INTERNAL_PORT --preview-method auto 2>&1 | tee -a $HOME/comfy-run.log"
+  "cd $COMFY && ./venv/bin/python main.py --listen 127.0.0.1 --port $INTERNAL_PORT --preview-method auto $COMFY_ARGS 2>&1 | tee -a $HOME/comfy-run.log"
 
 for _ in $(seq 1 60); do
   sleep 2

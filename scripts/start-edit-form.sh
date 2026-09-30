@@ -63,7 +63,7 @@ and if a required node is absent the page says which one instead of posting
 a graph that fails somewhere inside ComfyUI.
 """
 
-import argparse, base64, hmac, html, json, os, re, shutil, socket, struct
+import argparse, base64, hmac, html, json, os, re, shutil, socket, struct, zlib
 import subprocess, sys, threading, time, urllib.parse, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -77,6 +77,101 @@ VID_EXT = (".webm", ".mp4")
 MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".webp": "image/webp", ".gif": "image/gif",
         ".webm": "video/webm", ".mp4": "video/mp4"}
+
+
+MASK_COLS = 10          # across; rows follow the photo's own proportions
+MASK_PREFIX = "_mask_"  # masks live beside the photos, hidden from the picker
+
+MASK = """
+  <label>Mask &mdash; tap the parts that may change</label>
+  <div class="maskwrap"><img src="/src?n={src}" alt="">
+    <div class="cells" style="grid-template-columns:repeat({cols},1fr)">{cells}</div>
+  </div>
+  <p class="note">{n} of {cols}&times;{rows} cells marked. Nothing outside them
+  is touched at all, so Denoise applies only inside &mdash; which is what lets
+  you put it to 1.0 on a shirt and keep the face exactly as photographed.
+  Leave every cell clear to edit the whole picture as before.</p>
+"""
+
+
+def image_size(path):
+    """(width, height) of a PNG or JPEG, from the header alone.
+
+    Needed so a mask can be written at the photo's own proportions - a
+    square mask over a portrait would stretch across the resize and the
+    marked region would land somewhere else. Reading two headers by hand
+    is cheaper than a dependency; this whole form is stdlib on purpose.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(32)
+            if head[:8] == b"\x89PNG\r\n\x1a\n":
+                w, h = struct.unpack(">II", head[16:24])
+                return int(w), int(h)
+            if head[:2] != b"\xff\xd8":
+                return 0, 0
+            fh.seek(2)
+            while True:
+                b = fh.read(1)
+                if not b:
+                    return 0, 0
+                if b != b"\xff":
+                    continue
+                marker = fh.read(1)
+                while marker == b"\xff":        # fill bytes are legal
+                    marker = fh.read(1)
+                if not marker:
+                    return 0, 0
+                m = marker[0]
+                if m in (0xD8, 0xD9) or 0xD0 <= m <= 0xD7:
+                    continue                     # no length field on these
+                size = struct.unpack(">H", fh.read(2))[0]
+                # Every frame-start marker but the two that are not frames.
+                if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):
+                    h, w = struct.unpack(">HH", fh.read(5)[1:5])
+                    return int(w), int(h)
+                fh.seek(size - 2, 1)
+    except Exception:
+        return 0, 0
+
+
+def write_mask_png(path, cols, rows, cells, w=0, h=0):
+    """A greyscale PNG: white where the sampler may work, black elsewhere.
+
+    Written by hand because the form has no image library, and a mask is
+    the one picture simple enough to emit that way - one byte a pixel,
+    one filter byte a row, deflate, three chunks.
+    """
+    # Shrink to something cheap to write, but keep the photo's proportions:
+    # ComfyUI stretches the mask onto the latent, so a square mask over a
+    # portrait would slide the marked region somewhere it was never put.
+    cap = 1024
+    if w and h:
+        if max(w, h) > cap:
+            if w >= h:
+                w, h = cap, max(1, int(round(h * cap / float(w))))
+            else:
+                w, h = max(1, int(round(w * cap / float(h)))), cap
+    else:
+        w, h = cols * 64, rows * 64
+    w, h = max(cols, w), max(rows, h)
+    on = set(cells or ())
+    raw = bytearray()
+    for y in range(h):
+        r = min(rows - 1, y * rows // h)
+        row = bytes(255 if (r, min(cols - 1, x * cols // w)) in on else 0
+                    for x in range(w))
+        raw += b"\x00" + row                     # filter 0: none
+    def chunk(tag, data):
+        c = tag + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+           + chunk(b"IEND", b""))
+    with open(path, "wb") as fh:
+        fh.write(png)
+    return w, h
 
 
 def png_text(path):
@@ -882,7 +977,7 @@ class Graph:
 
     def build(self, *, mode, unet, clip, vae, ckpt, images, prompt,
               steps, cfg, seed, sampler, scheduler, loras=(), denoise=1.0,
-              width=0, height=0):
+              width=0, height=0, mask=None):
         if not self.encoder:
             raise RuntimeError("no Qwen edit encoder node available")
         g = {}
@@ -967,9 +1062,26 @@ class Graph:
         # face is redrawn from the encoder's idea of it; below that the
         # sampler starts from the actual image and the face survives as
         # pixels. Too low and the edit simply does not happen.
+        # A mask makes denoise local. Without one it is a single dial over
+        # the whole picture, which is why changing a shirt has always cost
+        # you the face: the only setting strong enough to redraw clothing
+        # redraws everything else with it. Inside the marked cells the
+        # sampler works at full strength; outside, the original latent is
+        # kept and nothing moves at all.
+        latent = ["la", 0]
+        if mask and "SetLatentNoiseMask" in self.info \
+           and "ImageToMask" in self.info:
+            g["mi"] = {"class_type": "LoadImage", "inputs": {"image": mask}}
+            g["mk"] = {"class_type": "ImageToMask",
+                       "inputs": self.fill_required(
+                           "ImageToMask", {"image": ["mi", 0], "channel": "red"})}
+            g["nm"] = {"class_type": "SetLatentNoiseMask",
+                       "inputs": {"samples": ["la", 0], "mask": ["mk", 0]}}
+            latent = ["nm", 0]
+
         g["ks"] = {"class_type": "KSampler", "inputs": {
             "model": M, "positive": ["po", 0], "negative": ["ne", 0],
-            "latent_image": ["la", 0], "seed": seed, "steps": steps,
+            "latent_image": latent, "seed": seed, "steps": steps,
             "cfg": cfg, "sampler_name": sampler, "scheduler": scheduler,
             "denoise": denoise}}
         g["de"] = {"class_type": "VAEDecode",
@@ -978,6 +1090,11 @@ class Graph:
                    "inputs": {"images": ["de", 0], "filename_prefix": "edit"}}
         return g
 
+
+    def masks_ok(self):
+        """Whether this ComfyUI has the two nodes a mask needs."""
+        return ("SetLatentNoiseMask" in self.info
+                and "ImageToMask" in self.info)
 
     def can_end_frame(self):
         return bool(self.flf or self.i2v_end)
@@ -1148,8 +1265,16 @@ select,input[type=text],input[type=number],textarea,input[type=file]{{
 textarea{{min-height:76px}}
 button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
   border-radius:10px;background:#d2691e;color:#fff}}
+button.second{{margin-top:10px;background:#8883;color:inherit}}
 form.stop{{margin:10px 0 0}}
 form.stop button{{margin:0;background:#8883;color:inherit}}
+.maskwrap{{position:relative;margin-top:8px;border-radius:10px;overflow:hidden}}
+.maskwrap img{{width:100%;display:block}}
+.cells{{position:absolute;inset:0;display:grid}}
+.cells label{{display:block;box-shadow:inset 0 0 0 1px #fff3}}
+.cells input{{position:absolute;opacity:0;width:0;height:0}}
+.cells span{{display:block;width:100%;height:100%}}
+.cells input:checked+span{{background:#d2691ea0}}
 .row{{display:flex;gap:10px}} .row>div{{flex:1}}
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
 .card img,.card video{{width:100%;border-radius:8px;display:block;background:#8882}}
@@ -1180,6 +1305,8 @@ form.stop button{{margin:0;background:#8883;color:inherit}}
   <label>{third}</label>
   <input type="file" name="photo3" accept="image/*">
   <select name="existing3">{choices3}</select>
+
+  {maskgrid}
 
   <label>Instruction</label>
   <textarea name="prompt" placeholder="change the shirt to green">{last}</textarea>
@@ -1275,6 +1402,7 @@ form.stop button{{margin:0;background:#8883;color:inherit}}
   keep the content LoRA in the other. Picking both halves of the same
   pair does nothing extra &mdash; the second is ignored.</p>
   <button type="submit">Run</button>
+  <button type="submit" formaction="/mask" class="second">Mask</button>
 </form>
 
 <h2 style="font-size:18px">Results</h2>
@@ -1366,7 +1494,7 @@ class H(BaseHTTPRequestHandler):
     # attempt is the first one with one thing changed - and a form that
     # forgets makes you retype the nine things you did not want to change.
     last = {"prompt": "", "model": "", "mode": "image", "clips": "1",
-            "existing": "", "existing2": "", "existing3": "",
+            "existing": "", "existing2": "", "existing3": "", "mask": [],
             "negative": "static, still, blurry, distorted, deformed face, "
                         "changing face, extra limbs, watermark"}
 
@@ -1483,7 +1611,8 @@ class H(BaseHTTPRequestHandler):
                 modes += '<option value="" disabled>video: models not installed</option>'
             else:
                 modes += '<option value="" disabled>video: WanImageToVideo node missing</option>'
-        avail = self.listing(self.indir)
+        avail = [f for f in self.listing(self.indir)
+                 if not os.path.basename(f).startswith(MASK_PREFIX)]
         choices = "".join(
             '<option value="{0}"{2}>{1}</option>'.format(
                 html.escape(f), html.escape(f),
@@ -1526,6 +1655,7 @@ class H(BaseHTTPRequestHandler):
                            extra=extra, third=third,
                            outs=outs, last=html.escape(L["prompt"]),
                            negative=html.escape(L.get("negative", "")),
+                           maskgrid=self.mask_grid(L.get("existing", "")),
                            denoise=html.escape(str(M.get("denoise", "1.0"))),
                            seed=html.escape(str(M.get("seed", ""))),
                            steps=steps, cfg=html.escape(str(cfg))).encode()
@@ -1569,6 +1699,48 @@ class H(BaseHTTPRequestHandler):
             yield cell(better or r,
                        prompt_of(os.path.join(self.outdir, better or r)),
                        converting=(better is None))
+
+    def sweep_masks(self, keep_minutes=180):
+        """Bin masks from runs that are long finished."""
+        cut = time.time() - keep_minutes * 60
+        try:
+            for f in os.listdir(self.indir):
+                if not f.startswith(MASK_PREFIX):
+                    continue
+                p = os.path.join(self.indir, f)
+                if os.path.isfile(p) and os.path.getmtime(p) < cut:
+                    os.remove(p)
+        except Exception:
+            pass          # tidying is never worth failing a run over
+
+    def mask_rows(self, w, h):
+        """How many rows make cells roughly square on this photo."""
+        return max(6, min(24, int(round(MASK_COLS * (h or 1) / float(w or 1)))))
+
+    def mask_grid(self, name):
+        """The photo with a grid of checkboxes laid over it.
+
+        A brush would need a canvas, and a canvas needs JavaScript, which
+        is the one thing this page cannot have. A checkbox per cell costs
+        nothing, the tick is drawn by CSS, and the marks arrive with the
+        rest of the form like any other field.
+        """
+        if not name or not self.graph.masks_ok():
+            return ""
+        p = os.path.join(self.indir, os.path.basename(name))
+        if not os.path.isfile(p):
+            return ""
+        w, h = image_size(p)
+        rows = self.mask_rows(w, h)
+        on = set(self.last.get("mask") or ())
+        cells = "".join(
+            '<label><input type="checkbox" name="m" value="{k}"{s}>'
+            '<span></span></label>'.format(
+                k="%d-%d" % (r, c),
+                s=" checked" if "%d-%d" % (r, c) in on else "")
+            for r in range(rows) for c in range(MASK_COLS))
+        return MASK.format(src=urllib.parse.quote(os.path.basename(name)),
+                           cols=MASK_COLS, rows=rows, cells=cells, n=len(on))
 
     def live_block(self):
         """What is happening right now, as a fragment above the form.
@@ -1728,6 +1900,24 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(blob)))
             self.end_headers(); self.wfile.write(blob); return
+        if u.path == "/src":
+            # The mask grid needs the photo itself behind it. Outputs are
+            # served from /out; this is the same idea for the input side.
+            rel = os.path.basename(
+                urllib.parse.parse_qs(u.query).get("n", [""])[0])
+            p = os.path.abspath(os.path.join(self.indir, rel))
+            if not p.startswith(os.path.abspath(self.indir) + os.sep) \
+               or not os.path.isfile(p):
+                self.send_response(404); self.send_header("Content-Length", "0")
+                self.end_headers(); return
+            with open(p, "rb") as fh:
+                data = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", MIME.get(
+                os.path.splitext(p)[1].lower(), "application/octet-stream"))
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "max-age=300")
+            self.end_headers(); self.wfile.write(data); return
         if u.path == "/out":
             rel = urllib.parse.parse_qs(u.query).get("n", [""])[0]
             p = os.path.abspath(os.path.join(self.outdir, rel))
@@ -1804,10 +1994,14 @@ class H(BaseHTTPRequestHandler):
             return self.render('<p class="err">too large</p>')
         body = self.rfile.read(n)
 
-        fields, uploads = {}, {}
+        fields, uploads, marks = {}, {}, []
         for name, fn, data in parse_multipart(body, (m.group(1) or m.group(2)).strip().encode()):
             if fn and data:
                 uploads[name] = (safe(fn), data)   # keyed: two pickers now
+            elif name == "m":
+                # One checkbox per mask cell, all named the same - a dict
+                # would keep only the last of them.
+                marks.append(data.decode("utf-8", "replace").strip())
             elif name:
                 fields[name] = data.decode("utf-8", "replace").strip()
 
@@ -1820,6 +2014,26 @@ class H(BaseHTTPRequestHandler):
                     fh.write(up[1])
                 return nm
             return fields.get(existing) or ""
+
+        # The grid can only be drawn over a photo the server knows about,
+        # and picking one in a dropdown tells it nothing without
+        # JavaScript. So the mask has its own button: same form, same
+        # fields, formaction="/mask" - it stores the choice, uploads the
+        # photo if that is where it came from, draws the grid, and runs
+        # nothing.
+        if urllib.parse.urlsplit(self.path).path == "/mask":
+            picked = stash("photo", "existing")
+            H.last["existing"] = picked or ""
+            H.last["mask"] = sorted(set(marks))
+            if not picked:
+                return self.render('<p class="err">pick or upload a photo '
+                                   'first, then press Mask.</p>')
+            if not self.graph.masks_ok():
+                return self.render('<p class="err">this ComfyUI has no '
+                                   'SetLatentNoiseMask node, so it cannot '
+                                   'mask.</p>')
+            return self.render('<p class="ok">tap the parts that may change, '
+                               'then press Run. Tap again to clear one.</p>')
 
         # Remember the lot before anything can go wrong, so an error comes
         # back to a filled-in form rather than an empty one.
@@ -1933,6 +2147,26 @@ class H(BaseHTTPRequestHandler):
         H.last["existing3"] = image3 or ""
         if not image:
             return self.render('<p class="err">pick or upload a photo</p>')
+
+        # Turn the ticked cells into a greyscale png beside the photo.
+        # A fresh name per run, because ComfyUI opens the file when the
+        # node runs rather than when the job is queued - with one reused
+        # name, the second image of a batch would sample against the mask
+        # the third one had already written.
+        H.last["mask"] = sorted(set(marks))
+        mask_name = ""
+        if marks and self.graph.masks_ok():
+            cells = set()
+            for v in marks:
+                r, _, c = v.partition("-")
+                if r.isdigit() and c.isdigit():
+                    cells.add((int(r), int(c)))
+            if cells:
+                w, h = image_size(os.path.join(self.indir, image))
+                mask_name = MASK_PREFIX + uuid.uuid4().hex[:8] + ".png"
+                write_mask_png(os.path.join(self.indir, mask_name),
+                               MASK_COLS, self.mask_rows(w, h), cells, w, h)
+                self.sweep_masks()
 
         prompt = fields.get("prompt", "")
         if not prompt:
@@ -2089,7 +2323,7 @@ class H(BaseHTTPRequestHandler):
         # six, so it is built on demand rather than once.
         common = dict(images=[image, image2, image3], steps=steps, cfg=cfg,
                       sampler="euler", scheduler="simple", denoise=denoise,
-                      width=width, height=height,
+                      width=width, height=height, mask=mask_name or None,
                       loras=[(hi, st) for hi, _lo, st in chain])
 
         def mk(text, seed):

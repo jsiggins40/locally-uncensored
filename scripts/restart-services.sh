@@ -50,6 +50,23 @@ if [ -d "$COMFY" ]; then
   if up comfy; then
     echo "  comfy already up"
   else
+    # A killed tmux session does not kill the python inside it. The window
+    # goes, the process keeps running, and it keeps every byte of VRAM it
+    # had - so the next start gets a card that is already full and fails in
+    # ways that look like anything but this. One 80GB card spent a night
+    # held by a process nobody could see.
+    if pgrep -f "$COMFY/main.py" >/dev/null 2>&1; then
+      echo "  a ComfyUI is running outside tmux and holding the card; stopping it"
+      pkill -f "$COMFY/main.py"
+      for _ in $(seq 20); do
+        pgrep -f "$COMFY/main.py" >/dev/null 2>&1 || break
+        sleep 1
+      done
+      pkill -9 -f "$COMFY/main.py" 2>/dev/null
+      sleep 2
+      command -v nvidia-smi >/dev/null &&
+        echo "  card now: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
+    fi
     say "ComfyUI"
     cd "$COMFY" && tmux new-session -d -s comfy \
       "./venv/bin/python main.py --listen 127.0.0.1 --port 8288 --preview-method auto $COMFY_ARGS 2>&1 | tee -a $HOME/comfy-run.log"

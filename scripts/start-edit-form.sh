@@ -79,31 +79,30 @@ MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".webm": "video/webm", ".mp4": "video/mp4"}
 
 
-MASK_COLS = 10          # across; rows follow the photo's own proportions
+MASK_COLS = 24          # across; rows follow the photo's own proportions
+MASK_W = 320            # how wide the photo is drawn, in CSS pixels.
+# It has to be a number the server knows, not 100%: an <input type=image>
+# reports where it was tapped in the element's own pixels, and that is the
+# only way a page with no JavaScript can find out where someone pointed.
 MASK_PREFIX = "_mask_"  # masks live beside the photos, hidden from the picker
 
 MASK = """
-  <label>Mask &mdash; tap the parts that may change</label>
-  <div class="maskwrap"><img src="/src?n={src}" alt="">
-    <div class="cells" style="grid-template-columns:repeat({cols},1fr)">{cells}</div>
+  <label>Mask &mdash; tap two opposite corners of what may change</label>
+  <input type="hidden" name="mcells" value="{cells}">
+  <div class="maskwrap" style="width:{w}px">
+    <input type="image" name="tap" src="/src?n={src}" width="{w}" alt="tap the photo">
+    <div class="cells" style="grid-template-columns:repeat({cols},1fr)">{tiles}</div>
   </div>
+  <p class="note">{state}</p>
   <div class="row ops">
-    <button type="submit" formaction="/mask?op=box" class="second">Fill box</button>
     <button type="submit" formaction="/mask?op=grow" class="second">Grow</button>
-  </div>
-  <div class="row ops">
     <button type="submit" formaction="/mask?op=invert" class="second">Invert</button>
     <button type="submit" formaction="/mask?op=clear" class="second">Clear</button>
   </div>
-  <p class="note">{n} of {cols}&times;{rows} cells marked. <b>Fill box</b> is the
-  quick way: tap one corner of the area and the opposite one, then press it and
-  everything between fills in. <b>Grow</b> widens what is marked by a cell all
-  round, <b>Invert</b> swaps marked for unmarked &mdash; useful when it is the
-  background you want changed.</p>
-  <p class="note">Nothing outside the marked cells is touched at all, so Denoise
-  applies only inside. That is what lets you put it to 1.0 on a shirt and keep
-  the face exactly as photographed. Leave every cell clear to edit the whole
-  picture as before.</p>
+  <p class="note">Nothing outside the marked area is touched at all, so Denoise
+  applies only inside &mdash; which is what lets you put it to 1.0 on a shirt and
+  keep the face exactly as photographed. Clear it to edit the whole picture as
+  before.</p>
 """
 
 
@@ -146,6 +145,21 @@ def image_size(path):
                 fh.seek(size - 2, 1)
     except Exception:
         return 0, 0
+
+
+def tap_cell(sx, sy, disp_w, w, h, cols, rows):
+    """Which cell a tap landed in, or None if it was not a tap.
+
+    The browser reports the hit in the element's own pixels, so the width
+    it is drawn at has to be a number we chose rather than a percentage -
+    otherwise there is nothing to divide by.
+    """
+    if not (sx and sy and str(sx).isdigit() and str(sy).isdigit()):
+        return None
+    disp_h = max(1, int(round(disp_w * (h or 1) / float(w or 1))))
+    c = min(cols - 1, max(0, int(sx) * cols // max(1, disp_w)))
+    r = min(rows - 1, max(0, int(sy) * rows // max(1, disp_h)))
+    return r, c
 
 
 def mask_op(op, marks, cols, rows):
@@ -1310,20 +1324,20 @@ button{{font-size:17px;padding:13px;width:100%;margin-top:18px;border:0;
 button.second{{margin-top:10px;background:#8883;color:inherit}}
 form.stop{{margin:10px 0 0}}
 form.stop button{{margin:0;background:#8883;color:inherit}}
-.maskwrap{{position:relative;margin-top:8px;border-radius:10px;overflow:hidden}}
-.maskwrap img{{width:100%;display:block}}
+.maskwrap{{position:relative;margin-top:8px;border-radius:10px;overflow:hidden;
+  max-width:100%}}
 /* grid-auto-rows is not optional: the rows are implicit, and without a
    size they fall back to auto - which for a label holding nothing but an
    empty span is no height at all. The overlay then exists but cannot be
    seen or tapped. */
+/* The tint must not swallow the taps - they belong to the photo under it. */
 .cells{{position:absolute;top:0;left:0;right:0;bottom:0;display:grid;
-  grid-auto-rows:1fr}}
-.cells label{{display:block;box-shadow:inset 0 0 0 1px #fff3;
+  grid-auto-rows:1fr;pointer-events:none}}
+.cells i{{display:block}}
+.cells i.on{{background:#d2691e99}}
+.cells i.c{{background:#fff;outline:2px solid #d2691e}}
+.maskwrap>input[type=image]{{display:block;width:100%;height:auto;
   touch-action:manipulation}}
-.cells input{{position:absolute;opacity:0;width:0;height:0}}
-.cells span{{display:block;width:100%;height:100%}}
-.cells input:checked+span{{background:#d2691eaa;
-  box-shadow:inset 0 0 0 1px #d2691e}}
 .row{{display:flex;gap:10px}} .row>div{{flex:1}}
 .row.ops{{margin-top:8px}} .row.ops>button{{flex:1;margin-top:0;font-size:15px;padding:10px}}
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
@@ -1545,6 +1559,7 @@ class H(BaseHTTPRequestHandler):
     # forgets makes you retype the nine things you did not want to change.
     last = {"prompt": "", "model": "", "mode": "image", "clips": "1",
             "existing": "", "existing2": "", "existing3": "", "mask": [],
+            "corner": "",
             "negative": "static, still, blurry, distorted, deformed face, "
                         "changing face, extra limbs, watermark"}
 
@@ -1765,15 +1780,16 @@ class H(BaseHTTPRequestHandler):
 
     def mask_rows(self, w, h):
         """How many rows make cells roughly square on this photo."""
-        return max(6, min(24, int(round(MASK_COLS * (h or 1) / float(w or 1)))))
+        return max(8, min(64, int(round(MASK_COLS * (h or 1) / float(w or 1)))))
 
     def mask_grid(self, name):
-        """The photo with a grid of checkboxes laid over it.
+        """The photo, tappable, with what is marked tinted over it.
 
-        A brush would need a canvas, and a canvas needs JavaScript, which
-        is the one thing this page cannot have. A checkbox per cell costs
-        nothing, the tick is drawn by CSS, and the marks arrive with the
-        rest of the form like any other field.
+        The tint is a grid of plain divs and takes no taps of its own -
+        the taps go to the photo underneath, which is an <input
+        type="image"> and reports where it was hit. Two of those make a
+        rectangle. It is the one pointing device HTML has without
+        JavaScript, and it beats hunting for cells by a mile.
         """
         if not name or not self.graph.masks_ok():
             return ""
@@ -1783,14 +1799,22 @@ class H(BaseHTTPRequestHandler):
         w, h = image_size(p)
         rows = self.mask_rows(w, h)
         on = set(self.last.get("mask") or ())
-        cells = "".join(
-            '<label><input type="checkbox" name="m" value="{k}"{s}>'
-            '<span></span></label>'.format(
-                k="%d-%d" % (r, c),
-                s=" checked" if "%d-%d" % (r, c) in on else "")
+        corner = self.last.get("corner") or ""
+        tiles = "".join(
+            '<i class="{k}"></i>'.format(
+                k=("c" if "%d-%d" % (r, c) == corner
+                   else "on" if "%d-%d" % (r, c) in on else ""))
             for r in range(rows) for c in range(MASK_COLS))
+        if corner:
+            state = "one corner set &mdash; tap the opposite one."
+        elif on:
+            state = ("%d of %d cells marked. Tap two corners again to add "
+                     "another area." % (len(on), rows * MASK_COLS))
+        else:
+            state = "nothing marked yet &mdash; the whole picture is editable."
         return MASK.format(src=urllib.parse.quote(os.path.basename(name)),
-                           cols=MASK_COLS, rows=rows, cells=cells, n=len(on))
+                           cols=MASK_COLS, tiles=tiles, state=state,
+                           w=MASK_W, cells=",".join(sorted(on)))
 
     def live_block(self):
         """What is happening right now, as a fragment above the form.
@@ -2044,14 +2068,10 @@ class H(BaseHTTPRequestHandler):
             return self.render('<p class="err">too large</p>')
         body = self.rfile.read(n)
 
-        fields, uploads, marks = {}, {}, []
+        fields, uploads = {}, {}
         for name, fn, data in parse_multipart(body, (m.group(1) or m.group(2)).strip().encode()):
             if fn and data:
                 uploads[name] = (safe(fn), data)   # keyed: two pickers now
-            elif name == "m":
-                # One checkbox per mask cell, all named the same - a dict
-                # would keep only the last of them.
-                marks.append(data.decode("utf-8", "replace").strip())
             elif name:
                 fields[name] = data.decode("utf-8", "replace").strip()
 
@@ -2071,26 +2091,52 @@ class H(BaseHTTPRequestHandler):
         # fields, formaction="/mask" - it stores the choice, uploads the
         # photo if that is where it came from, draws the grid, and runs
         # nothing.
+        # The mask travels in one hidden field now, not a checkbox per
+        # cell: taps land on the photo itself, and the tint over it is
+        # only a picture of what is already marked.
+        def cells_now():
+            return [v for v in (fields.get("mcells") or "").split(",") if v]
+
         if urllib.parse.urlsplit(self.path).path == "/mask":
             picked = stash("photo", "existing")
             H.last["existing"] = picked or ""
-            H.last["mask"] = sorted(set(marks))
-            if picked:
-                op = urllib.parse.parse_qs(
-                    urllib.parse.urlsplit(self.path).query).get("op", [""])[0]
-                if op:
-                    w, h = image_size(os.path.join(self.indir, picked))
-                    H.last["mask"] = mask_op(op, H.last["mask"],
-                                             MASK_COLS, self.mask_rows(w, h))
+            H.last["mask"] = sorted(set(cells_now()))
             if not picked:
+                H.last["corner"] = ""
                 return self.render('<p class="err">pick or upload a photo '
                                    'first, then press Mask.</p>')
             if not self.graph.masks_ok():
                 return self.render('<p class="err">this ComfyUI has no '
                                    'SetLatentNoiseMask node, so it cannot '
                                    'mask.</p>')
-            return self.render('<p class="ok">tap the parts that may change, '
-                               'then press Run. Tap again to clear one.</p>')
+            w, h = image_size(os.path.join(self.indir, picked))
+            rows = self.mask_rows(w, h)
+            op = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query).get("op", [""])[0]
+            if op:
+                H.last["mask"] = mask_op(op, H.last["mask"], MASK_COLS, rows)
+                H.last["corner"] = ""
+                return self.render()
+
+            # Where the photo was tapped, in the element's own pixels.
+            # The browser sends these for an <input type="image"> and for
+            # nothing else, which is the whole reason the photo is one.
+            hit = tap_cell(fields.get("tap.x"), fields.get("tap.y"),
+                           MASK_W, w, h, MASK_COLS, rows)
+            if hit is None:
+                H.last["corner"] = ""
+                return self.render('<p class="ok">tap two opposite corners of '
+                                   'the area that may change.</p>')
+            first = H.last.get("corner") or ""
+            if not first:
+                H.last["corner"] = "%d-%d" % hit
+                return self.render()
+            fr, _, fc = first.partition("-")
+            box = mask_op("box", ["%s-%s" % (fr, fc), "%d-%d" % hit],
+                          MASK_COLS, rows)
+            H.last["mask"] = sorted(set(H.last["mask"]) | set(box))
+            H.last["corner"] = ""
+            return self.render()
 
         # Remember the lot before anything can go wrong, so an error comes
         # back to a filled-in form rather than an empty one.
@@ -2210,11 +2256,12 @@ class H(BaseHTTPRequestHandler):
         # node runs rather than when the job is queued - with one reused
         # name, the second image of a batch would sample against the mask
         # the third one had already written.
-        H.last["mask"] = sorted(set(marks))
+        marked = cells_now()
+        H.last["mask"] = sorted(set(marked))
         mask_name = ""
-        if marks and self.graph.masks_ok():
+        if marked and self.graph.masks_ok():
             cells = set()
-            for v in marks:
+            for v in marked:
                 r, _, c = v.partition("-")
                 if r.isdigit() and c.isdigit():
                     cells.add((int(r), int(c)))

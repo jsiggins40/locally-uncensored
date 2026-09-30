@@ -86,23 +86,85 @@ MASK_W = 320            # how wide the photo is drawn, in CSS pixels.
 # only way a page with no JavaScript can find out where someone pointed.
 MASK_PREFIX = "_mask_"  # masks live beside the photos, hidden from the picker
 
+BRUSH_JS = """
+<script>
+(function(){
+ var c=document.getElementById('pc'); if(!c||!c.getContext) return;
+ var f=document.getElementById('f'), pd=document.getElementById('pd');
+ if(!f||!pd) return;
+ document.documentElement.className+=' js';
+ var x=c.getContext('2d'), size=Math.round(c.width/8), erase=false, down=false;
+ function wipe(){x.fillStyle='#000';x.fillRect(0,0,c.width,c.height);}
+ wipe();
+ function at(e){var r=c.getBoundingClientRect(),
+   t=(e.touches&&e.touches[0])||e;
+   return [(t.clientX-r.left)*c.width/r.width,
+           (t.clientY-r.top)*c.height/r.height];}
+ function dab(p){x.fillStyle=erase?'#000':'#fff';
+   x.beginPath();x.arc(p[0],p[1],size/2,0,6.2832);x.fill();}
+ function line(a,b){x.strokeStyle=erase?'#000':'#fff';x.lineWidth=size;
+   x.lineCap='round';x.lineJoin='round';x.beginPath();
+   x.moveTo(a[0],a[1]);x.lineTo(b[0],b[1]);x.stroke();}
+ var last=null;
+ function start(e){down=true;last=at(e);dab(last);e.preventDefault();}
+ function move(e){if(!down)return;var p=at(e);line(last,p);last=p;
+   e.preventDefault();}
+ function end(){down=false;last=null;}
+ c.addEventListener('touchstart',start,{passive:false});
+ c.addEventListener('touchmove',move,{passive:false});
+ c.addEventListener('touchend',end);
+ c.addEventListener('touchcancel',end);
+ c.addEventListener('mousedown',start);
+ c.addEventListener('mousemove',move);
+ window.addEventListener('mouseup',end);
+ function on(id,fn){var b=document.getElementById(id); if(b)b.onclick=fn;}
+ on('bsm',function(){size=Math.max(4,Math.round(size/1.5));});
+ on('bbg',function(){size=Math.min(c.width,Math.round(size*1.5));});
+ on('ber',function(){erase=!erase;this.textContent=erase?'Erasing':'Erase';});
+ on('bcl',function(){wipe();});
+ f.addEventListener('submit',function(){
+   var d=x.getImageData(0,0,c.width,c.height).data, any=false;
+   for(var i=0;i<d.length;i+=4){if(d[i]>127){any=true;break;}}
+   pd.value=any?c.toDataURL('image/png'):'';
+ });
+})();
+</script>
+"""
+
 MASK = """
-  <label>Mask &mdash; tap two opposite corners of what may change</label>
+  <label>Mask &mdash; paint what may change</label>
   <input type="hidden" name="mcells" value="{cells}">
+  <input type="hidden" name="paintdata" id="pd" value="">
   <div class="maskwrap" style="width:{w}px">
     <input type="image" name="tap" src="/src?n={src}" width="{w}" alt="tap the photo">
     <div class="cells" style="grid-template-columns:repeat({cols},1fr)">{tiles}</div>
+    <canvas id="pc" width="{cw}" height="{ch}"></canvas>
   </div>
-  <p class="note">{state}</p>
-  <div class="row ops">
-    <button type="submit" formaction="/mask?op=grow" class="second">Grow</button>
-    <button type="submit" formaction="/mask?op=invert" class="second">Invert</button>
-    <button type="submit" formaction="/mask?op=clear" class="second">Clear</button>
+  <div class="brush">
+    <div class="row ops">
+      <button type="button" id="bsm" class="second">Smaller</button>
+      <button type="button" id="bbg" class="second">Bigger</button>
+      <button type="button" id="ber" class="second">Erase</button>
+      <button type="button" id="bcl" class="second">Clear</button>
+    </div>
+    <p class="note">Drag your finger over what should change. <b>Erase</b>
+    toggles the brush to rub out. Everything outside the paint is left exactly
+    as photographed.</p>
+  </div>
+  <div class="tapping">
+    <p class="note">{state}</p>
+    <div class="row ops">
+      <button type="submit" formaction="/mask?op=grow" class="second">Grow</button>
+      <button type="submit" formaction="/mask?op=invert" class="second">Invert</button>
+      <button type="submit" formaction="/mask?op=clear" class="second">Clear</button>
+    </div>
+    <p class="note">Tap two opposite corners of the area that may change and
+    everything between them fills in.</p>
   </div>
   <p class="note">Nothing outside the marked area is touched at all, so Denoise
   applies only inside &mdash; which is what lets you put it to 1.0 on a shirt and
-  keep the face exactly as photographed. Clear it to edit the whole picture as
-  before.</p>
+  keep the face exactly as photographed. Leave it empty to edit the whole
+  picture as before.</p>
 """
 
 
@@ -145,6 +207,78 @@ def image_size(path):
                 fh.seek(size - 2, 1)
     except Exception:
         return 0, 0
+
+
+PAINT_MASK = """
+import sys
+from PIL import Image, ImageChops, ImageFilter
+orig, painted, out = sys.argv[1], sys.argv[2], sys.argv[3]
+a = Image.open(orig).convert("RGB")
+b = Image.open(painted).convert("RGB")
+if b.size != a.size:                      # a screenshot instead of a copy
+    b = b.resize(a.size, Image.LANCZOS)
+d = ImageChops.difference(a, b).convert("L")
+# Markup strokes are opaque and nothing else in the picture moved, so the
+# difference is close to binary already. The threshold only has to clear
+# jpeg noise.
+m = d.point(lambda v: 255 if v > 28 else 0)
+m = m.filter(ImageFilter.MaxFilter(9))    # close the gaps in a loose scribble
+m = m.filter(ImageFilter.MinFilter(5))    # and take back the spread
+w, h = m.size
+if w > 1024 or h > 1024:
+    k = 1024.0 / max(w, h)
+    m = m.resize((max(1, int(w * k)), max(1, int(h * k))), Image.LANCZOS)
+    m = m.point(lambda v: 255 if v > 96 else 0)
+white = sum(m.point(lambda v: 1 if v else 0).getdata())
+print("%d %d %d" % (m.size[0], m.size[1], white))
+m.save(out)
+"""
+
+
+def mask_from_paint(orig, painted, out, comfy_dir, timeout=120):
+    """Where the photo was painted over, as a mask.
+
+    The form itself has no image library on purpose - it is stdlib all
+    the way down - so this borrows ComfyUI's, the same way joining video
+    clips borrows its PyAV. Pillow is certain to be there: ComfyUI cannot
+    run without it.
+    """
+    py = os.path.join(comfy_dir, "venv", "bin", "python")
+    if not os.path.exists(py):
+        raise RuntimeError("no ComfyUI venv to borrow Pillow from")
+    r = subprocess.run([py, "-c", PAINT_MASK, orig, painted, out],
+                       capture_output=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.decode("utf-8", "replace").strip()[-300:]
+                           or "could not read the painted copy")
+    try:
+        w, h, white = (int(x) for x in r.stdout.decode().split())
+    except Exception:
+        raise RuntimeError("the mask came back unreadable")
+    if not white:
+        raise RuntimeError("nothing looks painted on")
+    return w, h, white
+
+
+def paint_png(data_url, path):
+    """Save a canvas the brush painted, which is already the mask.
+
+    The canvas is black where nothing was painted and white where it was,
+    which is exactly what SetLatentNoiseMask wants - so unlike everything
+    else here it needs no image library at all, only base64.
+    """
+    head, _, b64 = (data_url or "").partition(",")
+    if not b64 or "image/png" not in head or "base64" not in head:
+        return False
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except Exception:
+        return False
+    if raw[:8] != b"\x89PNG\r\n\x1a\n" or len(raw) > 8 * 1024 * 1024:
+        return False
+    with open(path, "wb") as fh:
+        fh.write(raw)
+    return True
 
 
 def tap_cell(sx, sy, disp_w, w, h, cols, rows):
@@ -1338,6 +1472,15 @@ form.stop button{{margin:0;background:#8883;color:inherit}}
 .cells i.c{{background:#fff;outline:2px solid #d2691e}}
 .maskwrap>input[type=image]{{display:block;width:100%;height:auto;
   touch-action:manipulation}}
+/* Without JavaScript the canvas never appears and the tapping stays; with
+   it, the brush replaces both. Only the browser knows which it got, so it
+   is CSS that decides. */
+#pc{{display:none}} .brush{{display:none}}
+html.js #pc{{display:block;position:absolute;top:0;left:0;width:100%;
+  height:100%;opacity:.45;touch-action:none}}
+html.js .brush{{display:block}}
+html.js .tapping{{display:none}}
+html.js .cells{{display:none}}
 .row{{display:flex;gap:10px}} .row>div{{flex:1}}
 .row.ops{{margin-top:8px}} .row.ops>button{{flex:1;margin-top:0;font-size:15px;padding:10px}}
 .grid{{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
@@ -1356,7 +1499,7 @@ form.stop button{{margin:0;background:#8883;color:inherit}}
 <p class="sub">{status}</p>
 {msg}
 {live}
-<form method="post" enctype="multipart/form-data" action="/">
+<form id="f" method="post" enctype="multipart/form-data" action="/">
   <label>Photo — upload one</label>
   <input type="file" name="photo" accept="image/*">
   <label>…or pick one already on the box</label>
@@ -1812,9 +1955,16 @@ class H(BaseHTTPRequestHandler):
                      "another area." % (len(on), rows * MASK_COLS))
         else:
             state = "nothing marked yet &mdash; the whole picture is editable."
+        cw = 512
+        ch = max(1, int(round(cw * (h or 1) / float(w or 1))))
+        if ch > 1024:                       # a very tall photo
+            ch, cw = 1024, max(1, int(round(1024 * (w or 1) / float(h or 1))))
+        # BRUSH_JS is appended, never formatted into: it is mostly braces,
+        # and str.format would read every one of them as a field.
         return MASK.format(src=urllib.parse.quote(os.path.basename(name)),
                            cols=MASK_COLS, tiles=tiles, state=state,
-                           w=MASK_W, cells=",".join(sorted(on)))
+                           w=MASK_W, cw=cw, ch=ch,
+                           cells=",".join(sorted(on))) + BRUSH_JS
 
     def live_block(self):
         """What is happening right now, as a fragment above the form.
@@ -2259,7 +2409,13 @@ class H(BaseHTTPRequestHandler):
         marked = cells_now()
         H.last["mask"] = sorted(set(marked))
         mask_name = ""
-        if marked and self.graph.masks_ok():
+        painted = fields.get("paintdata") or ""
+        if painted and self.graph.masks_ok():
+            nm = MASK_PREFIX + uuid.uuid4().hex[:8] + ".png"
+            if paint_png(painted, os.path.join(self.indir, nm)):
+                mask_name = nm
+                self.sweep_masks()
+        if not mask_name and marked and self.graph.masks_ok():
             cells = set()
             for v in marked:
                 r, _, c = v.partition("-")

@@ -179,6 +179,7 @@ const PRESETS = [
 ];
 function applyPreset() {
   const m = $('model').value, p = PRESETS.find(p => p.match.test(m));
+  if (!m || !p) return;  // no checkpoints installed (Describe-edit only)
   setVal($('steps'), p.steps); setVal($('cfg'), p.cfg); setVal($('denoise'), p.denoise);
   $('res').value = p.res;
   $('modelHint').textContent = `${p.label} defaults: ${p.steps} steps · CFG ${p.cfg} · strength ${p.denoise.toFixed(2)}. ${p.hint}`;
@@ -263,7 +264,9 @@ async function info(node) {
     ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit'].map(info));
   const pick = (list, re) => list.filter(n => re.test(n)).sort().pop();
   const q = {
-    unet: pick(optionsOf(unet, 'UNETLoader', 'unet_name'), /qwen.?image.?edit/i),
+    // bf16 over fp8 when both exist: A100-class GPUs have no native fp8
+    unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /qwen.?image.?edit/i.test(n))
+            .sort((a, b) => /bf16/i.test(a) - /bf16/i.test(b) || a.localeCompare(b)).pop(),
     clip: pick(optionsOf(clip, 'CLIPLoader', 'clip_name'), /qwen_?2\.5_?vl/i),
     vae: pick(optionsOf(vae, 'VAELoader', 'vae_name'), /qwen_image_vae/i),
     lora: pick(optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name'), /qwen.*edit.*lightning|lightning.*edit/i) || null,
@@ -272,6 +275,7 @@ async function info(node) {
   if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) qwen = q;
   const saved = recall('mode');
   if (saved && saved !== mode) setMode(saved);
+  else if (mode === 'instruct') setMode('instruct');  // re-run now that the model is known
 })();
 
 function buildInstructWorkflow(imgName, instruction, seed, steps, cfg) {
@@ -304,6 +308,10 @@ fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.json()).then(info =
   const v = info.CheckpointLoaderSimple.input.required.ckpt_name;
   allModels = Array.isArray(v[0]) ? v[0] : (v[1] && v[1].options) || [];
   const names = allModels.filter(n => !/^Realistic_Vision_V6\.0_NV_B1_fp16/.test(n));
+  if (!allModels.length) {
+    $('modeMask').classList.add('hidden'); $('modeWhole').classList.add('hidden');
+    if (mode !== 'instruct') setMode('instruct');
+  }
   $('model').innerHTML = '';
   for (const n of names) $('model').add(new Option(n.replace(/\.safetensors$/, ''), n));
   const saved = recall('model');

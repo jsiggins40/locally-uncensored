@@ -2,6 +2,8 @@
 # Downloads Qwen-Image-Edit (instruction-based editing: "make her hair red")
 # plus its text encoder, VAE and, when one matches, the 8-step Lightning LoRA,
 # then runs one test edit on the GPU.
+# QWEN_PRECISION=bf16 picks the bf16 weights (about 41 GB): faster on A100s,
+# which have no native fp8, at twice the download. Default fp8 (about 20 GB).
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-edit-model.sh)
 set -euo pipefail
 cd "$HOME/ComfyUI"
@@ -11,7 +13,8 @@ import os, re, shutil, sys
 from huggingface_hub import HfApi, hf_hub_download
 
 api = HfApi()
-need_gb = 35
+want = os.environ.get("QWEN_PRECISION", "fp8")
+need_gb = 55 if want == "bf16" else 35
 free_gb = shutil.disk_usage(".").free / 1e9
 print(f"== Free disk: {free_gb:.0f} GB")
 if free_gb < need_gb:
@@ -24,6 +27,9 @@ def version(name):
 def precision(name):
     # fp8 halves the download and VRAM with little quality loss
     return 2 if "fp8" in name else 1 if "bf16" in name else 0
+
+def edit_rank(name):
+    return 2 if want in name else 1 if ("fp8" in name or "bf16" in name) else 0
 
 def fetch(repo, path, subdir):
     dest = os.path.join("models", subdir, os.path.basename(path))
@@ -40,8 +46,12 @@ files = api.list_repo_files("Comfy-Org/Qwen-Image-Edit_ComfyUI")
 edits = [f for f in files if f.endswith(".safetensors") and "diffusion_models" in f and "qwen_image_edit" in f.lower()]
 if not edits:
     sys.exit("No Qwen-Image-Edit files found in Comfy-Org/Qwen-Image-Edit_ComfyUI:\n" + "\n".join(files))
-edit = max(edits, key=lambda f: (version(f), precision(f)))
+edit = max(edits, key=lambda f: (version(f), edit_rank(f)))
 edit_name = fetch("Comfy-Org/Qwen-Image-Edit_ComfyUI", edit, "diffusion_models")
+# Keep only the edit model just fetched so ComfyUI and the page use it
+for old in os.listdir("models/diffusion_models"):
+    if "qwen_image_edit" in old.lower() and old != edit_name:
+        os.remove(os.path.join("models/diffusion_models", old)); print("   removed older", old)
 
 print("== Text encoder and VAE")
 base = api.list_repo_files("Comfy-Org/Qwen-Image_ComfyUI")

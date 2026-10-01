@@ -49,6 +49,10 @@
   .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
   .chip { padding:7px 11px; border-radius:16px; background:#2a2a2c; border:1px solid #3a3a3c; font-size:14px; }
   .chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .lora { background:#2a2a2c; border-radius:10px; padding:10px; margin-top:8px; }
+  .lora .head { display:flex; align-items:center; gap:10px; }
+  .lora .head span { flex:1; word-break:break-word; }
+  .lora .head button { flex:none; min-width:64px; }
   .tagcat { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin-top:10px; }
 </style>
 </head>
@@ -119,6 +123,11 @@
   <div class="lbl"><span>Change strength</span></div>
   <div class="ctl"><button class="step" data-for="denoise" data-dir="-1" aria-label="Less">−</button><input id="denoise" type="range" min="0.3" max="1" step="0.01" value="1" data-nudge="0.05"><button class="step" data-for="denoise" data-dir="1" aria-label="More">+</button><span class="val" id="denoiseVal"></span></div>
   <div class="hint" id="denoiseHint">1.0 replaces the area completely. 0.5–0.7 keeps more of the original.</div>
+  </div>
+  <div id="loraBox" class="hidden">
+    <div class="lbl"><span>Extra LoRAs</span></div>
+    <div class="hint">Switch on to use. Trigger words are added to your instruction automatically.</div>
+    <div id="loraList"></div>
   </div>
   <div id="tuneBox">
   <div class="lbl"><span>Steps</span></div>
@@ -237,6 +246,7 @@ function setMode(m) {
   const masked = m === 'mask', inst = m === 'instruct';
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   for (const id of ['modelBox', 'tagBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst);
+  $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));
   const [hint, label, ph] = MODE_TEXT[m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label; $('prompt').placeholder = ph;
   if (inst) {
@@ -279,12 +289,54 @@ async function info(node) {
     lora: pick(optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name'), /qwen.*edit.*lightning|lightning.*edit/i) || null,
     plus: !!plus.TextEncodeQwenImageEditPlus,
   };
-  if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) qwen = q;
+  // Other Qwen LoRAs (e.g. NSFW ones from add-models.sh --lora); lora_info.json has their trigger words
+  let meta = {};
+  try { const r = await fetch('./lora_info.json', { cache: 'no-store' }); if (r.ok) meta = await r.json(); } catch (e) {}
+  q.extras = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name')
+    .filter(n => n !== q.lora && !/lightning/i.test(n))
+    .filter(n => /qwen/i.test((meta[n] || {}).baseModel || '') || (!meta[n] && /qwen/i.test(n)))
+    .map(n => ({ file: n, label: (meta[n] || {}).name || n.replace(/\.safetensors$/, ''), words: (meta[n] || {}).trainedWords || [] }));
+  if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) { qwen = q; renderLoras(); }
   const saved = recall('mode');
   if (saved && saved !== mode) setMode(saved);
   else if (mode === 'instruct') setMode('instruct');  // re-run now that the model is known
   if (qwen) warmUp();
 })();
+
+function loraState() { try { return JSON.parse(recall('loras') || '{}'); } catch (e) { return {}; } }
+function renderLoras() {
+  const st = loraState(), list = $('loraList'); list.innerHTML = '';
+  for (const l of qwen.extras) {
+    const cur = st[l.file] || { on: false, w: 1 };
+    const row = document.createElement('div'); row.className = 'lora';
+    const id = 'lw' + Math.random().toString(36).slice(2, 8);
+    row.innerHTML = `<div class="head"><span></span><button></button></div>
+      <div class="ctl"><button class="step" data-dir="-1">−</button><input type="range" id="${id}" min="0" max="1.5" step="0.05" data-nudge="0.1"><button class="step" data-dir="1">+</button><span class="val" id="${id}Val"></span></div>
+      <div class="hint"></div>`;
+    row.querySelector('.head span').textContent = l.label;
+    row.querySelector('.hint').textContent = l.words.length ? 'Trigger words: ' + l.words.join(', ') : 'No trigger words';
+    const btn = row.querySelector('.head button'), r = row.querySelector('input');
+    FMT[id] = v => (+v).toFixed(2); r.value = cur.w;
+    const save = () => { const s2 = loraState(); s2[l.file] = { on: btn.classList.contains('on'), w: +r.value }; store('loras', JSON.stringify(s2)); };
+    const show = on => { btn.classList.toggle('on', on); btn.textContent = on ? 'On' : 'Off'; row.querySelector('.ctl').style.opacity = on ? 1 : .4; };
+    show(cur.on);
+    btn.onclick = () => { show(!btn.classList.contains('on')); save(); };
+    list.append(row);
+    paint(r);
+    r.addEventListener('input', () => { paint(r); save(); });
+    const fromX = e => { const b = r.getBoundingClientRect(), t = 15;
+      setVal(r, (+r.max) * Math.min(1, Math.max(0, (e.clientX - b.left - t) / (b.width - 2 * t)))); save(); };
+    r.addEventListener('pointerdown', e => { e.preventDefault(); r.setPointerCapture(e.pointerId); fromX(e); });
+    r.addEventListener('pointermove', e => { if (r.hasPointerCapture(e.pointerId)) fromX(e); });
+    for (const sb of row.querySelectorAll('button.step'))
+      sb.onclick = () => { setVal(r, +r.value + sb.dataset.dir * r.dataset.nudge); save(); };
+  }
+  $('loraBox').classList.toggle('hidden', mode !== 'instruct' || !qwen.extras.length);
+}
+function activeLoras() {
+  const st = loraState();
+  return (qwen ? qwen.extras : []).filter(l => st[l.file] && st[l.file].on && st[l.file].w > 0).map(l => ({ ...l, w: st[l.file].w }));
+}
 
 // Loading Qwen (20-40 GB) onto the GPU is most of the first edit's time.
 // Start that as soon as the page opens with a tiny 1-step job, so it is
@@ -302,7 +354,7 @@ async function warmUp() {
   } catch (e) { /* best effort */ }
 }
 
-function buildInstructWorkflow(imgName, instruction, seed, steps, cfg) {
+function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = []) {
   const enc = text => qwen.plus
     ? { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image1: ['5', 0] } }
     : { class_type: 'TextEncodeQwenImageEdit', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image: ['5', 0] } };
@@ -319,10 +371,17 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg) {
     '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
   };
+  let last = ['1', 0];
   if (qwen.lora) {
-    p['11'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: qwen.lora, strength_model: 1 } };
-    p['12'].inputs.model = ['11', 0];
+    p['11'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: last, lora_name: qwen.lora, strength_model: 1 } };
+    last = ['11', 0];
   }
+  extras.forEach((l, i) => {
+    const id = String(20 + i);
+    p[id] = { class_type: 'LoraLoaderModelOnly', inputs: { model: last, lora_name: l.file, strength_model: l.w } };
+    last = [id, 0];
+  });
+  p['12'].inputs.model = last;
   return p;
 }
 $('resetPreset').onclick = applyPreset;
@@ -543,7 +602,10 @@ $('go').onclick = async () => {
     let p = JSON.parse(JSON.stringify(workflow));
     let model = $('model').value;
     if (mode === 'instruct') {
-      p = buildInstructWorkflow(imgName, $('prompt').value.trim(), seed, +$('steps').value, +$('cfg').value);
+      const extras = activeLoras();
+      const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
+      const instruction = [$('prompt').value.trim(), ...words].join(', ');
+      p = buildInstructWorkflow(imgName, instruction, seed, +$('steps').value, +$('cfg').value, extras);
     } else if (mode === 'whole') {
       // Inpainting checkpoints need a mask; restyling uses the regular Realistic Vision instead
       if (isInpaint(model)) {

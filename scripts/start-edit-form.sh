@@ -1293,13 +1293,19 @@ class Graph:
                     and "CLIPTextEncode" in self.info)
 
     def build_t2i(self, *, ckpt, prompt, negative, steps, cfg, seed,
-                  sampler, scheduler, width, height, loras=()):
-        """A picture from a sentence: no input image anywhere in it.
+                  sampler, scheduler, width, height, loras=(),
+                  image=None, mask=None, denoise=1.0):
+        """SDXL-family generation, from a sentence or from a photo.
 
-        Nothing of the editing graph survives here. There is no photo to
-        encode, so the latent starts empty and the prompt goes through the
-        checkpoint's own CLIP rather than the Qwen edit encoder - which is
-        the whole reason this had to be its own mode rather than a flag.
+        The prompt goes through the checkpoint's own CLIP rather than the
+        Qwen edit encoder - which is why this could not be a flag on the
+        editing graph. With no image the latent starts empty; with one it
+        starts from the photo and Denoise decides how far it may travel,
+        which is img2img. A mask makes that local, same as in editing.
+
+        Worth being clear about what this cannot do: it takes no
+        instruction. Qwen-Image-Edit is told "change the shirt"; this is
+        told what the whole picture should look like and set loose on it.
         """
         if not self.t2i_ready():
             raise RuntimeError("this ComfyUI cannot make images from text "
@@ -1319,19 +1325,47 @@ class Graph:
                    "inputs": {"clip": C, "text": prompt}}
         g["ne"] = {"class_type": "CLIPTextEncode",
                    "inputs": {"clip": C, "text": negative or ""}}
-        g["la"] = {"class_type": "EmptyLatentImage",
-                   "inputs": self.fill_required(
-                       "EmptyLatentImage",
-                       {"width": width, "height": height, "batch_size": 1})}
+        if image:
+            g["im0"] = {"class_type": "LoadImage", "inputs": {"image": image}}
+            src = ["im0", 0]
+            mp = (width * height) / 1e6 if width and height else 0
+            if mp and "ImageScaleToTotalPixels" in self.info:
+                g["sc"] = {"class_type": "ImageScaleToTotalPixels",
+                           "inputs": self.fill_required(
+                               "ImageScaleToTotalPixels",
+                               {"image": src, "upscale_method": "lanczos",
+                                "megapixels": round(mp, 2)})}
+                src = ["sc", 0]
+            g["la"] = {"class_type": "VAEEncode",
+                       "inputs": {"pixels": src, "vae": V}}
+            latent = ["la", 0]
+            if mask and self.masks_ok():
+                g["mi"] = {"class_type": "LoadImage",
+                           "inputs": {"image": mask}}
+                g["mk"] = {"class_type": "ImageToMask",
+                           "inputs": self.fill_required(
+                               "ImageToMask",
+                               {"image": ["mi", 0], "channel": "red"})}
+                g["nm"] = {"class_type": "SetLatentNoiseMask",
+                           "inputs": {"samples": ["la", 0], "mask": ["mk", 0]}}
+                latent = ["nm", 0]
+        else:
+            g["la"] = {"class_type": "EmptyLatentImage",
+                       "inputs": self.fill_required(
+                           "EmptyLatentImage",
+                           {"width": width, "height": height, "batch_size": 1})}
+            latent = ["la", 0]
+            denoise = 1.0        # nothing to preserve
         g["ks"] = {"class_type": "KSampler", "inputs": {
             "model": M, "positive": ["po", 0], "negative": ["ne", 0],
-            "latent_image": ["la", 0], "seed": seed, "steps": steps,
+            "latent_image": latent, "seed": seed, "steps": steps,
             "cfg": cfg, "sampler_name": sampler, "scheduler": scheduler,
-            "denoise": 1.0}}
+            "denoise": denoise}}
         g["de"] = {"class_type": "VAEDecode",
                    "inputs": {"samples": ["ks", 0], "vae": V}}
         g["sv"] = {"class_type": "SaveImage",
-                   "inputs": {"images": ["de", 0], "filename_prefix": "make"}}
+                   "inputs": {"images": ["de", 0],
+                              "filename_prefix": "redo" if image else "make"}}
         return g
 
     def can_end_frame(self):
@@ -1774,6 +1808,14 @@ class H(BaseHTTPRequestHandler):
                  "length": "81", "lora": "", "lstr": "0.8",
                  "lora2": "", "lstr2": "0.8", "denoise": "1.0",
                  "count": "1", "seed": ""},
+        # Starting from a photo, 0.6 is the usual first guess: enough to
+        # repaint, not so much that the picture stops being the one you
+        # gave it. With a mask it wants to go higher, because outside the
+        # paint nothing moves whatever the number says.
+        "redo": {"steps": "28", "cfg": "6.0", "size": "832x1216",
+                 "length": "81", "lora": "", "lstr": "0.8",
+                 "lora2": "", "lstr2": "0.8", "denoise": "0.6",
+                 "count": "1", "seed": ""},
     }
 
     def log_message(self, f, *a):
@@ -1847,7 +1889,7 @@ class H(BaseHTTPRequestHandler):
             # Pony. In edit mode only a Qwen one can drive the edit encoder,
             # and offering the others invites a graph that fails obscurely.
             qwenish = "qwen" in c.lower()
-            if mode != "make" and not qwenish:
+            if mode not in ("make", "redo") and not qwenish:
                 continue
             note = ("merged, 4 steps" if qwenish else "SDXL-family, 28 steps")
             opts.append('<option value="ckpt:{0}"{3}>{1} ({2})</option>'
@@ -1877,6 +1919,8 @@ class H(BaseHTTPRequestHandler):
         if self.graph.t2i_ready():
             modes += ('<option value="make"{0}>make an image from a '
                       'description</option>'.format(msel("make")))
+            modes += ('<option value="redo"{0}>repaint a photo (SDXL/Pony)'
+                      '</option>'.format(msel("redo")))
         else:
             modes += ('<option value="" disabled>make: no checkpoint '
                       'installed</option>')
@@ -2362,7 +2406,11 @@ class H(BaseHTTPRequestHandler):
             if k in fields:
                 H.last[k] = fields[k]
         was = H.last["mode"]
-        now = "video" if fields.get("mode") == "video" else "image"
+        # Anything the settings table knows about, rather than a list of
+        # two: this collapsed every new mode back to "image" the moment
+        # there were more than video and editing.
+        now = fields.get("mode") or ""
+        now = now if now in H.modes else "image"
         H.last["mode"] = now
         switched = (now != was)
         M = H.modes[now]
@@ -2562,7 +2610,7 @@ class H(BaseHTTPRequestHandler):
             seen.add((hi, lo))
             chain.append((hi, lo, strength))
 
-        if mode == "make":
+        if mode in ("make", "redo"):
             kind, _, name = (H.last["model"] or "").partition(":")
             if kind != "ckpt" or not name:
                 return self.render(
@@ -2579,9 +2627,12 @@ class H(BaseHTTPRequestHandler):
                     ckpt=name, prompt=text,
                     negative=H.last.get("negative", ""),
                     steps=steps, cfg=cfg, seed=seed,
-                    sampler="euler_ancestral", scheduler="normal",
+                    sampler="dpmpp_2m", scheduler="karras",
                     width=width, height=height,
-                    loras=[(hi, st) for hi, _lo, st in chain])
+                    loras=[(hi, st) for hi, _lo, st in chain],
+                    image=(image if mode == "redo" else None),
+                    mask=(mask_name or None) if mode == "redo" else None,
+                    denoise=denoise)
 
             if count > 1:
                 lines = [l.strip() for l in prompt.splitlines() if l.strip()]

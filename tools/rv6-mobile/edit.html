@@ -120,6 +120,7 @@
   <div class="ctl"><button class="step" data-for="denoise" data-dir="-1" aria-label="Less">−</button><input id="denoise" type="range" min="0.3" max="1" step="0.01" value="1" data-nudge="0.05"><button class="step" data-for="denoise" data-dir="1" aria-label="More">+</button><span class="val" id="denoiseVal"></span></div>
   <div class="hint" id="denoiseHint">1.0 replaces the area completely. 0.5–0.7 keeps more of the original.</div>
   </div>
+  <div id="tuneBox">
   <div class="lbl"><span>Steps</span></div>
   <div class="ctl"><button class="step" data-for="steps" data-dir="-1" aria-label="Less">−</button><input id="steps" type="range" min="4" max="60" step="1" value="28" data-nudge="1"><button class="step" data-for="steps" data-dir="1" aria-label="More">+</button><span class="val" id="stepsVal"></span></div>
   <div class="hint" id="stepsHint">More steps = more detail, slower. Past ~40 rarely helps.</div>
@@ -127,6 +128,7 @@
   <div class="ctl"><button class="step" data-for="cfg" data-dir="-1" aria-label="Less">−</button><input id="cfg" type="range" min="1" max="12" step="0.1" value="6" data-nudge="0.5"><button class="step" data-for="cfg" data-dir="1" aria-label="More">+</button><span class="val" id="cfgVal"></span></div>
   <div class="hint" id="cfgHint">Higher follows the prompt harder; too high looks harsh and plastic.</div>
   <div class="row" style="margin-top:12px"><button id="resetPreset">Reset to model defaults</button></div>
+  </div>
   <details style="margin-top:10px">
     <summary class="hint">Things to avoid</summary>
     <textarea id="neg" rows="2" style="margin-top:6px">deformed, blurry, lowres, bad anatomy, bad hands, cartoon, 3d, painting, watermark, text</textarea>
@@ -233,7 +235,7 @@ function setMode(m) {
   for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole']]) $(id).classList.toggle('on', k === m);
   const masked = m === 'mask', inst = m === 'instruct';
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
-  for (const id of ['modelBox', 'tagBox', 'denoiseBox']) $(id).classList.toggle('hidden', inst);
+  for (const id of ['modelBox', 'tagBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst);
   const [hint, label, ph] = MODE_TEXT[m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label; $('prompt').placeholder = ph;
   if (inst) {

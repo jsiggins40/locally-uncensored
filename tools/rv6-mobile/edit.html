@@ -253,7 +253,7 @@ function setMode(m) {
   for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole']]) $(id).classList.toggle('on', k === m);
   const masked = m === 'mask', inst = m === 'instruct';
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
-  for (const id of ['modelBox', 'tagBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst);
+  for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst);
   $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));
   const [hint, label, ph] = MODE_TEXT[m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label; $('prompt').placeholder = ph;

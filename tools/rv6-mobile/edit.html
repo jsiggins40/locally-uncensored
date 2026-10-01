@@ -60,9 +60,11 @@
     📷 Choose photo
     <input id="file" type="file" accept="image/*" class="hidden">
   </label>
+  <div id="modelBox">
   <label for="model">Model</label>
   <select id="model"><option>Loading…</option></select>
   <div class="hint" id="modelHint"></div>
+  </div>
   <label for="res">Working size (long side)</label>
   <select id="res">
     <option value="768">768 px (faster)</option>
@@ -72,8 +74,9 @@
 
 <div class="panel">
   <div class="seg" role="tablist">
-    <button id="modeMask" class="on">Edit selected area</button>
-    <button id="modeWhole">Restyle whole image</button>
+    <button id="modeInstruct">✨ Describe edit</button>
+    <button id="modeMask" class="on">Selected area</button>
+    <button id="modeWhole">Restyle</button>
   </div>
   <div class="hint" id="modeHint" style="margin-bottom:8px">Tap or paint what you want changed. Everything else stays.</div>
   <div id="empty">Choose a photo, then tap or paint the area you want to change.</div>
@@ -108,13 +111,17 @@
 <div class="panel">
   <label for="prompt" style="margin-top:0" id="promptLabel">What should appear in the painted area?</label>
   <textarea id="prompt" rows="3" placeholder="e.g. red silk dress"></textarea>
+  <div id="tagBox">
   <div class="hint">Tap tags to add or remove them.</div>
   <div id="tags"></div>
+  </div>
+  <div id="denoiseBox">
   <div class="lbl"><span>Change strength</span></div>
   <div class="ctl"><button class="step" data-for="denoise" data-dir="-1" aria-label="Less">−</button><input id="denoise" type="range" min="0.3" max="1" step="0.01" value="1" data-nudge="0.05"><button class="step" data-for="denoise" data-dir="1" aria-label="More">+</button><span class="val" id="denoiseVal"></span></div>
   <div class="hint" id="denoiseHint">1.0 replaces the area completely. 0.5–0.7 keeps more of the original.</div>
+  </div>
   <div class="lbl"><span>Steps</span></div>
-  <div class="ctl"><button class="step" data-for="steps" data-dir="-1" aria-label="Less">−</button><input id="steps" type="range" min="10" max="60" step="1" value="28" data-nudge="1"><button class="step" data-for="steps" data-dir="1" aria-label="More">+</button><span class="val" id="stepsVal"></span></div>
+  <div class="ctl"><button class="step" data-for="steps" data-dir="-1" aria-label="Less">−</button><input id="steps" type="range" min="4" max="60" step="1" value="28" data-nudge="1"><button class="step" data-for="steps" data-dir="1" aria-label="More">+</button><span class="val" id="stepsVal"></span></div>
   <div class="hint" id="stepsHint">More steps = more detail, slower. Past ~40 rarely helps.</div>
   <div class="lbl"><span>Prompt strength (CFG)</span></div>
   <div class="ctl"><button class="step" data-for="cfg" data-dir="-1" aria-label="Less">−</button><input id="cfg" type="range" min="1" max="12" step="0.1" value="6" data-nudge="0.5"><button class="step" data-for="cfg" data-dir="1" aria-label="More">+</button><span class="val" id="cfgVal"></span></div>
@@ -207,22 +214,89 @@ for (const [cat, list] of Object.entries(TAGS)) {
 $('prompt').addEventListener('input', syncChips);
 $('prompt').value = 'RAW photo, natural light'; syncChips();
 
-// ---- Mode: masked edit vs whole-image img2img
-let wholeMode = false;
-function setMode(whole) {
-  wholeMode = whole;
-  $('modeMask').classList.toggle('on', !whole); $('modeWhole').classList.toggle('on', whole);
-  $('paintTools').classList.toggle('hidden', whole); $('mask').classList.toggle('hidden', whole); pts.classList.toggle('hidden', whole);
-  $('modeHint').textContent = whole
-    ? 'Changes the whole photo while keeping its layout. Lower strength keeps more of the original.'
-    : 'Tap or paint what you want changed. Everything else stays.';
-  $('promptLabel').textContent = whole ? 'Describe the whole image you want' : 'What should appear in the painted area?';
-  if (whole) setVal($('denoise'), 0.5); else applyPreset();
+// ---- Modes: 'instruct' (Qwen-Image-Edit follows a written instruction),
+// 'mask' (inpaint the selected area), 'whole' (img2img restyle)
+let mode = 'mask', qwen = null, maskPrompt = null;
+const MODE_TEXT = {
+  instruct: ['Say what to change and the model edits the photo, e.g. "make her hair red" or "put her on a beach at sunset".',
+             'What should change?', 'e.g. change the background to a beach at sunset'],
+  mask: ['Tap or paint what you want changed. Everything else stays.',
+         'What should appear in the painted area?', 'e.g. red silk dress'],
+  whole: ['Changes the whole photo while keeping its layout. Lower strength keeps more of the original.',
+          'Describe the whole image you want', 'e.g. woman on a beach at golden hour'],
+};
+function setMode(m) {
+  if (m === 'instruct' && mode !== 'instruct') maskPrompt = $('prompt').value;
+  if (m !== 'instruct' && mode === 'instruct' && maskPrompt !== null) $('prompt').value = maskPrompt;
+  mode = m; store('mode', m); setStatus('');
+  for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole']]) $(id).classList.toggle('on', k === m);
+  const masked = m === 'mask', inst = m === 'instruct';
+  $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
+  for (const id of ['modelBox', 'tagBox', 'denoiseBox']) $(id).classList.toggle('hidden', inst);
+  const [hint, label, ph] = MODE_TEXT[m];
+  $('modeHint').textContent = hint; $('promptLabel').textContent = label; $('prompt').placeholder = ph;
+  if (inst) {
+    $('prompt').value = '';
+    if (!qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
+    setVal($('steps'), qwen.lora ? 8 : 30); setVal($('cfg'), qwen.lora ? 1 : 2.5);
+    $('modeHint').textContent = hint + (qwen.lora ? ' (fast 8-step mode)' : '');
+  } else if (m === 'whole') { applyPreset(); setVal($('denoise'), 0.5); }
+  else applyPreset();
+  syncChips();
 }
-$('modeMask').onclick = () => setMode(false);
-$('modeWhole').onclick = () => setMode(true);
+$('modeInstruct').onclick = () => setMode('instruct');
+$('modeMask').onclick = () => setMode('mask');
+$('modeWhole').onclick = () => setMode('whole');
 
-function onModelChange() { store('model', $('model').value); applyPreset(); if (wholeMode) setVal($('denoise'), 0.5); }
+function onModelChange() { store('model', $('model').value); applyPreset(); if (mode === 'whole') setVal($('denoise'), 0.5); }
+
+// Find the Qwen-Image-Edit files ComfyUI has, if any
+function optionsOf(info, node, input) {
+  const v = info && info[node] && (info[node].input.required[input] || (info[node].input.optional || {})[input]);
+  return v ? (Array.isArray(v[0]) ? v[0] : (v[1] && v[1].options) || []) : [];
+}
+async function info(node) {
+  try { const r = await fetch('/api/object_info/' + node); return r.ok ? await r.json() : {}; } catch (e) { return {}; }
+}
+(async () => {
+  const [unet, clip, vae, lora, plus, single] = await Promise.all(
+    ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit'].map(info));
+  const pick = (list, re) => list.filter(n => re.test(n)).sort().pop();
+  const q = {
+    unet: pick(optionsOf(unet, 'UNETLoader', 'unet_name'), /qwen.?image.?edit/i),
+    clip: pick(optionsOf(clip, 'CLIPLoader', 'clip_name'), /qwen_?2\.5_?vl/i),
+    vae: pick(optionsOf(vae, 'VAELoader', 'vae_name'), /qwen_image_vae/i),
+    lora: pick(optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name'), /qwen.*edit.*lightning|lightning.*edit/i) || null,
+    plus: !!plus.TextEncodeQwenImageEditPlus,
+  };
+  if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) qwen = q;
+  const saved = recall('mode');
+  if (saved && saved !== mode) setMode(saved);
+})();
+
+function buildInstructWorkflow(imgName, instruction, seed, steps, cfg) {
+  const enc = text => qwen.plus
+    ? { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image1: ['5', 0] } }
+    : { class_type: 'TextEncodeQwenImageEdit', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image: ['5', 0] } };
+  const p = {
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: qwen.unet, weight_dtype: 'default' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: qwen.clip, type: 'qwen_image' } },
+    '13': { class_type: 'VAELoader', inputs: { vae_name: qwen.vae } },
+    '5': { class_type: 'LoadImage', inputs: { image: imgName } },
+    '3': enc(instruction), '4': enc(''),
+    '6': { class_type: 'VAEEncode', inputs: { pixels: ['5', 0], vae: ['13', 0] } },
+    '12': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
+    '7': { class_type: 'KSampler', inputs: { model: ['12', 0], positive: ['3', 0], negative: ['4', 0], latent_image: ['6', 0],
+                                              seed, steps, cfg, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
+  };
+  if (qwen.lora) {
+    p['11'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: qwen.lora, strength_model: 1 } };
+    p['12'].inputs.model = ['11', 0];
+  }
+  return p;
+}
 $('resetPreset').onclick = applyPreset;
 $('model').addEventListener('change', onModelChange);
 
@@ -277,8 +351,9 @@ function loadIntoCanvas(src) {
       const max = +$('res').value;
       const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
       // SD works on multiples of 8
-      const w = Math.max(8, Math.floor(img.naturalWidth * scale / 8) * 8);
-      const h = Math.max(8, Math.floor(img.naturalHeight * scale / 8) * 8);
+      // Multiples of 16 suit SD (8) and Qwen-Image (16) alike
+      const w = Math.max(16, Math.floor(img.naturalWidth * scale / 16) * 16);
+      const h = Math.max(16, Math.floor(img.naturalHeight * scale / 16) * 16);
       base.width = mask.width = pts.width = w; base.height = mask.height = pts.height = h;
       baseUpload = null; selPoints = []; selBase = null; drawPts();
       bctx.drawImage(img, 0, 0, w, h);
@@ -423,16 +498,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 $('go').onclick = async () => {
   if (!workflow) return setStatus('Workflow not loaded yet, reload the page.', true);
   if ($('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
-  if (!wholeMode && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
-  if (!$('prompt').value.trim()) return setStatus('Type a prompt or tap some tags first.', true);
+  if (mode === 'mask' && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
+  if (!$('prompt').value.trim()) return setStatus(mode === 'instruct' ? 'Type what you want changed first.' : 'Type a prompt or tap some tags first.', true);
+  if (mode === 'instruct' && !qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
   $('go').disabled = true;
   try {
     const ts = Date.now();
     setStatus('Uploading…');
     const imgName = await upload(await toBlob(base), `rv6m_${ts}_img.png`);
-    const p = JSON.parse(JSON.stringify(workflow));
+    const seed = Math.floor(Math.random() * 2 ** 32);
+    let p = JSON.parse(JSON.stringify(workflow));
     let model = $('model').value;
-    if (wholeMode) {
+    if (mode === 'instruct') {
+      p = buildInstructWorkflow(imgName, $('prompt').value.trim(), seed, +$('steps').value, +$('cfg').value);
+    } else if (mode === 'whole') {
       // Inpainting checkpoints need a mask; restyling uses the regular Realistic Vision instead
       if (isInpaint(model)) {
         const plain = allModels.find(n => isRV(n) && !isInpaint(n));
@@ -445,13 +524,14 @@ $('go').onclick = async () => {
     } else {
       p['10'].inputs.image = await upload(await exportMask(), `rv6m_${ts}_mask.png`);
     }
-    p['1'].inputs.ckpt_name = model;
-    if (!isRV(model)) { p['6'].inputs.vae = ['1', 2]; p['8'].inputs.vae = ['1', 2]; delete p['2']; }
-    p['5'].inputs.image = imgName;
-    p['3'].inputs.text = $('prompt').value.trim();
-    p['4'].inputs.text = $('neg').value;
-    Object.assign(p['7'].inputs, { seed: Math.floor(Math.random() * 2 ** 32), steps: +$('steps').value,
-                                   cfg: +$('cfg').value, denoise: +$('denoise').value });
+    if (mode !== 'instruct') {
+      p['1'].inputs.ckpt_name = model;
+      if (!isRV(model)) { p['6'].inputs.vae = ['1', 2]; p['8'].inputs.vae = ['1', 2]; delete p['2']; }
+      p['5'].inputs.image = imgName;
+      p['3'].inputs.text = $('prompt').value.trim();
+      p['4'].inputs.text = $('neg').value;
+      Object.assign(p['7'].inputs, { seed, steps: +$('steps').value, cfg: +$('cfg').value, denoise: +$('denoise').value });
+    }
     setStatus('Queued…');
     const r = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                            body: JSON.stringify({ prompt: p, client_id: clientId }) });

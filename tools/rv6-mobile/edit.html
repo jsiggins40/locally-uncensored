@@ -42,6 +42,13 @@
   #result img { width:100%; border-radius:10px; display:block; }
   .hint { color:var(--muted); font-size:13px; }
   .hidden { display:none !important; }
+  .seg { display:flex; background:#2a2a2c; border-radius:10px; padding:3px; gap:3px; margin-bottom:10px; }
+  .seg button { flex:1; padding:10px 6px; background:transparent; }
+  .seg button.on { background:var(--accent); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .chip { padding:7px 11px; border-radius:16px; background:#2a2a2c; border:1px solid #3a3a3c; font-size:14px; }
+  .chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .tagcat { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin-top:10px; }
 </style>
 </head>
 <body>
@@ -63,11 +70,17 @@
 </div>
 
 <div class="panel">
+  <div class="seg" role="tablist">
+    <button id="modeMask" class="on">Edit painted area</button>
+    <button id="modeWhole">Restyle whole image</button>
+  </div>
+  <div class="hint" id="modeHint" style="margin-bottom:8px">Paint over what you want changed. Everything else stays.</div>
   <div id="empty">Choose a photo, then paint over the area you want to change.</div>
   <div id="stage" class="hidden">
     <canvas id="base"></canvas>
     <canvas id="mask"></canvas>
   </div>
+  <div id="paintTools">
   <div class="row" style="margin-top:10px">
     <button id="paint" class="on">Paint</button>
     <button id="erase">Erase</button>
@@ -76,11 +89,14 @@
   </div>
   <div class="lbl"><span>Brush size</span></div>
   <div class="ctl"><button class="step" data-for="brush" data-dir="-1" aria-label="Less">−</button><input id="brush" type="range" min="5" max="120" step="1" value="40" data-nudge="5"><button class="step" data-for="brush" data-dir="1" aria-label="More">+</button><span class="val" id="brushVal"></span></div>
+  </div>
 </div>
 
 <div class="panel">
-  <label for="prompt" style="margin-top:0">What should appear in the painted area?</label>
+  <label for="prompt" style="margin-top:0" id="promptLabel">What should appear in the painted area?</label>
   <textarea id="prompt" rows="3" placeholder="e.g. red silk dress"></textarea>
+  <div class="hint">Tap tags to add or remove them.</div>
+  <div id="tags"></div>
   <div class="lbl"><span>Change strength</span></div>
   <div class="ctl"><button class="step" data-for="denoise" data-dir="-1" aria-label="Less">−</button><input id="denoise" type="range" min="0.3" max="1" step="0.01" value="1" data-nudge="0.05"><button class="step" data-for="denoise" data-dir="1" aria-label="More">+</button><span class="val" id="denoiseVal"></span></div>
   <div class="hint" id="denoiseHint">1.0 replaces the area completely. 0.5–0.7 keeps more of the original.</div>
@@ -118,6 +134,7 @@ fetch('./workflow.json').then(r => r.json()).then(w => workflow = w)
 
 // SD1.5 Realistic Vision uses the separate VAE file; SDXL checkpoints use their own.
 const isRV = name => /realistic_vision/i.test(name);
+let allModels = [];
 const isInpaint = name => /inpaint/i.test(name);
 function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
@@ -144,13 +161,60 @@ function applyPreset() {
   $('res').value = p.res;
   $('modelHint').textContent = `${p.label} defaults: ${p.steps} steps · CFG ${p.cfg} · strength ${p.denoise.toFixed(2)}. ${p.hint}`;
 }
-function onModelChange() { store('model', $('model').value); applyPreset(); }
+// ---- Tags: tap to add/remove from the prompt
+const TAGS = {
+  'Quality': ['RAW photo', 'photorealistic', 'highly detailed', 'sharp focus', '8k uhd', 'film grain'],
+  'Lighting': ['natural light', 'soft window light', 'golden hour', 'studio lighting', 'dramatic shadows', 'candlelight', 'neon light'],
+  'Camera': ['dslr', '35mm', '85mm portrait', 'shallow depth of field', 'bokeh', 'close-up', 'full body', 'wide shot'],
+  'Skin & look': ['detailed skin texture', 'natural skin', 'freckles', 'light makeup', 'wet skin', 'glossy lips'],
+  'Clothing': ['lingerie', 'silk dress', 'bikini', 'jeans', 'leather jacket', 'oversized shirt'],
+  'Setting': ['bedroom', 'beach', 'city street', 'studio backdrop', 'forest', 'kitchen'],
+};
+const promptParts = () => $('prompt').value.split(',').map(t => t.trim()).filter(Boolean);
+function syncChips() {
+  const have = new Set(promptParts().map(t => t.toLowerCase()));
+  for (const c of document.querySelectorAll('.chip')) c.classList.toggle('on', have.has(c.textContent.toLowerCase()));
+}
+for (const [cat, list] of Object.entries(TAGS)) {
+  const head = document.createElement('div'); head.className = 'tagcat'; head.textContent = cat;
+  const box = document.createElement('div'); box.className = 'chips';
+  for (const t of list) {
+    const b = document.createElement('button'); b.className = 'chip'; b.textContent = t; b.type = 'button';
+    b.onclick = () => {
+      const parts = promptParts(), i = parts.findIndex(x => x.toLowerCase() === t.toLowerCase());
+      if (i >= 0) parts.splice(i, 1); else parts.push(t);
+      $('prompt').value = parts.join(', '); syncChips();
+    };
+    box.append(b);
+  }
+  $('tags').append(head, box);
+}
+$('prompt').addEventListener('input', syncChips);
+$('prompt').value = 'RAW photo, natural light'; syncChips();
+
+// ---- Mode: masked edit vs whole-image img2img
+let wholeMode = false;
+function setMode(whole) {
+  wholeMode = whole;
+  $('modeMask').classList.toggle('on', !whole); $('modeWhole').classList.toggle('on', whole);
+  $('paintTools').classList.toggle('hidden', whole); $('mask').classList.toggle('hidden', whole);
+  $('modeHint').textContent = whole
+    ? 'Changes the whole photo while keeping its layout. Lower strength keeps more of the original.'
+    : 'Paint over what you want changed. Everything else stays.';
+  $('promptLabel').textContent = whole ? 'Describe the whole image you want' : 'What should appear in the painted area?';
+  if (whole) setVal($('denoise'), 0.5); else applyPreset();
+}
+$('modeMask').onclick = () => setMode(false);
+$('modeWhole').onclick = () => setMode(true);
+
+function onModelChange() { store('model', $('model').value); applyPreset(); if (wholeMode) setVal($('denoise'), 0.5); }
 $('resetPreset').onclick = applyPreset;
 $('model').addEventListener('change', onModelChange);
 
 fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.json()).then(info => {
   const v = info.CheckpointLoaderSimple.input.required.ckpt_name;
-  const names = (Array.isArray(v[0]) ? v[0] : (v[1] && v[1].options) || []).filter(n => !/^Realistic_Vision_V6\.0_NV_B1_fp16/.test(n));
+  allModels = Array.isArray(v[0]) ? v[0] : (v[1] && v[1].options) || [];
+  const names = allModels.filter(n => !/^Realistic_Vision_V6\.0_NV_B1_fp16/.test(n));
   $('model').innerHTML = '';
   for (const n of names) $('model').add(new Option(n.replace(/\.safetensors$/, ''), n));
   const saved = recall('model');
@@ -271,21 +335,32 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 $('go').onclick = async () => {
   if (!workflow) return setStatus('Workflow not loaded yet, reload the page.', true);
   if ($('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
-  if (maskIsEmpty()) return setStatus('Paint over the area you want to change first.', true);
-  if (!$('prompt').value.trim()) return setStatus('Describe what should appear in the painted area.', true);
+  if (!wholeMode && maskIsEmpty()) return setStatus('Paint over the area you want to change first.', true);
+  if (!$('prompt').value.trim()) return setStatus('Type a prompt or tap some tags first.', true);
   $('go').disabled = true;
   try {
     const ts = Date.now();
     setStatus('Uploading…');
     const imgName = await upload(await toBlob(base), `rv6m_${ts}_img.png`);
-    const maskName = await upload(await exportMask(), `rv6m_${ts}_mask.png`);
     const p = JSON.parse(JSON.stringify(workflow));
-    const model = $('model').value;
+    let model = $('model').value;
+    if (wholeMode) {
+      // Inpainting checkpoints need a mask; restyling uses the regular Realistic Vision instead
+      if (isInpaint(model)) {
+        const plain = allModels.find(n => isRV(n) && !isInpaint(n));
+        if (!plain) throw new Error('Restyle needs a non-inpainting model. Pick Anteros or bigASP.');
+        model = plain;
+      }
+      delete p['10'];
+      p['6'] = { class_type: 'VAEEncode', inputs: { pixels: ['5', 0], vae: ['2', 0] } };
+      Object.assign(p['7'].inputs, { positive: ['3', 0], negative: ['4', 0], latent_image: ['6', 0] });
+    } else {
+      p['10'].inputs.image = await upload(await exportMask(), `rv6m_${ts}_mask.png`);
+    }
     p['1'].inputs.ckpt_name = model;
     if (!isRV(model)) { p['6'].inputs.vae = ['1', 2]; p['8'].inputs.vae = ['1', 2]; delete p['2']; }
     p['5'].inputs.image = imgName;
-    p['10'].inputs.image = maskName;
-    p['3'].inputs.text = $('prompt').value.trim() + ', RAW photo, natural lighting, detailed skin, dslr, film grain';
+    p['3'].inputs.text = $('prompt').value.trim();
     p['4'].inputs.text = $('neg').value;
     Object.assign(p['7'].inputs, { seed: Math.floor(Math.random() * 2 ** 32), steps: +$('steps').value,
                                    cfg: +$('cfg').value, denoise: +$('denoise').value });

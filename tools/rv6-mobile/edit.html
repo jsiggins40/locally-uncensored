@@ -282,7 +282,24 @@ async function info(node) {
   const saved = recall('mode');
   if (saved && saved !== mode) setMode(saved);
   else if (mode === 'instruct') setMode('instruct');  // re-run now that the model is known
+  if (qwen) warmUp();
 })();
+
+// Loading Qwen (20-40 GB) onto the GPU is most of the first edit's time.
+// Start that as soon as the page opens with a tiny 1-step job, so it is
+// done by the time a photo is chosen and the instruction typed. Costs ~1s
+// once the model is already loaded.
+async function warmUp() {
+  try {
+    const c = document.createElement('canvas'); c.width = c.height = 256;
+    const x = c.getContext('2d'); x.fillStyle = '#808080'; x.fillRect(0, 0, 256, 256);
+    const name = await upload(await toBlob(c), 'rv6m_warmup.png');
+    const p = buildInstructWorkflow(name, 'warm up', 1, 1, qwen.lora ? 1 : 2.5);
+    p['9'] = { class_type: 'PreviewImage', inputs: { images: ['8', 0] } };  // nothing saved to the gallery
+    await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                 body: JSON.stringify({ prompt: p, client_id: clientId }) });
+  } catch (e) { /* best effort */ }
+}
 
 function buildInstructWorkflow(imgName, instruction, seed, steps, cfg) {
   const enc = text => qwen.plus

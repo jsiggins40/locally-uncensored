@@ -248,7 +248,11 @@ $('go').onclick = async () => {
       const secs = Math.round((Date.now() - t0) / 1000);
       if (secs > 600) throw new Error('Timed out after 10 minutes.');
       setStatus('Generating… ' + secs + 's');
-      const h = await (await fetch('/api/history/' + id)).json();
+      // A dropped poll (phone sleeping, VPN blip) must not abandon a job
+      // that is still running on the VM; keep asking until it answers.
+      let h;
+      try { h = await (await fetch('/api/history/' + id)).json(); }
+      catch (e) { setStatus('Generating… ' + secs + 's (reconnecting to the VM…)'); continue; }
       const job = h[id]; if (!job) continue;
       if (job.status && job.status.status_str === 'error') {
         const m = (job.status.messages || []).find(x => x[0] === 'execution_error');
@@ -264,7 +268,10 @@ $('go').onclick = async () => {
       break;
     }
   } catch (err) {
-    setStatus(err.message, true);
+    const msg = /load failed|failed to fetch|networkerror/i.test(err.message)
+      ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.'
+      : err.message;
+    setStatus(msg, true);
   } finally {
     $('go').disabled = false;
   }

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "locally-uncensored": {
+      "command": "/ABSOLUTE/PATH/TO/node",
+      "args": ["/ABSOLUTE/PATH/TO/locally-uncensored/mcp-server/src/index.js"],
+      "env": {
+        "LU_COMFYUI_URL": "http://127.0.0.1:8188"
+      }
+    },
+    "ms365": {
+      "command": "npx",
+      "args": ["-y", "@softeria/ms-365-mcp-server", "--read-only"]
+    }
+  }
+}

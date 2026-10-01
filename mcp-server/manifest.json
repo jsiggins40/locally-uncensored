@@ -1,0 +1,65 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/dist/mcpb-manifest-v0.3.schema.json",
+  "manifest_version": "0.3",
+  "name": "locally-uncensored",
+  "display_name": "Locally Uncensored",
+  "version": "0.1.0",
+  "description": "Use the AI models running on this computer from Claude: local chat models and ComfyUI image generation.",
+  "long_description": "Connects Claude to the local backends Locally Uncensored runs or detects: its built-in engine, Ollama, LM Studio, vLLM, llama.cpp, KoboldCpp and other OpenAI compatible servers, plus ComfyUI for images. Prompts and images never leave the machine.",
+  "author": { "name": "purpledoubled", "url": "https://locallyuncensored.com" },
+  "repository": { "type": "git", "url": "https://github.com/purpledoubled/locally-uncensored.git" },
+  "homepage": "https://locallyuncensored.com",
+  "license": "AGPL-3.0-only",
+  "keywords": ["local", "ollama", "lm-studio", "llama.cpp", "comfyui", "privacy"],
+  "server": {
+    "type": "node",
+    "entry_point": "src/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/src/index.js"],
+      "env": {
+        "LU_COMFYUI_URL": "${user_config.comfyui_url}",
+        "LU_BACKENDS": "${user_config.backends}",
+        "LU_TIMEOUT_MS": "${user_config.timeout_ms}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "lu_status", "description": "Shows which local chat backends and ComfyUI are running, with their models." },
+    { "name": "list_local_models", "description": "Lists the chat models served by the online local backends." },
+    { "name": "local_chat", "description": "Sends a prompt to a local model and returns its answer." },
+    { "name": "comfyui_list_models", "description": "Lists ComfyUI checkpoints, diffusion models, LoRAs, samplers and schedulers." },
+    { "name": "comfyui_generate_image", "description": "Renders an image from a prompt with an all-in-one checkpoint." },
+    { "name": "comfyui_run_workflow", "description": "Runs any API-format ComfyUI workflow and returns its files." },
+    { "name": "comfyui_get_result", "description": "Fetches the files of a ComfyUI job started with wait=false." }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=20.0.0" }
+  },
+  "user_config": {
+    "comfyui_url": {
+      "type": "string",
+      "title": "ComfyUI URL",
+      "description": "Where ComfyUI answers. LU starts it on port 8188.",
+      "default": "http://127.0.0.1:8188",
+      "required": false
+    },
+    "backends": {
+      "type": "string",
+      "title": "Chat backends (optional)",
+      "description": "Comma separated id=url list, e.g. ollama=http://localhost:11434/v1. Empty probes every backend LU knows on its default port.",
+      "default": "",
+      "required": false
+    },
+    "timeout_ms": {
+      "type": "number",
+      "title": "Timeout (ms)",
+      "description": "How long a chat answer or a render may take.",
+      "default": 300000,
+      "min": 10000,
+      "max": 3600000,
+      "required": false
+    }
+  }
+}

@@ -136,6 +136,7 @@
 </div>
 
 <button id="go" class="primary">Generate</button>
+<button id="stop" class="hidden" style="width:100%;margin-top:8px;padding:14px;background:var(--danger);color:#fff;font-weight:600">■ Stop</button>
 <p id="status"></p>
 
 <div id="result" class="panel hidden">
@@ -532,7 +533,8 @@ $('go').onclick = async () => {
   if (mode === 'mask' && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
   if (!$('prompt').value.trim()) return setStatus(mode === 'instruct' ? 'Type what you want changed first.' : 'Type a prompt or tap some tags first.', true);
   if (mode === 'instruct' && !qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
-  $('go').disabled = true;
+  $('go').disabled = true; stopRequested = false; currentJob = null;
+  $('stop').classList.remove('hidden');
   try {
     const ts = Date.now();
     setStatus('Uploading…');
@@ -567,10 +569,12 @@ $('go').onclick = async () => {
     const r = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                            body: JSON.stringify({ prompt: p, client_id: clientId }) });
     if (!r.ok) throw new Error('ComfyUI rejected the job (' + r.status + '): ' + (await r.text()).slice(0, 600));
-    const id = (await r.json()).prompt_id;
+    const id = currentJob = (await r.json()).prompt_id;
+    if (stopRequested) await cancelJob(id);
     const t0 = Date.now();
     for (;;) {
       await sleep(1000);
+      if (stopRequested) { setStatus('Stopped.'); break; }
       const secs = Math.round((Date.now() - t0) / 1000);
       if (secs > 600) throw new Error('Timed out after 10 minutes.');
       setStatus('Generating… ' + secs + 's');
@@ -581,6 +585,7 @@ $('go').onclick = async () => {
       catch (e) { setStatus('Generating… ' + secs + 's (reconnecting to the VM…)'); continue; }
       const job = h[id]; if (!job) continue;
       if (job.status && job.status.status_str === 'error') {
+        if ((job.status.messages || []).some(x => x[0] === 'execution_interrupted')) { setStatus('Stopped.'); break; }
         const m = (job.status.messages || []).find(x => x[0] === 'execution_error');
         throw new Error('Generation failed: ' + (m ? m[1].exception_message : JSON.stringify(job.status).slice(0, 400)));
       }
@@ -599,8 +604,29 @@ $('go').onclick = async () => {
       : err.message;
     setStatus(msg, true);
   } finally {
-    $('go').disabled = false;
+    $('go').disabled = false; currentJob = null;
+    $('stop').classList.add('hidden');
   }
+};
+
+// Stop: drop the job if it is still waiting, interrupt it if it is running.
+// Only interrupts when our job is the running one, so a warm-up or someone
+// else's job is never cut short by mistake.
+let stopRequested = false, currentJob = null;
+async function cancelJob(id) {
+  try {
+    await fetch('/api/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ delete: [id] }) });
+    const q = await (await fetch('/api/queue')).json();
+    if ((q.queue_running || []).some(item => item[1] === id))
+      await fetch('/api/interrupt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ prompt_id: id }) });
+  } catch (e) { /* the loop still stops waiting */ }
+}
+$('stop').onclick = async () => {
+  stopRequested = true;
+  setStatus('Stopping…');
+  if (currentJob) await cancelJob(currentJob);
 };
 
 $('again').onclick = async () => {

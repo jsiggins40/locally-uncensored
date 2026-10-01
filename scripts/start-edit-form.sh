@@ -1286,6 +1286,54 @@ class Graph:
         return ("SetLatentNoiseMask" in self.info
                 and "ImageToMask" in self.info)
 
+    def t2i_ready(self):
+        """Whether a picture can be made without one to start from."""
+        return bool(self.enum_for("CheckpointLoaderSimple", "ckpt_name")
+                    and "EmptyLatentImage" in self.info
+                    and "CLIPTextEncode" in self.info)
+
+    def build_t2i(self, *, ckpt, prompt, negative, steps, cfg, seed,
+                  sampler, scheduler, width, height, loras=()):
+        """A picture from a sentence: no input image anywhere in it.
+
+        Nothing of the editing graph survives here. There is no photo to
+        encode, so the latent starts empty and the prompt goes through the
+        checkpoint's own CLIP rather than the Qwen edit encoder - which is
+        the whole reason this had to be its own mode rather than a flag.
+        """
+        if not self.t2i_ready():
+            raise RuntimeError("this ComfyUI cannot make images from text "
+                               "(no checkpoint, or no EmptyLatentImage node)")
+        g = {"ck": {"class_type": "CheckpointLoaderSimple",
+                    "inputs": {"ckpt_name": ckpt}}}
+        M, C, V = ["ck", 0], ["ck", 1], ["ck", 2]
+        for i, (name, strength) in enumerate(loras or ()):
+            if not name:
+                continue
+            k = "lo%d" % i
+            g[k] = {"class_type": "LoraLoader", "inputs": {
+                "model": M, "clip": C, "lora_name": name,
+                "strength_model": strength, "strength_clip": strength}}
+            M, C = [k, 0], [k, 1]
+        g["po"] = {"class_type": "CLIPTextEncode",
+                   "inputs": {"clip": C, "text": prompt}}
+        g["ne"] = {"class_type": "CLIPTextEncode",
+                   "inputs": {"clip": C, "text": negative or ""}}
+        g["la"] = {"class_type": "EmptyLatentImage",
+                   "inputs": self.fill_required(
+                       "EmptyLatentImage",
+                       {"width": width, "height": height, "batch_size": 1})}
+        g["ks"] = {"class_type": "KSampler", "inputs": {
+            "model": M, "positive": ["po", 0], "negative": ["ne", 0],
+            "latent_image": ["la", 0], "seed": seed, "steps": steps,
+            "cfg": cfg, "sampler_name": sampler, "scheduler": scheduler,
+            "denoise": 1.0}}
+        g["de"] = {"class_type": "VAEDecode",
+                   "inputs": {"samples": ["ks", 0], "vae": V}}
+        g["sv"] = {"class_type": "SaveImage",
+                   "inputs": {"images": ["de", 0], "filename_prefix": "make"}}
+        return g
+
     def can_end_frame(self):
         return bool(self.flf or self.i2v_end)
 
@@ -1719,6 +1767,13 @@ class H(BaseHTTPRequestHandler):
                   "length": "81", "lora": "", "lstr": "1.0",
                   "lora2": "", "lstr2": "1.0", "denoise": "1.0",
                   "count": "1", "seed": ""},
+        # SDXL-family numbers, which are nothing like the edit model's:
+        # no distillation, so it wants real steps and real guidance, and
+        # 832x1216 is the portrait shape those checkpoints were trained on.
+        "make": {"steps": "28", "cfg": "6.0", "size": "832x1216",
+                 "length": "81", "lora": "", "lstr": "0.8",
+                 "lora2": "", "lstr2": "0.8", "denoise": "1.0",
+                 "count": "1", "seed": ""},
     }
 
     def log_message(self, f, *a):
@@ -1788,8 +1843,16 @@ class H(BaseHTTPRequestHandler):
         def sel(v):
             return " selected" if v == L["model"] else ""
         for c in m["ckpt"]:
-            opts.append('<option value="ckpt:{0}"{2}>{1} (merged, 4 steps)</option>'
-                        .format(html.escape(c), html.escape(c), sel("ckpt:" + c)))
+            # In make mode any checkpoint is fair game - SDXL, Illustrious,
+            # Pony. In edit mode only a Qwen one can drive the edit encoder,
+            # and offering the others invites a graph that fails obscurely.
+            qwenish = "qwen" in c.lower()
+            if mode != "make" and not qwenish:
+                continue
+            note = ("merged, 4 steps" if qwenish else "SDXL-family, 28 steps")
+            opts.append('<option value="ckpt:{0}"{3}>{1} ({2})</option>'
+                        .format(html.escape(c), html.escape(c), note,
+                                sel("ckpt:" + c)))
         # diffusion_models holds whatever else is installed - Klein, on this
         # box. Wrapping a Qwen graph around a FLUX model fails in a way that
         # looks like a broken pipeline, so only offer what belongs here.
@@ -1808,17 +1871,22 @@ class H(BaseHTTPRequestHandler):
                     " selected" if l == chosen else "")
                 for l in m["lora"])
         loras, loras2 = lora_menu(lora), lora_menu(lora2)
-        vsel = " selected" if mode == "video" else ""
-        if self.video_ready(m):
-            modes = ('<option value="image"{0}>edit an image</option>'
-                     '<option value="video"{1}>animate an image (Wan 2.2)</option>'
-                     .format("" if vsel else " selected", vsel))
+        def msel(v):
+            return " selected" if mode == v else ""
+        modes = '<option value="image"{0}>edit a photo</option>'.format(msel("image"))
+        if self.graph.t2i_ready():
+            modes += ('<option value="make"{0}>make an image from a '
+                      'description</option>'.format(msel("make")))
         else:
-            modes = '<option value="image" selected>edit an image</option>'
-            if self.graph.i2v:
-                modes += '<option value="" disabled>video: models not installed</option>'
-            else:
-                modes += '<option value="" disabled>video: WanImageToVideo node missing</option>'
+            modes += ('<option value="" disabled>make: no checkpoint '
+                      'installed</option>')
+        if self.video_ready(m):
+            modes += ('<option value="video"{0}>animate an image (Wan 2.2)'
+                      '</option>'.format(msel("video")))
+        elif self.graph.i2v:
+            modes += '<option value="" disabled>video: models not installed</option>'
+        else:
+            modes += '<option value="" disabled>video: WanImageToVideo node missing</option>'
         avail = [f for f in self.listing(self.indir)
                  if not os.path.basename(f).startswith(MASK_PREFIX)]
         choices = "".join(
@@ -2398,7 +2466,9 @@ class H(BaseHTTPRequestHandler):
         H.last["existing"] = image or ""
         H.last["existing2"] = image2 or ""
         H.last["existing3"] = image3 or ""
-        if not image:
+        # Making a picture from a description needs no photo, so the check
+        # below cannot stand in its way.
+        if not image and H.last["mode"] != "make":
             return self.render('<p class="err">pick or upload a photo</p>')
 
         # Turn the ticked cells into a greyscale png beside the photo.
@@ -2491,6 +2561,65 @@ class H(BaseHTTPRequestHandler):
                 continue
             seen.add((hi, lo))
             chain.append((hi, lo, strength))
+
+        if mode == "make":
+            kind, _, name = (H.last["model"] or "").partition(":")
+            if kind != "ckpt" or not name:
+                return self.render(
+                    '<p class="err">pick a checkpoint in Model. Making a '
+                    'picture from nothing needs one that carries its own '
+                    'clip and vae &mdash; an SDXL, Illustrious or Pony file, '
+                    'not a separate Qwen transformer.</p>')
+            if not self.graph.t2i_ready():
+                return self.render('<p class="err">this ComfyUI has no '
+                                   'EmptyLatentImage node</p>')
+
+            def mkt(text, seed):
+                return self.graph.build_t2i(
+                    ckpt=name, prompt=text,
+                    negative=H.last.get("negative", ""),
+                    steps=steps, cfg=cfg, seed=seed,
+                    sampler="euler_ancestral", scheduler="normal",
+                    width=width, height=height,
+                    loras=[(hi, st) for hi, _lo, st in chain])
+
+            if count > 1:
+                lines = [l.strip() for l in prompt.splitlines() if l.strip()]
+                while len(lines) < count:
+                    lines.append(lines[-1])
+                snap = LIVE.snapshot()
+                if snap["clips"] and not snap["done"]:
+                    return self.render('<p class="err">a batch is already '
+                                       'running</p>')
+                try:
+                    mkt(lines[0], 1)         # fail here, not in a thread
+                except Exception as e:
+                    return self.render('<p class="err">could not build the '
+                                       'graph: {}</p>'.format(html.escape(str(e))))
+                LIVE.queued("", "starting %d images" % count, 1, count, "image")
+                threading.Thread(target=batch_worker, args=(dict(
+                    build=mkt, comfy=self.comfy, prompts=lines[:count],
+                    seed=base_seed, timeout=1800),), daemon=True).start()
+                return self.redirect("/")
+
+            try:
+                g = mkt(prompt, seed_for(base_seed))
+            except Exception as e:
+                return self.render('<p class="err">could not build the graph: '
+                                   '{}</p>'.format(html.escape(str(e))))
+            try:
+                r = api(self.comfy, "/prompt",
+                        {"prompt": g, "client_id": CLIENT_ID})
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode("utf-8", "replace")[:800]
+                return self.render('<p class="err">ComfyUI rejected it:</p>'
+                                   '<pre class="note" style="white-space:pre-wrap">'
+                                   '{}</pre>'.format(html.escape(detail)))
+            except Exception as e:
+                return self.render('<p class="err">{}</p>'
+                                   .format(html.escape(str(e))))
+            LIVE.queued(str(r.get("prompt_id", "")), prompt[:200])
+            return self.redirect("/")
 
         if mode == "video":
             if not self.video_ready(mm):

@@ -4,6 +4,7 @@
 #
 #   bash l.sh wan nsfw          search - prints names, ids and base models
 #   bash l.sh 3071631 2609505   download those version ids
+#   KIND=Checkpoint bash l.sh illustrious nsfw   whole models, not adapters
 #   DEST=~/sd-webui-forge-neo/models/Lora bash l.sh 123   somewhere else
 #
 # Searching first matters because a LoRA is tied to one base model. A Klein
@@ -19,10 +20,18 @@ set -uo pipefail
 TOKEN_FILE="$HOME/.civitai-token"
 LOG="$HOME/lora-fetch.log"
 
+# A checkpoint is a whole model and belongs in another folder; putting one
+# in loras/ leaves it invisible to every graph that would use it.
+KIND="${KIND:-LORA}"
+case "$KIND" in
+  LORA|Checkpoint) ;;
+  *) echo "KIND must be LORA or Checkpoint"; exit 2;;
+esac
+SUB=$([ "$KIND" = "Checkpoint" ] && echo checkpoints || echo loras)
 if [ -n "${DEST:-}" ]; then
   LORA_DIR="$DEST"
-elif [ -d "$HOME/ComfyUI/models/loras" ]; then
-  LORA_DIR="$HOME/ComfyUI/models/loras"
+elif [ -d "$HOME/ComfyUI/models" ]; then
+  LORA_DIR="$HOME/ComfyUI/models/$SUB"
 elif [ -d "$HOME/sd-webui-forge-neo/models/Lora" ]; then
   LORA_DIR="$HOME/sd-webui-forge-neo/models/Lora"
 else
@@ -54,7 +63,7 @@ if [ "$NUMERIC" = "0" ]; then
   Q=$(printf '%s ' "$@" | sed 's/ *$//')
   printf '\n=== searching Civitai for "%s" ===\n\n' "$Q"
   curl -fsSL -H "Authorization: Bearer $TOKEN" -G \
-    --data-urlencode "query=$Q" --data-urlencode "types=LORA" \
+    --data-urlencode "query=$Q" --data-urlencode "types=$KIND" \
     --data-urlencode "limit=15" --data-urlencode "nsfw=true" \
     "https://civitai.com/api/v1/models" \
   | python3 -c '
@@ -85,6 +94,8 @@ Pick the ids whose base model matches what you run:
   Klein images   Flux.2 Klein 9B
   Qwen editing   Qwen Image Edit / Qwen-Image
   Wan video      Wan Video 2.2 (2.1 adapters do not load on 2.2)
+  making images  Illustrious / Pony / SDXL 1.0 - and a LoRA has to match
+                 the same family as the checkpoint it sits on
 
 Then:  bash $0 <id> <id> ...
 EOF

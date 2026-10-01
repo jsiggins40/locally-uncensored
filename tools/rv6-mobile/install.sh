@@ -64,6 +64,15 @@ while True:
     time.sleep(1)
 PY
 
+echo "== Tap-to-select (Segment Anything, ~2.5 GB the first time)"
+if curl -sf -m 600 -o /tmp/rv6m_seg.png -H "Content-Type: application/json" \
+     -d '{"image":"rv6m_test_img.png","points":[[256,256]],"labels":[1]}' localhost:8188/rv6m/segment; then
+  echo "SELECT: ok"
+else
+  echo "SELECT: not working (painting still works). Last log lines:"
+  tmux capture-pane -pt comfy | grep -i "rv6_mobile\|error" | tail -8
+fi
+
 echo
 read -rp "Also add the SDXL models Anteros XXXL and bigASP (about 13 GB)? [y/N] " a </dev/tty || a=n
 if [[ "$a" =~ ^[Yy] ]]; then bash <(curl -fsSL "$SRC/add-models.sh"); fi

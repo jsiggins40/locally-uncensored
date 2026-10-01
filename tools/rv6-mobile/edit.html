@@ -36,6 +36,7 @@
   #stage { position:relative; width:100%; touch-action:none; -webkit-user-select:none; user-select:none; }
   #stage canvas { display:block; width:100%; height:auto; }
   #mask { position:absolute; inset:0; opacity:.5; }
+  #pts { position:absolute; inset:0; pointer-events:none; }
   #empty { text-align:center; padding:40px 10px; color:var(--muted); border:2px dashed #444; border-radius:12px; }
   #status { min-height:1.4em; color:var(--muted); white-space:pre-wrap; word-break:break-word; }
   #status.err { color:var(--danger); }
@@ -71,21 +72,33 @@
 
 <div class="panel">
   <div class="seg" role="tablist">
-    <button id="modeMask" class="on">Edit painted area</button>
+    <button id="modeMask" class="on">Edit selected area</button>
     <button id="modeWhole">Restyle whole image</button>
   </div>
-  <div class="hint" id="modeHint" style="margin-bottom:8px">Paint over what you want changed. Everything else stays.</div>
-  <div id="empty">Choose a photo, then paint over the area you want to change.</div>
+  <div class="hint" id="modeHint" style="margin-bottom:8px">Tap or paint what you want changed. Everything else stays.</div>
+  <div id="empty">Choose a photo, then tap or paint the area you want to change.</div>
   <div id="stage" class="hidden">
     <canvas id="base"></canvas>
     <canvas id="mask"></canvas>
+    <canvas id="pts"></canvas>
   </div>
   <div id="paintTools">
   <div class="row" style="margin-top:10px">
-    <button id="paint" class="on">Paint</button>
+    <button id="select" class="on">👆 Tap select</button>
+    <button id="paint">Paint</button>
     <button id="erase">Erase</button>
+  </div>
+  <div id="selectRow">
+    <div class="row" style="margin-top:8px">
+      <button id="selAdd" class="on">＋ Include</button>
+      <button id="selSub">− Exclude</button>
+      <button id="selReset">Reset taps</button>
+    </div>
+    <div class="hint" style="margin-top:6px">Tap a person or object to select it. Tap more spots to grow the selection; switch to − Exclude and tap parts to leave out. Then fine-tune with Paint/Erase.</div>
+  </div>
+  <div class="row" style="margin-top:8px">
     <button id="undo">Undo</button>
-    <button id="clear">Clear</button>
+    <button id="clear">Clear all</button>
   </div>
   <div class="lbl"><span>Brush size</span></div>
   <div class="ctl"><button class="step" data-for="brush" data-dir="-1" aria-label="Less">−</button><input id="brush" type="range" min="5" max="120" step="1" value="40" data-nudge="5"><button class="step" data-for="brush" data-dir="1" aria-label="More">+</button><span class="val" id="brushVal"></span></div>
@@ -128,6 +141,8 @@ const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
 const clientId = Math.random().toString(36).slice(2);
 let erasing = false, drawing = false, last = null, undoStack = [], workflow = null;
+let tool = 'select', selLabel = 1, selPoints = [], selBase = null, baseUpload = null, segBusy = false, segPending = false;
+const pts = $('pts'), pctx = pts.getContext('2d');
 
 fetch('./workflow.json').then(r => r.json()).then(w => workflow = w)
   .catch(e => setStatus('Could not load workflow.json: ' + e, true));
@@ -197,10 +212,10 @@ let wholeMode = false;
 function setMode(whole) {
   wholeMode = whole;
   $('modeMask').classList.toggle('on', !whole); $('modeWhole').classList.toggle('on', whole);
-  $('paintTools').classList.toggle('hidden', whole); $('mask').classList.toggle('hidden', whole);
+  $('paintTools').classList.toggle('hidden', whole); $('mask').classList.toggle('hidden', whole); pts.classList.toggle('hidden', whole);
   $('modeHint').textContent = whole
     ? 'Changes the whole photo while keeping its layout. Lower strength keeps more of the original.'
-    : 'Paint over what you want changed. Everything else stays.';
+    : 'Tap or paint what you want changed. Everything else stays.';
   $('promptLabel').textContent = whole ? 'Describe the whole image you want' : 'What should appear in the painted area?';
   if (whole) setVal($('denoise'), 0.5); else applyPreset();
 }
@@ -264,7 +279,8 @@ function loadIntoCanvas(src) {
       // SD works on multiples of 8
       const w = Math.max(8, Math.floor(img.naturalWidth * scale / 8) * 8);
       const h = Math.max(8, Math.floor(img.naturalHeight * scale / 8) * 8);
-      base.width = mask.width = w; base.height = mask.height = h;
+      base.width = mask.width = pts.width = w; base.height = mask.height = pts.height = h;
+      baseUpload = null; selPoints = []; selBase = null; drawPts();
       bctx.drawImage(img, 0, 0, w, h);
       mctx.clearRect(0, 0, w, h);
       undoStack = [];
@@ -279,7 +295,7 @@ function loadIntoCanvas(src) {
 $('file').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   const url = URL.createObjectURL(f);
-  try { await loadIntoCanvas(url); setStatus('Paint over the area to change.'); }
+  try { await loadIntoCanvas(url); setStatus('Tap the person or object to change, or use Paint.'); }
   catch (err) { setStatus(err.message, true); }
   finally { URL.revokeObjectURL(url); e.target.value = ''; }
 });
@@ -297,18 +313,90 @@ function stroke(a, b) {
   mctx.beginPath(); mctx.moveTo(a.x, a.y); mctx.lineTo(b.x, b.y); mctx.stroke();
 }
 mask.addEventListener('pointerdown', e => {
-  e.preventDefault(); mask.setPointerCapture(e.pointerId);
+  e.preventDefault();
   undoStack.push(mctx.getImageData(0, 0, mask.width, mask.height));
   if (undoStack.length > 20) undoStack.shift();
+  if (tool === 'select') {
+    if (!selBase) selBase = mctx.getImageData(0, 0, mask.width, mask.height);
+    const p = pos(e);
+    selPoints.push({ x: p.x, y: p.y, label: selLabel });
+    drawPts(); runSegment();
+    return;
+  }
+  mask.setPointerCapture(e.pointerId);
   drawing = true; last = pos(e); stroke(last, last);
 });
+
+function drawPts() {
+  pctx.clearRect(0, 0, pts.width, pts.height);
+  const r = pts.getBoundingClientRect(), k = r.width ? pts.width / r.width : 1;
+  for (const p of selPoints) {
+    pctx.beginPath(); pctx.arc(p.x, p.y, 9 * k, 0, 2 * Math.PI);
+    pctx.fillStyle = p.label ? '#34c759' : '#ff3b30'; pctx.fill();
+    pctx.lineWidth = 3 * k; pctx.strokeStyle = '#fff'; pctx.stroke();
+  }
+}
+
+// Ask SAM on the VM for the object under the taps. Taps made while a request
+// is in flight are folded into one follow-up request with all points.
+async function runSegment() {
+  if (segBusy) { segPending = true; return; }
+  segBusy = true;
+  try {
+    if (!baseUpload) {
+      setStatus('Selecting… (the first selection loads the model, can take ~30s)');
+      baseUpload = await upload(await toBlob(base), `rv6m_${Date.now()}_sel.png`);
+    } else setStatus('Selecting…');
+    const r = await fetch('/rv6m/segment', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: baseUpload, points: selPoints.map(p => [Math.round(p.x), Math.round(p.y)]),
+                             labels: selPoints.map(p => p.label), grow: 8 }) });
+    if (r.status === 404 || r.status === 405) throw new Error('Tap select is not installed on the VM yet: run the installer command again.');
+    if (!r.ok) throw new Error('Selection failed: ' + (await r.text()).slice(0, 300));
+    const url = URL.createObjectURL(await r.blob());
+    const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = url; });
+    URL.revokeObjectURL(url);
+    if (!segPending) {
+      mctx.globalCompositeOperation = 'source-over';
+      mctx.putImageData(selBase, 0, 0);
+      mctx.drawImage(img, 0, 0, mask.width, mask.height);
+      setStatus('Selected. Tap more to adjust, or type a prompt and Generate.');
+    }
+  } catch (err) {
+    setStatus(/load failed|failed to fetch/i.test(err.message) ? 'Lost connection to the VM, tap again.' : err.message, true);
+  } finally {
+    segBusy = false;
+    if (segPending) { segPending = false; if (selPoints.length) runSegment(); }
+  }
+}
 mask.addEventListener('pointermove', e => { if (!drawing) return; e.preventDefault(); const p = pos(e); stroke(last, p); last = p; });
 for (const ev of ['pointerup', 'pointercancel']) mask.addEventListener(ev, () => { drawing = false; });
 
-$('paint').onclick = () => { erasing = false; $('paint').classList.add('on'); $('erase').classList.remove('on'); };
-$('erase').onclick = () => { erasing = true; $('erase').classList.add('on'); $('paint').classList.remove('on'); };
-$('undo').onclick = () => { const s = undoStack.pop(); if (s) mctx.putImageData(s, 0, 0); };
-$('clear').onclick = () => { undoStack.push(mctx.getImageData(0, 0, mask.width, mask.height)); mctx.clearRect(0, 0, mask.width, mask.height); };
+function setTool(t) {
+  tool = t; erasing = t === 'erase';
+  for (const id of ['select', 'paint', 'erase']) $(id).classList.toggle('on', id === t);
+  $('selectRow').classList.toggle('hidden', t !== 'select');
+  // Leaving select keeps the selection as ordinary mask; the next select session starts fresh
+  selPoints = []; selBase = null; drawPts();
+  if (t === 'select') $('selAdd').click();
+}
+$('select').onclick = () => setTool('select');
+$('paint').onclick = () => setTool('paint');
+$('erase').onclick = () => setTool('erase');
+$('selAdd').onclick = () => { selLabel = 1; $('selAdd').classList.add('on'); $('selSub').classList.remove('on'); };
+$('selSub').onclick = () => { selLabel = 0; $('selSub').classList.add('on'); $('selAdd').classList.remove('on'); };
+$('selReset').onclick = () => {
+  if (selBase) mctx.putImageData(selBase, 0, 0);
+  selPoints = []; selBase = null; drawPts(); setStatus('Taps cleared.');
+};
+$('undo').onclick = () => {
+  const s = undoStack.pop(); if (!s) return;
+  mctx.putImageData(s, 0, 0);
+  if (tool === 'select' && selPoints.length) { selPoints.pop(); if (!selPoints.length) selBase = null; drawPts(); }
+};
+$('clear').onclick = () => {
+  undoStack.push(mctx.getImageData(0, 0, mask.width, mask.height));
+  mctx.clearRect(0, 0, mask.width, mask.height); selPoints = []; selBase = null; drawPts();
+};
 
 function maskIsEmpty() {
   const d = mctx.getImageData(0, 0, mask.width, mask.height).data;
@@ -335,7 +423,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 $('go').onclick = async () => {
   if (!workflow) return setStatus('Workflow not loaded yet, reload the page.', true);
   if ($('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
-  if (!wholeMode && maskIsEmpty()) return setStatus('Paint over the area you want to change first.', true);
+  if (!wholeMode && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
   if (!$('prompt').value.trim()) return setStatus('Type a prompt or tap some tags first.', true);
   $('go').disabled = true;
   try {

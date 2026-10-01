@@ -64,6 +64,10 @@ while True:
     time.sleep(1)
 PY
 
+echo
+read -rp "Also add the SDXL models Anteros XXXL and bigASP (about 13 GB)? [y/N] " a </dev/tty || a=n
+if [[ "$a" =~ ^[Yy] ]]; then bash <(curl -fsSL "$SRC/add-models.sh"); fi
+
 echo "== Phone access"
 sudo tailscale serve --bg 8188 >/dev/null 2>&1 || true
 HOST=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)

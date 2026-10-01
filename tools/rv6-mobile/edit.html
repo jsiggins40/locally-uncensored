@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>RV6 Edit</title>
+<title>Photo Edit</title>
 <style>
   :root { --bg:#111; --panel:#1c1c1e; --text:#eee; --muted:#999; --accent:#4f8cff; --danger:#ff5a5a; }
   * { box-sizing:border-box; }
@@ -32,13 +32,16 @@
 </style>
 </head>
 <body>
-<h1>Realistic Vision V6 · Edit</h1>
+<h1>Photo Edit</h1>
 
 <div class="panel">
   <label class="btn" style="display:block;text-align:center;margin:0;color:var(--text)">
     📷 Choose photo
     <input id="file" type="file" accept="image/*" class="hidden">
   </label>
+  <label for="model">Model</label>
+  <select id="model"><option>Loading…</option></select>
+  <div class="hint" id="modelHint"></div>
   <label for="res">Working size (long side)</label>
   <select id="res">
     <option value="768">768 px (faster)</option>
@@ -97,6 +100,38 @@ let erasing = false, drawing = false, last = null, undoStack = [], workflow = nu
 
 fetch('./workflow.json').then(r => r.json()).then(w => workflow = w)
   .catch(e => setStatus('Could not load workflow.json: ' + e, true));
+
+// SD1.5 Realistic Vision uses the separate VAE file; SDXL checkpoints use their own.
+const isRV = name => /realistic_vision/i.test(name);
+const isInpaint = name => /inpaint/i.test(name);
+function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+
+function onModelChange() {
+  const m = $('model').value;
+  store('model', m);
+  if (isInpaint(m)) {
+    $('modelHint').textContent = 'Inpainting model: strength 1.0 works well.';
+    $('denoise').value = 1;
+  } else {
+    $('modelHint').textContent = 'Regular model: keep strength around 0.6–0.85 so the edit blends in.';
+    $('denoise').value = 0.75;
+  }
+  $('denoise').dispatchEvent(new Event('input'));
+  if (!isRV(m)) $('res').value = '1024';
+}
+$('model').addEventListener('change', onModelChange);
+
+fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.json()).then(info => {
+  const v = info.CheckpointLoaderSimple.input.required.ckpt_name;
+  const names = (Array.isArray(v[0]) ? v[0] : (v[1] && v[1].options) || []).filter(n => !/^Realistic_Vision_V6\.0_NV_B1_fp16/.test(n));
+  $('model').innerHTML = '';
+  for (const n of names) $('model').add(new Option(n.replace(/\.safetensors$/, ''), n));
+  const saved = recall('model');
+  const def = names.includes(saved) ? saved : names.find(isInpaint) || names[0];
+  if (def) $('model').value = def;
+  onModelChange();
+}).catch(e => setStatus('Could not list models: ' + e, true));
 
 function setStatus(msg, err) { $('status').textContent = msg; $('status').classList.toggle('err', !!err); }
 
@@ -193,6 +228,9 @@ $('go').onclick = async () => {
     const imgName = await upload(await toBlob(base), `rv6m_${ts}_img.png`);
     const maskName = await upload(await exportMask(), `rv6m_${ts}_mask.png`);
     const p = JSON.parse(JSON.stringify(workflow));
+    const model = $('model').value;
+    p['1'].inputs.ckpt_name = model;
+    if (!isRV(model)) { p['6'].inputs.vae = ['1', 2]; p['8'].inputs.vae = ['1', 2]; delete p['2']; }
     p['5'].inputs.image = imgName;
     p['10'].inputs.image = maskName;
     p['3'].inputs.text = $('prompt').value.trim() + ', RAW photo, natural lighting, detailed skin, dslr, film grain';

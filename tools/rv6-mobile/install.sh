@@ -16,7 +16,7 @@ curl -fsSL "$SRC/workflow.json" -o "$DEST/web/workflow.json"
 
 echo "== Restarting ComfyUI"
 tmux kill-session -t comfy 2>/dev/null || true
-tmux new -d -s comfy "cd $COMFY && venv/bin/python main.py --listen 127.0.0.1 --port 8188 --highvram"
+tmux new -d -s comfy "cd $COMFY && venv/bin/python main.py --listen 127.0.0.1 --port 8188"
 for i in $(seq 1 90); do
   curl -sf -o /dev/null localhost:8188/extensions/rv6_mobile/edit.html && break
   sleep 1

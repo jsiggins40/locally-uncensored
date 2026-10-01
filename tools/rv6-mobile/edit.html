@@ -49,10 +49,6 @@
   .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
   .chip { padding:7px 11px; border-radius:16px; background:#2a2a2c; border:1px solid #3a3a3c; font-size:14px; }
   .chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .lora { background:#2a2a2c; border-radius:10px; padding:10px; margin-top:8px; }
-  .lora .head { display:flex; align-items:center; gap:10px; }
-  .lora .head span { flex:1; word-break:break-word; }
-  .lora .head button { flex:none; min-width:64px; }
   .tagcat { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin-top:10px; }
 </style>
 </head>
@@ -125,9 +121,13 @@
   <div class="hint" id="denoiseHint">1.0 replaces the area completely. 0.5–0.7 keeps more of the original.</div>
   </div>
   <div id="loraBox" class="hidden">
-    <div class="lbl"><span>Extra LoRAs</span></div>
-    <div class="hint">Switch on to use. Trigger words are added to your instruction automatically.</div>
-    <div id="loraList"></div>
+    <label for="loraSel">LoRA</label>
+    <select id="loraSel"></select>
+    <div id="loraTune">
+      <div class="lbl"><span>LoRA strength</span></div>
+      <div class="ctl"><button class="step" data-for="loraW" data-dir="-1" aria-label="Less">−</button><input id="loraW" type="range" min="0" max="1.5" step="0.05" value="1" data-nudge="0.1"><button class="step" data-for="loraW" data-dir="1" aria-label="More">+</button><span class="val" id="loraWVal"></span></div>
+      <div class="hint" id="loraWords"></div>
+    </div>
   </div>
   <div id="tuneBox">
   <div class="lbl"><span>Steps</span></div>
@@ -303,39 +303,35 @@ async function info(node) {
   if (qwen) warmUp();
 })();
 
-function loraState() { try { return JSON.parse(recall('loras') || '{}'); } catch (e) { return {}; } }
+// One extra LoRA at a time, chosen from a dropdown; strength remembered per LoRA.
+function loraState() { try { return JSON.parse(recall('lora1') || '{}'); } catch (e) { return {}; } }
+function saveLora() {
+  const st = loraState(); st.file = $('loraSel').value;
+  st.w = st.w || {}; if (st.file) st.w[st.file] = +$('loraW').value;
+  store('lora1', JSON.stringify(st));
+}
+function showLora() {
+  const l = qwen.extras.find(x => x.file === $('loraSel').value), st = loraState();
+  $('loraTune').classList.toggle('hidden', !l);
+  if (!l) return;
+  setVal($('loraW'), (st.w && st.w[l.file]) ?? 1);
+  $('loraWords').textContent = l.words.length ? 'Trigger words (added automatically): ' + l.words.join(', ') : 'No trigger words';
+}
 function renderLoras() {
-  const st = loraState(), list = $('loraList'); list.innerHTML = '';
-  for (const l of qwen.extras) {
-    const cur = st[l.file] || { on: false, w: 1 };
-    const row = document.createElement('div'); row.className = 'lora';
-    const id = 'lw' + Math.random().toString(36).slice(2, 8);
-    row.innerHTML = `<div class="head"><span></span><button></button></div>
-      <div class="ctl"><button class="step" data-dir="-1">−</button><input type="range" id="${id}" min="0" max="1.5" step="0.05" data-nudge="0.1"><button class="step" data-dir="1">+</button><span class="val" id="${id}Val"></span></div>
-      <div class="hint"></div>`;
-    row.querySelector('.head span').textContent = l.label;
-    row.querySelector('.hint').textContent = l.words.length ? 'Trigger words: ' + l.words.join(', ') : 'No trigger words';
-    const btn = row.querySelector('.head button'), r = row.querySelector('input');
-    FMT[id] = v => (+v).toFixed(2); r.value = cur.w;
-    const save = () => { const s2 = loraState(); s2[l.file] = { on: btn.classList.contains('on'), w: +r.value }; store('loras', JSON.stringify(s2)); };
-    const show = on => { btn.classList.toggle('on', on); btn.textContent = on ? 'On' : 'Off'; row.querySelector('.ctl').style.opacity = on ? 1 : .4; };
-    show(cur.on);
-    btn.onclick = () => { show(!btn.classList.contains('on')); save(); };
-    list.append(row);
-    paint(r);
-    r.addEventListener('input', () => { paint(r); save(); });
-    const fromX = e => { const b = r.getBoundingClientRect(), t = 15;
-      setVal(r, (+r.max) * Math.min(1, Math.max(0, (e.clientX - b.left - t) / (b.width - 2 * t)))); save(); };
-    r.addEventListener('pointerdown', e => { e.preventDefault(); r.setPointerCapture(e.pointerId); fromX(e); });
-    r.addEventListener('pointermove', e => { if (r.hasPointerCapture(e.pointerId)) fromX(e); });
-    for (const sb of row.querySelectorAll('button.step'))
-      sb.onclick = () => { setVal(r, +r.value + sb.dataset.dir * r.dataset.nudge); save(); };
-  }
+  const sel = $('loraSel'); sel.innerHTML = '';
+  sel.add(new Option('None', ''));
+  for (const l of qwen.extras) sel.add(new Option(l.label, l.file));
+  const st = loraState();
+  sel.value = qwen.extras.some(l => l.file === st.file) ? st.file : '';
+  showLora();
   $('loraBox').classList.toggle('hidden', mode !== 'instruct' || !qwen.extras.length);
 }
+$('loraSel').addEventListener('change', () => { showLora(); saveLora(); });
+$('loraW').addEventListener('input', saveLora);
+for (const b of document.querySelectorAll('button.step[data-for=loraW]')) b.addEventListener('pointerup', saveLora);
 function activeLoras() {
-  const st = loraState();
-  return (qwen ? qwen.extras : []).filter(l => st[l.file] && st[l.file].on && st[l.file].w > 0).map(l => ({ ...l, w: st[l.file].w }));
+  const l = qwen && qwen.extras.find(x => x.file === $('loraSel').value);
+  return l && +$('loraW').value > 0 ? [{ ...l, w: +$('loraW').value }] : [];
 }
 
 // Loading Qwen (20-40 GB) onto the GPU is most of the first edit's time.
@@ -405,7 +401,7 @@ fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.json()).then(info =
 
 function setStatus(msg, err) { $('status').textContent = msg; $('status').classList.toggle('err', !!err); }
 
-const FMT = { brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
+const FMT = { loraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
 function paint(r) {
   const pct = (r.value - r.min) / (r.max - r.min) * 100;
   r.style.setProperty('--pct', pct + '%');

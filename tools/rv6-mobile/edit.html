@@ -251,7 +251,11 @@ $('modeInstruct').onclick = () => setMode('instruct');
 $('modeMask').onclick = () => setMode('mask');
 $('modeWhole').onclick = () => setMode('whole');
 
-function onModelChange() { store('model', $('model').value); applyPreset(); if (mode === 'whole') setVal($('denoise'), 0.5); }
+function onModelChange() {
+  store('model', $('model').value);
+  if (mode === 'instruct') return;  // Describe edit has its own fixed settings; the checkpoint list loading must not overwrite them
+  applyPreset(); if (mode === 'whole') setVal($('denoise'), 0.5);
+}
 
 // Find the Qwen-Image-Edit files ComfyUI has, if any
 function optionsOf(info, node, input) {

@@ -19,7 +19,20 @@
   .row > * { flex:1; }
   label { display:block; color:var(--muted); font-size:14px; margin:10px 0 4px; }
   textarea, select { width:100%; font:inherit; color:var(--text); background:#2a2a2c; border:1px solid #3a3a3c; border-radius:10px; padding:10px; }
-  input[type=range] { width:100%; }
+  .ctl { display:flex; align-items:center; gap:10px; margin-top:4px; }
+  .ctl .step { flex:none; width:44px; height:44px; padding:0; font-size:22px; line-height:44px; border-radius:22px; }
+  .ctl .val { flex:none; min-width:52px; text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }
+  .ctl input[type=range] { flex:1; min-width:0; }
+  .lbl { display:flex; justify-content:space-between; color:var(--muted); font-size:14px; margin:14px 0 0; }
+  input[type=range] { -webkit-appearance:none; appearance:none; width:100%; height:44px; background:transparent;
+                      touch-action:none; margin:0; --pct:50%; }
+  input[type=range]::-webkit-slider-runnable-track { height:8px; border-radius:4px;
+    background:linear-gradient(to right, var(--accent) var(--pct), #3a3a3c var(--pct)); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:30px; height:30px; margin-top:-11px;
+    border-radius:50%; background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.5); }
+  input[type=range]::-moz-range-track { height:8px; border-radius:4px; background:#3a3a3c; }
+  input[type=range]::-moz-range-progress { height:8px; border-radius:4px; background:var(--accent); }
+  input[type=range]::-moz-range-thumb { width:30px; height:30px; border:0; border-radius:50%; background:#fff; }
   #stage { position:relative; width:100%; touch-action:none; -webkit-user-select:none; user-select:none; }
   #stage canvas { display:block; width:100%; height:auto; }
   #mask { position:absolute; inset:0; opacity:.5; }
@@ -61,24 +74,26 @@
     <button id="undo">Undo</button>
     <button id="clear">Clear</button>
   </div>
-  <label for="brush">Brush size</label>
-  <input id="brush" type="range" min="5" max="120" value="40">
+  <div class="lbl"><span>Brush size</span></div>
+  <div class="ctl"><button class="step" data-for="brush" data-dir="-1" aria-label="Less">−</button><input id="brush" type="range" min="5" max="120" step="1" value="40" data-nudge="5"><button class="step" data-for="brush" data-dir="1" aria-label="More">+</button><span class="val" id="brushVal"></span></div>
 </div>
 
 <div class="panel">
   <label for="prompt" style="margin-top:0">What should appear in the painted area?</label>
   <textarea id="prompt" rows="3" placeholder="e.g. red silk dress"></textarea>
-  <label for="denoise">Change strength: <span id="denoiseVal">1.00</span></label>
-  <input id="denoise" type="range" min="0.3" max="1" step="0.05" value="1">
-  <div class="hint">1.0 replaces the area completely. 0.5–0.7 keeps more of the original.</div>
+  <div class="lbl"><span>Change strength</span></div>
+  <div class="ctl"><button class="step" data-for="denoise" data-dir="-1" aria-label="Less">−</button><input id="denoise" type="range" min="0.3" max="1" step="0.01" value="1" data-nudge="0.05"><button class="step" data-for="denoise" data-dir="1" aria-label="More">+</button><span class="val" id="denoiseVal"></span></div>
+  <div class="hint" id="denoiseHint">1.0 replaces the area completely. 0.5–0.7 keeps more of the original.</div>
+  <div class="lbl"><span>Steps</span></div>
+  <div class="ctl"><button class="step" data-for="steps" data-dir="-1" aria-label="Less">−</button><input id="steps" type="range" min="10" max="60" step="1" value="28" data-nudge="1"><button class="step" data-for="steps" data-dir="1" aria-label="More">+</button><span class="val" id="stepsVal"></span></div>
+  <div class="hint" id="stepsHint">More steps = more detail, slower. Past ~40 rarely helps.</div>
+  <div class="lbl"><span>Prompt strength (CFG)</span></div>
+  <div class="ctl"><button class="step" data-for="cfg" data-dir="-1" aria-label="Less">−</button><input id="cfg" type="range" min="1" max="12" step="0.1" value="6" data-nudge="0.5"><button class="step" data-for="cfg" data-dir="1" aria-label="More">+</button><span class="val" id="cfgVal"></span></div>
+  <div class="hint" id="cfgHint">Higher follows the prompt harder; too high looks harsh and plastic.</div>
+  <div class="row" style="margin-top:12px"><button id="resetPreset">Reset to model defaults</button></div>
   <details style="margin-top:10px">
-    <summary class="hint">Advanced</summary>
-    <label for="neg">Avoid</label>
-    <textarea id="neg" rows="2">deformed, blurry, lowres, bad anatomy, bad hands, cartoon, 3d, painting, watermark, text</textarea>
-    <label for="steps">Steps: <span id="stepsVal">28</span></label>
-    <input id="steps" type="range" min="10" max="50" value="28">
-    <label for="cfg">Prompt strength (CFG): <span id="cfgVal">6.0</span></label>
-    <input id="cfg" type="range" min="2" max="12" step="0.5" value="6">
+    <summary class="hint">Things to avoid</summary>
+    <textarea id="neg" rows="2" style="margin-top:6px">deformed, blurry, lowres, bad anatomy, bad hands, cartoon, 3d, painting, watermark, text</textarea>
   </details>
 </div>
 
@@ -107,19 +122,30 @@ const isInpaint = name => /inpaint/i.test(name);
 function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 
-function onModelChange() {
-  const m = $('model').value;
-  store('model', m);
-  if (isInpaint(m)) {
-    $('modelHint').textContent = 'Inpainting model: strength 1.0 works well.';
-    $('denoise').value = 1;
-  } else {
-    $('modelHint').textContent = 'Regular model: keep strength around 0.6–0.85 so the edit blends in.';
-    $('denoise').value = 0.75;
-  }
-  $('denoise').dispatchEvent(new Event('input'));
-  if (!isRV(m)) $('res').value = '1024';
+// Starting points per model; each model's Civitai page has the author's own advice.
+const PRESETS = [
+  { match: /realistic_vision.*inpaint/i, label: 'Realistic Vision inpainting',
+    steps: 28, cfg: 6, denoise: 1.0, res: '1024',
+    hint: 'Best for replacing an area completely.' },
+  { match: /realistic_vision/i, label: 'Realistic Vision',
+    steps: 28, cfg: 6, denoise: 0.7, res: '1024', hint: 'Regular SD1.5 model: keep strength 0.6–0.8.' },
+  { match: /anteros/i, label: 'Anteros XXXL',
+    steps: 30, cfg: 4.5, denoise: 0.75, res: '1024',
+    hint: 'SDXL photoreal. CFG above ~6 starts to look plastic.' },
+  { match: /bigasp/i, label: 'bigASP',
+    steps: 35, cfg: 4, denoise: 0.75, res: '1024',
+    hint: 'SDXL photoreal. Burns easily at high CFG; keep 3.5–5.' },
+  { match: /./, label: 'SDXL model',
+    steps: 30, cfg: 5, denoise: 0.75, res: '1024', hint: 'Regular model: strength 0.6–0.85 blends best.' },
+];
+function applyPreset() {
+  const m = $('model').value, p = PRESETS.find(p => p.match.test(m));
+  setVal($('steps'), p.steps); setVal($('cfg'), p.cfg); setVal($('denoise'), p.denoise);
+  $('res').value = p.res;
+  $('modelHint').textContent = `${p.label} defaults: ${p.steps} steps · CFG ${p.cfg} · strength ${p.denoise.toFixed(2)}. ${p.hint}`;
 }
+function onModelChange() { store('model', $('model').value); applyPreset(); }
+$('resetPreset').onclick = applyPreset;
 $('model').addEventListener('change', onModelChange);
 
 fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.json()).then(info => {
@@ -135,8 +161,34 @@ fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.json()).then(info =
 
 function setStatus(msg, err) { $('status').textContent = msg; $('status').classList.toggle('err', !!err); }
 
-for (const [id, fmt] of [['denoise', v => (+v).toFixed(2)], ['steps', v => v], ['cfg', v => (+v).toFixed(1)]]) {
-  $(id).addEventListener('input', () => $(id + 'Val').textContent = fmt($(id).value));
+const FMT = { brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
+function paint(r) {
+  const pct = (r.value - r.min) / (r.max - r.min) * 100;
+  r.style.setProperty('--pct', pct + '%');
+  $(r.id + 'Val').textContent = FMT[r.id](r.value);
+}
+function setVal(r, v) {
+  const step = +r.step || 1, min = +r.min, max = +r.max;
+  v = Math.min(max, Math.max(min, Math.round((v - min) / step) * step + min));
+  r.value = +v.toFixed(4);
+  paint(r);
+}
+for (const r of document.querySelectorAll('input[type=range]')) {
+  paint(r);
+  r.addEventListener('input', () => paint(r));
+  // Drag from anywhere on the track (iOS only moves the thumb if you hit it exactly)
+  const fromX = e => { const b = r.getBoundingClientRect(), t = 15;
+    const f = Math.min(1, Math.max(0, (e.clientX - b.left - t) / (b.width - 2 * t)));
+    setVal(r, +r.min + f * (r.max - r.min)); };
+  r.addEventListener('pointerdown', e => { e.preventDefault(); r.setPointerCapture(e.pointerId); fromX(e); });
+  r.addEventListener('pointermove', e => { if (r.hasPointerCapture(e.pointerId)) fromX(e); });
+}
+for (const b of document.querySelectorAll('button.step')) {
+  const r = $(b.dataset.for), nudge = () => setVal(r, +r.value + b.dataset.dir * r.dataset.nudge);
+  let timer;
+  const stop = () => { clearTimeout(timer); clearInterval(timer); };
+  b.addEventListener('pointerdown', e => { e.preventDefault(); nudge(); timer = setTimeout(() => timer = setInterval(nudge, 90), 400); });
+  for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, stop);
 }
 
 function loadIntoCanvas(src) {

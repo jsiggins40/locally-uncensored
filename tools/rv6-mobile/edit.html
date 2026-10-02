@@ -43,6 +43,9 @@
   #result img { width:100%; border-radius:10px; display:block; }
   .hint { color:var(--muted); font-size:13px; }
   .hidden { display:none !important; }
+  #variants { display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; margin-top:8px; }
+  #variants img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; opacity:.6; }
+  #variants img.on { opacity:1; outline:2px solid var(--accent); }
   #recentList { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; margin-top:8px; }
   #recentList img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; }
   .seg { display:flex; background:#2a2a2c; border-radius:10px; padding:3px; gap:3px; margin-bottom:10px; }
@@ -146,16 +149,21 @@
   </div>
   <details style="margin-top:10px">
     <summary class="hint">Things to avoid</summary>
-    <textarea id="neg" rows="2" style="margin-top:6px">deformed, blurry, lowres, bad anatomy, bad hands, cartoon, 3d, painting, watermark, text</textarea>
+    <textarea id="neg" rows="2" style="margin-top:6px">deformed, bad anatomy, bad hands, extra fingers, fused fingers, missing fingers, extra limbs, blurry, lowres, cartoon, 3d, watermark, text</textarea>
   </details>
 </div>
 
+<div class="panel" style="padding:10px 12px">
+  <label for="count" style="margin-top:0">Variations (different random results to pick from)</label>
+  <select id="count"><option value="1">1</option><option value="2">2</option><option value="4">4</option></select>
+</div>
 <button id="go" class="primary">Generate</button>
 <button id="stop" class="hidden" style="width:100%;margin-top:8px;padding:14px;background:var(--danger);color:#fff;font-weight:600">■ Stop</button>
 <p id="status"></p>
 
 <div id="result" class="panel hidden">
   <img id="out" alt="Result">
+  <div id="variants"></div>
   <p class="hint">Long-press the image to save it to Photos.</p>
   <button id="again" style="width:100%">Keep editing this result</button>
 </div>
@@ -376,10 +384,12 @@ function applySpeed() {
     ? 'Fast: small changes (clothes, colours, objects). For poses or big changes use Quality.'
     : 'Quality: follows bigger changes like poses and layout. About 3-4x slower.';
 }
+$('count').value = recall('count') || '1';
+$('count').addEventListener('change', () => store('count', $('count').value));
 $('fastBtn').onclick = () => { quality = false; store('quality', '0'); applySpeed(); };
 $('qualBtn').onclick = () => { quality = true; store('quality', '1'); applySpeed(); };
 
-function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = []) {
+function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '') {
   const enc = text => qwen.plus
     ? { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image1: ['5', 0] } }
     : { class_type: 'TextEncodeQwenImageEdit', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image: ['5', 0] } };
@@ -388,7 +398,7 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = 
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: qwen.clip, type: 'qwen_image' } },
     '13': { class_type: 'VAELoader', inputs: { vae_name: qwen.vae } },
     '5': { class_type: 'LoadImage', inputs: { image: imgName } },
-    '3': enc(instruction), '4': enc(''),
+    '3': enc(instruction), '4': enc(negative),
     '6': { class_type: 'VAEEncode', inputs: { pixels: ['5', 0], vae: ['13', 0] } },
     '12': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
     '7': { class_type: 'KSampler', inputs: { model: ['12', 0], positive: ['3', 0], negative: ['4', 0], latent_image: ['6', 0],
@@ -617,7 +627,7 @@ $('go').onclick = async () => {
   if (mode === 'mask' && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
   if (!$('prompt').value.trim()) return setStatus(mode === 'instruct' ? 'Type what you want changed first.' : 'Type a prompt or tap some tags first.', true);
   if (mode === 'instruct' && !qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
-  $('go').disabled = true; stopRequested = false; currentJob = null;
+  $('go').disabled = true; stopRequested = false; currentJobs = [];
   $('stop').classList.remove('hidden');
   try {
     const ts = Date.now();
@@ -630,7 +640,9 @@ $('go').onclick = async () => {
       const extras = activeLoras();
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
       const instruction = [$('prompt').value.trim(), ...words].join(', ');
-      p = buildInstructWorkflow(imgName, instruction, seed, +$('steps').value, +$('cfg').value, extras);
+      // The negative only has an effect when CFG > 1, i.e. in Quality mode
+      p = buildInstructWorkflow(imgName, instruction, seed, +$('steps').value, +$('cfg').value, extras,
+                                fastActive() ? '' : $('neg').value);
     } else if (mode === 'whole') {
       // Inpainting checkpoints need a mask; restyling uses the regular Realistic Vision instead
       if (isInpaint(model)) {
@@ -653,56 +665,80 @@ $('go').onclick = async () => {
       Object.assign(p['7'].inputs, { seed, steps: +$('steps').value, cfg: +$('cfg').value, denoise: +$('denoise').value });
     }
     setStatus('Queued…');
-    const r = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                           body: JSON.stringify({ prompt: p, client_id: clientId }) });
-    if (!r.ok) throw new Error('ComfyUI rejected the job (' + r.status + '): ' + (await r.text()).slice(0, 600));
-    const id = currentJob = (await r.json()).prompt_id;
-    store('pendingJob', JSON.stringify({ id, t0: Date.now() }));
-    if (stopRequested) await cancelJob(id);
-    await waitForJob(id, Date.now());
+    const n = +$('count').value || 1, ids = [];
+    for (let i = 0; i < n; i++) {
+      const q = JSON.parse(JSON.stringify(p));
+      q['7'].inputs.seed = (seed + i * 7919) % 2 ** 32;
+      const r = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                             body: JSON.stringify({ prompt: q, client_id: clientId }) });
+      if (!r.ok) throw new Error('ComfyUI rejected the job (' + r.status + '): ' + (await r.text()).slice(0, 600));
+      ids.push((await r.json()).prompt_id);
+      currentJobs = ids.slice();
+    }
+    const t0 = Date.now();
+    store('pendingJob', JSON.stringify({ ids, t0 }));
+    if (stopRequested) for (const id of ids) await cancelJob(id);
+    await waitForJobs(ids, t0);
   } catch (err) {
     const msg = /load failed|failed to fetch|networkerror/i.test(err.message)
       ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.'
       : err.message;
     setStatus(msg, true);
   } finally {
-    $('go').disabled = false; currentJob = null;
+    $('go').disabled = false; currentJobs = [];
     $('stop').classList.add('hidden');
   }
 };
 
-function showResult(o) {
-  $('out').src = `/api/view?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}&type=${o.type || 'output'}`;
+const viewUrl = o => `/api/view?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}&type=${o.type || 'output'}`;
+function showResult(o, variants = []) {
+  $('out').src = viewUrl(o);
+  const box = $('variants'); box.innerHTML = '';
+  if (variants.length > 1) for (const v of variants) {
+    const im = document.createElement('img'); im.src = viewUrl(v);
+    im.classList.toggle('on', viewUrl(v) === viewUrl(o));
+    im.onclick = () => { $('out').src = im.src; for (const x of box.children) x.classList.toggle('on', x === im); };
+    box.append(im);
+  }
   $('result').classList.remove('hidden');
 }
 
-// Waits for a queued job and shows its image. Survives dropped connections,
-// and the job id is kept in localStorage so a page that Safari reloaded
-// (after switching apps) picks the same job up again.
-async function waitForJob(id, t0) {
+// Waits for queued jobs (one per variation) and shows their images as they
+// finish. Survives dropped connections, and the ids are kept in
+// localStorage so a page that Safari reloaded (after switching apps)
+// picks the same jobs up again.
+async function waitForJobs(ids, t0) {
+  const done = {};
   try {
     for (;;) {
       await sleep(1000);
       if (stopRequested) { setStatus('Stopped.'); return; }
       const secs = Math.round((Date.now() - t0) / 1000);
-      if (secs > 900) throw new Error('Timed out after 15 minutes.');
-      setStatus('Generating… ' + secs + 's');
-      let h;
-      try { h = await (await fetch('/api/history/' + id)).json(); }
-      catch (e) { setStatus('Generating… ' + secs + 's (reconnecting to the VM…)'); continue; }
-      const job = h[id]; if (!job) continue;
-      if (job.status && job.status.status_str === 'error') {
-        if ((job.status.messages || []).some(x => x[0] === 'execution_interrupted')) { setStatus('Stopped.'); return; }
-        const m = (job.status.messages || []).find(x => x[0] === 'execution_error');
-        throw new Error('Generation failed: ' + (m ? m[1].exception_message : JSON.stringify(job.status).slice(0, 400)));
+      if (secs > 900 * ids.length) throw new Error('Timed out.');
+      const count = ids.length > 1 ? ` (${Object.keys(done).length}/${ids.length} done)` : '';
+      setStatus('Generating… ' + secs + 's' + count);
+      for (const id of ids.filter(i => !(i in done))) {
+        let h;
+        try { h = await (await fetch('/api/history/' + id)).json(); }
+        catch (e) { setStatus('Generating… ' + secs + 's (reconnecting to the VM…)'); break; }
+        const job = h[id]; if (!job) continue;
+        if (job.status && job.status.status_str === 'error') {
+          if ((job.status.messages || []).some(x => x[0] === 'execution_interrupted')) { setStatus('Stopped.'); return; }
+          const m = (job.status.messages || []).find(x => x[0] === 'execution_error');
+          throw new Error('Generation failed: ' + (m ? m[1].exception_message : JSON.stringify(job.status).slice(0, 400)));
+        }
+        const imgs = job.outputs && job.outputs['9'] && job.outputs['9'].images;
+        if (!imgs || !imgs.length) continue;
+        done[id] = imgs[0];
+        const got = ids.filter(i => i in done).map(i => done[i]);
+        showResult(got[0], got);
+        if (got.length === 1) $('result').scrollIntoView({ behavior: 'smooth' });
       }
-      const imgs = job.outputs && job.outputs['9'] && job.outputs['9'].images;
-      if (!imgs || !imgs.length) continue;
-      showResult(imgs[0]);
-      setStatus('Done in ' + secs + 's.');
-      $('result').scrollIntoView({ behavior: 'smooth' });
-      loadRecent();
-      return;
+      if (Object.keys(done).length === ids.length) {
+        setStatus('Done in ' + secs + 's.' + (ids.length > 1 ? ' Tap a thumbnail to compare.' : ''));
+        loadRecent();
+        return;
+      }
     }
   } finally {
     store('pendingJob', '');
@@ -713,12 +749,13 @@ async function waitForJob(id, t0) {
 // (called at the end of the script, once every variable it uses exists)
 async function resumePending() {
   let pj = null; try { pj = JSON.parse(recall('pendingJob') || 'null'); } catch (e) {}
-  if (!pj || !pj.id || Date.now() - pj.t0 > 15 * 60 * 1000) return;
-  $('go').disabled = true; currentJob = pj.id; $('stop').classList.remove('hidden');
+  const ids = pj && (pj.ids || (pj.id ? [pj.id] : []));
+  if (!ids || !ids.length || Date.now() - pj.t0 > 15 * 60 * 1000 * ids.length) return;
+  $('go').disabled = true; currentJobs = ids.slice(); $('stop').classList.remove('hidden');
   setStatus('Picking up your last edit…');
-  try { await waitForJob(pj.id, pj.t0); }
+  try { await waitForJobs(ids, pj.t0); }
   catch (err) { setStatus(err.message, true); }
-  finally { $('go').disabled = false; currentJob = null; $('stop').classList.add('hidden'); }
+  finally { $('go').disabled = false; currentJobs = []; $('stop').classList.add('hidden'); }
 }
 
 // Recent results, newest first, so nothing is lost if the page is closed mid-edit
@@ -746,7 +783,7 @@ loadRecent();
 // Stop: drop the job if it is still waiting, interrupt it if it is running.
 // Only interrupts when our job is the running one, so a warm-up or someone
 // else's job is never cut short by mistake.
-let stopRequested = false, currentJob = null;
+let stopRequested = false, currentJobs = [];
 async function cancelJob(id) {
   try {
     await fetch('/api/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -760,7 +797,7 @@ async function cancelJob(id) {
 $('stop').onclick = async () => {
   stopRequested = true;
   setStatus('Stopping…');
-  if (currentJob) await cancelJob(currentJob);
+  for (const id of currentJobs) await cancelJob(id);
 };
 
 $('again').onclick = async () => {

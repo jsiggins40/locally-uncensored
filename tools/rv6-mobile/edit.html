@@ -122,6 +122,10 @@
   <div class="ctl"><button class="step" data-for="denoise" data-dir="-1" aria-label="Less">−</button><input id="denoise" type="range" min="0.3" max="1" step="0.01" value="1" data-nudge="0.05"><button class="step" data-for="denoise" data-dir="1" aria-label="More">+</button><span class="val" id="denoiseVal"></span></div>
   <div class="hint" id="denoiseHint">1.0 replaces the area completely. 0.5–0.7 keeps more of the original.</div>
   </div>
+  <div id="speedBox" class="hidden">
+    <div class="seg" style="margin-top:12px"><button id="fastBtn">⚡ Fast</button><button id="qualBtn">✨ Quality</button></div>
+    <div class="hint" id="speedHint"></div>
+  </div>
   <div id="loraBox" class="hidden">
     <label for="loraSel">LoRA</label>
     <select id="loraSel"></select>
@@ -254,14 +258,14 @@ function setMode(m) {
   const masked = m === 'mask', inst = m === 'instruct';
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst);
+  $('speedBox').classList.toggle('hidden', !inst || !(qwen && qwen.lora));
   $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));
   const [hint, label, ph] = MODE_TEXT[m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label; $('prompt').placeholder = ph;
   if (inst) {
     $('prompt').value = '';
     if (!qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
-    setVal($('steps'), qwen.lora ? 8 : 30); setVal($('cfg'), qwen.lora ? 1 : 2.5);
-    $('modeHint').textContent = hint + (qwen.lora ? ' (fast 8-step mode)' : '');
+    applySpeed();
   } else if (m === 'whole') { applyPreset(); setVal($('denoise'), 0.5); }
   else applyPreset();
   syncChips();
@@ -358,6 +362,23 @@ async function warmUp() {
   } catch (e) { /* best effort */ }
 }
 
+// Fast = 8-step Lightning LoRA at CFG 1: quick, but it changes as little as
+// it can, so pose and layout changes often don't happen. Quality = the
+// model's own sampling (30 steps, CFG 4): about 3-4x slower, follows
+// structural instructions much better.
+let quality = recall('quality') === '1';
+function fastActive() { return !!(qwen && qwen.lora) && !quality; }
+function applySpeed() {
+  if (!qwen) return;
+  $('fastBtn').classList.toggle('on', fastActive()); $('qualBtn').classList.toggle('on', !fastActive());
+  setVal($('steps'), fastActive() ? 8 : 30); setVal($('cfg'), fastActive() ? 1 : 4);
+  $('speedHint').textContent = fastActive()
+    ? 'Fast: small changes (clothes, colours, objects). For poses or big changes use Quality.'
+    : 'Quality: follows bigger changes like poses and layout. About 3-4x slower.';
+}
+$('fastBtn').onclick = () => { quality = false; store('quality', '0'); applySpeed(); };
+$('qualBtn').onclick = () => { quality = true; store('quality', '1'); applySpeed(); };
+
 function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = []) {
   const enc = text => qwen.plus
     ? { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image1: ['5', 0] } }
@@ -376,7 +397,7 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = 
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
   };
   let last = ['1', 0];
-  if (qwen.lora) {
+  if (fastActive()) {
     p['11'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: last, lora_name: qwen.lora, strength_model: 1 } };
     last = ['11', 0];
   }

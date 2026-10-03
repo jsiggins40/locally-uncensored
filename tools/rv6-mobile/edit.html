@@ -174,7 +174,7 @@
   <details style="margin-top:6px">
     <summary class="hint">Cloud model</summary>
     <input id="cloudModel" style="width:100%;margin-top:6px" autocapitalize="off" autocorrect="off" spellcheck="false">
-    <div class="hint">Atlas Cloud model name. Leave empty for the default.</div>
+    <div class="hint">Atlas Cloud model name. Leave empty for Seedream 5.0 Pro Edit.</div>
   </details>
 </div>
 <div class="panel" style="padding:10px 12px">
@@ -279,7 +279,7 @@ $('prompt').value = 'RAW photo, natural light'; syncChips();
 // 'mask' (inpaint the selected area), 'whole' (img2img restyle)
 let mode = 'mask', qwen = null, maskPrompt = null;
 const MODE_TEXT = {
-  cloud: ['Seedream 5.0 on Atlas Cloud: describe the change like in ✨ Describe edit. Sharper, bigger results (about 2048 px) in 10-40s, a few cents each. Photos are sent to Atlas.',
+  cloud: ['Seedream 5.0 Pro on Atlas Cloud: describe the change like in ✨ Describe edit. 2K results, up to 10 photos, paid per image. Photos are sent to Atlas.',
           'What should change?', 'e.g. change the background to a beach at sunset'],
   instruct: ['Say what to change and the model edits the photo, e.g. "make her hair red" or "put her on a beach at sunset".',
              'What should change?', 'e.g. change the background to a beach at sunset'],
@@ -909,7 +909,7 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1) {
       }
       if (Object.keys(done).length === jobs.length) {
         const cloud = Math.max(...Object.values(done).map(d => d.seconds || 0));
-        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\nSeedream · ${size.replace('*', '×')}` +
+        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\n${/pro/i.test(cloudModel()) ? 'Seedream Pro · 2K' : 'Seedream · ' + size.replace('*', '×')}` +
                   (nPhotos > 1 ? ` · ${nPhotos} photos` : '') + (jobs.length > 1 ? '\nTap a thumbnail to compare.' : ''));
         loadRecent();
         return;

@@ -4,6 +4,7 @@
 import asyncio
 import io
 import logging
+import math
 import os
 import threading
 
@@ -90,7 +91,9 @@ async def rv6m_segment(request):
 # shows up like a local edit. The API key stays on this VM: ~/.atlascloud_key
 # or the ATLASCLOUD_API_KEY environment variable. It never reaches the page.
 ATLAS = "https://api.atlascloud.ai/api/v1/model"
-CLOUD_MODEL = os.environ.get("RV6M_CLOUD_MODEL", "bytedance/seedream-v5.0-lite/edit")
+CLOUD_MODEL = os.environ.get("RV6M_CLOUD_MODEL", "bytedance/seedream-v5.0-pro/edit")
+# Pro takes a resolution tier plus an aspect ratio instead of Lite's exact "W*H" size
+RATIOS = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"]
 KEY_FILE = os.path.expanduser("~/.atlascloud_key")
 
 
@@ -149,9 +152,14 @@ def _cloud(names, prompt, size, model):
         path = folder_paths.get_annotated_filepath(n)
         mime = "image/jpeg" if path.lower().endswith((".jpg", ".jpeg")) else "image/png"
         images.append(f"data:{mime};base64," + base64.b64encode(open(path, "rb").read()).decode())
-    sub = _atlas("POST", ATLAS + "/generateImage", key,
-                 {"model": model, "prompt": prompt, "images": images, "size": size,
-                  "enable_base64_output": False})
+    body = {"model": model, "prompt": prompt, "images": images, "enable_base64_output": False}
+    if "pro" in model.lower():
+        w, h = (int(v) for v in size.split("*"))
+        body["resolution"] = "2k"
+        body["aspect_ratio"] = min(RATIOS, key=lambda r: abs(math.log(w / h) - math.log(int(r.split(":")[0]) / int(r.split(":")[1]))))
+    else:
+        body["size"] = size
+    sub = _atlas("POST", ATLAS + "/generateImage", key, body)
     pid = _find(_data(sub), ["id", "prediction_id", "request_id"])
     if not pid:
         raise RuntimeError("Atlas reply had no job id: " + str(sub)[:600])

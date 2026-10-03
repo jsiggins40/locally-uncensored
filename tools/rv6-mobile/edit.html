@@ -179,6 +179,9 @@
 </div>
 <button id="go" class="primary">Generate</button>
 <button id="stop" class="hidden" style="width:100%;margin-top:8px;padding:14px;background:var(--danger);color:#fff;font-weight:600">■ Stop</button>
+<div id="offline" class="hidden" style="position:fixed;left:12px;right:12px;top:10px;z-index:9;background:#3a2a00;color:#ffd27a;border-radius:10px;padding:10px 12px;font-size:14px">
+  Reconnecting to the VM… <span id="offlineWhy"></span>
+</div>
 <p id="status"></p>
 
 <div id="result" class="panel hidden">
@@ -657,10 +660,39 @@ async function exportMask() {
   const x = c.getContext('2d'); x.fillStyle = '#000'; x.fillRect(0, 0, c.width, c.height); x.drawImage(mask, 0, 0);
   return toBlob(c);
 }
+// iOS pauses Safari and the Tailscale tunnel when you switch apps; for a
+// few seconds after coming back, requests fail. Wait for the VM instead of
+// failing: ping until it answers (up to 60s) before doing anything.
+async function serverUp() {
+  try { const r = await fetch('/api/system_stats', { cache: 'no-store' }); return r.ok; } catch (e) { return false; }
+}
+let waitingForServer = null;
+function ensureServer() {
+  if (!waitingForServer) waitingForServer = (async () => {
+    if (await serverUp()) return true;
+    $('offline').classList.remove('hidden');
+    $('offlineWhy').textContent = '';
+    for (let i = 0; i < 30; i++) {
+      await sleep(2000);
+      if (await serverUp()) { $('offline').classList.add('hidden'); return true; }
+      if (i === 5) $('offlineWhy').textContent = 'Check the Tailscale app says Connected.';
+    }
+    $('offlineWhy').textContent = 'Still can\'t reach it. Open the Tailscale app, then come back.';
+    return false;
+  })().finally(() => { waitingForServer = null; });
+  return waitingForServer;
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') ensureServer(); });
+window.addEventListener('pageshow', () => ensureServer());
+
 async function upload(blob, name) {
   const fd = new FormData();
   fd.append('image', blob, name); fd.append('type', 'input'); fd.append('overwrite', 'true');
-  const r = await fetch('/api/upload/image', { method: 'POST', body: fd });
+  let r;
+  for (let attempt = 0; ; attempt++) {  // uploads overwrite, so retrying is safe
+    try { r = await fetch('/api/upload/image', { method: 'POST', body: fd }); break; }
+    catch (e) { if (attempt >= 2 || !(await ensureServer())) throw e; }
+  }
   if (!r.ok) throw new Error('Upload failed (' + r.status + '): ' + (await r.text()).slice(0, 300));
   const j = await r.json();
   return j.subfolder ? j.subfolder + '/' + j.name : j.name;
@@ -677,6 +709,8 @@ $('go').onclick = async () => {
   $('stop').classList.remove('hidden');
   try {
     const ts = Date.now();
+    setStatus('Connecting…');
+    if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
     setStatus('Uploading…');
     const imgName = await upload(await toBlob(base), `rv6m_${ts}_img.png`);
     const seed = Math.floor(Math.random() * 2 ** 32);

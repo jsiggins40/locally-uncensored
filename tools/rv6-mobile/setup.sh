@@ -43,6 +43,24 @@ fi
 venv/bin/pip install -q -r requirements.txt
 venv/bin/python -c "import torch; print('PyTorch sees:', torch.cuda.get_device_name(0))"
 
+# Hyperstack GPU VMs come with a large local /ephemeral disk. Keep the models
+# there so the faster bf16 Qwen (41 GB) fits; it is wiped on stop/hibernate,
+# but a spot VM loses everything on reclaim anyway, and a reboot keeps it.
+if [ ! -L models ] && mountpoint -q /ephemeral 2>/dev/null; then
+  eph_free=$(df --output=avail -BG /ephemeral | tail -1 | tr -dc 0-9)
+  if [ "${eph_free:-0}" -ge 150 ]; then
+    echo "Putting models on /ephemeral (${eph_free} GB free)"
+    sudo chown "$(id -un):$(id -gn)" /ephemeral
+    if [ -d /ephemeral/models ]; then rm -rf models; else mv models /ephemeral/models; fi
+    ln -s /ephemeral/models models
+  fi
+fi
+if [ -L models ] && [ ! -e models ]; then
+  # /ephemeral was wiped (VM stopped): start an empty models folder there again
+  echo "/ephemeral was wiped; recreating the models folder"
+  rm models; git checkout -q models; sudo chown "$(id -un):$(id -gn)" /ephemeral; mv models /ephemeral/models; ln -s /ephemeral/models models
+fi
+
 step "4/7 Edit page (restarts ComfyUI, tests tap-to-select)"
 RV6M_NO_PROMPT=1 bash <(curl -fsSL "$SRC/install.sh") || echo "(page installer reported a problem above; continuing)"
 

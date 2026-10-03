@@ -12,11 +12,13 @@ echo "== Atlas Cloud API key"
 if [ -s "$KEY_FILE" ]; then
   echo "A key is already saved. Paste a new one to replace it, or just press Enter to keep it."
 else
-  echo "Get it at atlascloud.ai -> Console -> API Keys. Paste it below (nothing shows while you paste)."
+  echo "Get it at atlascloud.ai -> Console -> API Keys, then paste it below and press Enter."
 fi
-read -rsp "Atlas key: " key </dev/tty || key=""
-echo
-key="$(printf '%s' "$key" | tr -d '[:space:]')"
+read -rp "Atlas key: " key </dev/tty || key=""
+# Drop spaces and the bracketed-paste markers ([200~ ... [201~) some terminals add
+key="$(printf '%s' "$key" | sed 's/\x1b\[20[01]~//g; s/\[20[01]~//g' | tr -d '[:space:][:cntrl:]')"
+clear 2>/dev/null || true  # keep the key off the screen
+[ -n "$key" ] && echo "Got a key ending in ...${key: -4} (${#key} characters)"
 if [ -n "$key" ]; then
   printf '%s' "$key" > "$KEY_FILE"; chmod 600 "$KEY_FILE"; echo "Saved to $KEY_FILE"
 elif [ ! -s "$KEY_FILE" ]; then

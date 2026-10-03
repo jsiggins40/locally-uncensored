@@ -384,7 +384,8 @@ async function warmUp() {
     const c = document.createElement('canvas'); c.width = c.height = 256;
     const x = c.getContext('2d'); x.fillStyle = '#808080'; x.fillRect(0, 0, 256, 256);
     const name = await upload(await toBlob(c), 'rv6m_warmup.png');
-    const p = buildInstructWorkflow(name, 'warm up', 1, 1, qwen.lora ? 1 : 2.5);
+    // Same LoRAs as a real edit: switching LoRA sets re-patches all 20B weights, which is slow
+    const p = buildInstructWorkflow(name, 'warm up', 1, 1, fastActive() ? 1 : 4, activeLoras());
     p['9'] = { class_type: 'PreviewImage', inputs: { images: ['8', 0] } };  // nothing saved to the gallery
     await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                  body: JSON.stringify({ prompt: p, client_id: clientId }) });
@@ -754,7 +755,7 @@ function showResult(o, variants = []) {
 // localStorage so a page that Safari reloaded (after switching apps)
 // picks the same jobs up again.
 async function waitForJobs(ids, t0) {
-  const done = {};
+  const done = {}, gpuMs = {};
   try {
     for (;;) {
       await sleep(1000);
@@ -776,12 +777,21 @@ async function waitForJobs(ids, t0) {
         const imgs = job.outputs && job.outputs['9'] && job.outputs['9'].images;
         if (!imgs || !imgs.length) continue;
         done[id] = imgs[0];
+        const ts = Object.fromEntries((job.status.messages || []).map(m => [m[0], m[1] && m[1].timestamp]));
+        if (ts.execution_start && ts.execution_success) gpuMs[id] = ts.execution_success - ts.execution_start;
         const got = ids.filter(i => i in done).map(i => done[i]);
         showResult(got[0], got);
         if (got.length === 1) $('result').scrollIntoView({ behavior: 'smooth' });
       }
       if (Object.keys(done).length === ids.length) {
-        setStatus('Done in ' + secs + 's.' + (ids.length > 1 ? ' Tap a thumbnail to compare.' : ''));
+        const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
+        const what = mode === 'instruct'
+          ? `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
+            (activeLoras().length ? ' · LoRA' : '') + (hasSecond() ? ' · 2 photos' : '')
+          : `${$('steps').value} steps · ${base.width}×${base.height}`;
+        setStatus(`Done in ${secs}s. GPU time ${gpu ? gpu.toFixed(1) + 's' : '?'}` +
+                  (ids.length > 1 ? ` for ${ids.length} images` : '') + `, waiting/loading ${gpu ? Math.max(0, secs - gpu).toFixed(0) + 's' : '?'}.` +
+                  `\n${what}` + (ids.length > 1 ? '\nTap a thumbnail to compare.' : ''));
         loadRecent();
         return;
       }

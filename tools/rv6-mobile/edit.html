@@ -90,6 +90,26 @@
     <canvas id="mask"></canvas>
     <canvas id="pts"></canvas>
   </div>
+  <div id="secondBox" class="hidden" style="margin-top:10px">
+    <div id="secondEmpty">
+      <label class="btn" style="display:block;text-align:center;margin:0;color:var(--text)">
+        ➕ Add a 2nd photo (optional)
+        <input id="file2" type="file" accept="image/*" class="hidden">
+      </label>
+      <div class="hint" style="margin-top:6px">Combine people or things from two photos. In your instruction call them
+        <b>picture 1</b> (the main photo above) and <b>picture 2</b>.</div>
+    </div>
+    <div id="secondFull" class="hidden">
+      <div class="lbl" style="margin-top:0"><span>Picture 2</span></div>
+      <div class="row" style="align-items:flex-start">
+        <canvas id="second" style="flex:none;width:96px;border-radius:8px"></canvas>
+        <div>
+          <div class="hint">e.g. "the woman from picture 2 stands next to the man in picture 1, both smiling, same lighting as picture 1"</div>
+          <button id="removeSecond" style="margin-top:8px">Remove picture 2</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div id="paintTools">
   <div class="row" style="margin-top:10px">
     <button id="select" class="on">👆 Tap select</button>
@@ -264,6 +284,7 @@ function setMode(m) {
   mode = m; store('mode', m); setStatus('');
   for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole']]) $(id).classList.toggle('on', k === m);
   const masked = m === 'mask', inst = m === 'instruct';
+  $('secondBox').classList.toggle('hidden', !inst || !(qwen && qwen.plus));
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst);
   $('speedBox').classList.toggle('hidden', !inst || !(qwen && qwen.lora));
@@ -389,15 +410,39 @@ $('count').addEventListener('change', () => store('count', $('count').value));
 $('fastBtn').onclick = () => { quality = false; store('quality', '0'); applySpeed(); };
 $('qualBtn').onclick = () => { quality = true; store('quality', '1'); applySpeed(); };
 
-function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '') {
+// ---- Optional second photo for Describe edit (Qwen-Image-Edit Plus)
+const hasSecond = () => !$('secondFull').classList.contains('hidden');
+$('file2').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const url = URL.createObjectURL(f), img = new Image();
+  img.onload = () => {
+    const c = $('second'), scale = Math.min(1, 1024 / Math.max(img.naturalWidth, img.naturalHeight));
+    c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(url); e.target.value = '';
+    $('secondEmpty').classList.add('hidden'); $('secondFull').classList.remove('hidden');
+    $('prompt').placeholder = 'e.g. the woman from picture 2 stands next to the man in picture 1';
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); setStatus('Could not read that photo', true); };
+  img.src = url;
+});
+$('removeSecond').onclick = () => {
+  $('secondFull').classList.add('hidden'); $('secondEmpty').classList.remove('hidden');
+  $('prompt').placeholder = MODE_TEXT.instruct[2];
+};
+
+function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '', img2Name = null) {
+  // The Plus encoder takes up to three images; the output keeps picture 1's size and layout
   const enc = text => qwen.plus
-    ? { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image1: ['5', 0] } }
+    ? { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image1: ['5', 0],
+                                                               ...(img2Name ? { image2: ['15', 0] } : {}) } }
     : { class_type: 'TextEncodeQwenImageEdit', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image: ['5', 0] } };
   const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: qwen.unet, weight_dtype: 'default' } },
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: qwen.clip, type: 'qwen_image' } },
     '13': { class_type: 'VAELoader', inputs: { vae_name: qwen.vae } },
     '5': { class_type: 'LoadImage', inputs: { image: imgName } },
+    ...(img2Name ? { '15': { class_type: 'LoadImage', inputs: { image: img2Name } } } : {}),
     '3': enc(instruction), '4': enc(negative),
     '6': { class_type: 'VAEEncode', inputs: { pixels: ['5', 0], vae: ['13', 0] } },
     '12': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
@@ -641,8 +686,9 @@ $('go').onclick = async () => {
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
       const instruction = [$('prompt').value.trim(), ...words].join(', ');
       // The negative only has an effect when CFG > 1, i.e. in Quality mode
+      const img2Name = hasSecond() ? await upload(await toBlob($('second')), `rv6m_${ts}_img2.png`) : null;
       p = buildInstructWorkflow(imgName, instruction, seed, +$('steps').value, +$('cfg').value, extras,
-                                fastActive() ? '' : $('neg').value);
+                                fastActive() ? '' : $('neg').value, img2Name);
     } else if (mode === 'whole') {
       // Inpainting checkpoints need a mask; restyling uses the regular Realistic Vision instead
       if (isInpaint(model)) {

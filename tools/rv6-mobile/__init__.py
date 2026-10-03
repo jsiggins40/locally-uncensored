@@ -95,6 +95,9 @@ CLOUD_MODEL = os.environ.get("RV6M_CLOUD_MODEL", "bytedance/seedream-v5.0-pro/ed
 # Pro takes a resolution tier plus an aspect ratio instead of Lite's exact "W*H" size
 RATIOS = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"]
 KEY_FILE = os.path.expanduser("~/.atlascloud_key")
+# Atlas sits behind Cloudflare, which refuses Python's default "Python-urllib"
+# user agent with "error code: 1010"; send an ordinary one instead.
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 rv6-mobile"
 
 
 def _cloud_key():
@@ -132,7 +135,8 @@ def _atlas(method, url, key, body=None):
     import urllib.error
     import urllib.request
     req = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body else None,
-                                 headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+                                 headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                                          "Accept": "application/json", "User-Agent": UA})
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.load(r)
@@ -181,7 +185,7 @@ def _cloud(names, prompt, size, model):
     if not isinstance(url, str):
         raise RuntimeError("Atlas reply had no image: " + str(res)[:600])
     if url.startswith("http"):
-        with urllib.request.urlopen(url, timeout=120) as r:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=120) as r:
             data = r.read()
     else:
         data = base64.b64decode(url.split(",", 1)[-1])

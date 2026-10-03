@@ -210,6 +210,15 @@ let erasing = false, drawing = false, last = null, undoStack = [], workflow = nu
 let tool = 'select', selLabel = 1, selPoints = [], selBase = null, baseUpload = null, segBusy = false, segPending = false;
 const pts = $('pts'), pctx = pts.getContext('2d');
 const full = document.createElement('canvas');  // the photo at up to 2048 px, for Seedream
+// Seedream gets the untouched original file when there is one (like Atlas's own
+// playground), not a resized and re-compressed copy
+let mainOrig = null;
+const SENDABLE = /^image\/(jpeg|png|webp)$/;
+const extOf = f => ({ 'image/png': 'png', 'image/webp': 'webp' })[f.type] || 'jpg';
+async function cloudUpload(orig, canvas, name) {
+  if (orig && SENDABLE.test(orig.type) && orig.size <= 10e6) return upload(orig, `${name}.${extOf(orig)}`);
+  return upload(await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95)), `${name}.jpg`);
+}
 
 fetch('./workflow.json').then(r => r.json()).then(w => workflow = w)
   .catch(e => setStatus('Could not load workflow.json: ' + e, true));
@@ -496,7 +505,7 @@ $('file2').addEventListener('change', async e => {
   const room = maxMore() - more.length;
   if (files.length > room) setStatus(`Only ${room} more fit${mode === 'cloud' ? ' (10 photos in total)' : ''}; added the first ${room}.`, true);
   for (const f of files.slice(0, Math.max(0, room))) {
-    try { more.push(await readPhoto(f)); } catch (err) { setStatus(err.message, true); }
+    try { const c = await readPhoto(f); c.orig = f; more.push(c); } catch (err) { setStatus(err.message, true); }
   }
   renderMore();
 });
@@ -596,7 +605,7 @@ function loadIntoCanvas(src) {
       const w = Math.max(16, Math.floor(img.naturalWidth * scale / 16) * 16);
       const h = Math.max(16, Math.floor(img.naturalHeight * scale / 16) * 16);
       base.width = mask.width = pts.width = w; base.height = mask.height = pts.height = h;
-      baseUpload = null; selPoints = []; selBase = null; drawPts();
+      baseUpload = null; selPoints = []; selBase = null; drawPts(); mainOrig = null;
       bctx.drawImage(img, 0, 0, w, h);
       const fs = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
       full.width = Math.round(img.naturalWidth * fs); full.height = Math.round(img.naturalHeight * fs);
@@ -614,7 +623,7 @@ function loadIntoCanvas(src) {
 $('file').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   const url = URL.createObjectURL(f);
-  try { await loadIntoCanvas(url); setStatus(mode === 'mask' ? 'Tap the person or object to change, or use Paint.' : 'Now type what to change.'); }
+  try { await loadIntoCanvas(url); mainOrig = f; setStatus(mode === 'mask' ? 'Tap the person or object to change, or use Paint.' : 'Now type what to change.'); }
   catch (err) { setStatus(err.message, true); }
   finally { URL.revokeObjectURL(url); e.target.value = ''; }
 });
@@ -859,10 +868,10 @@ async function cloudGo() {
     setStatus('Connecting…');
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
     setStatus('Uploading…');
-    const images = [await upload(await toJpeg(full), `rv6m_${ts}_cloud1.jpg`)];
+    const images = [await cloudUpload(mainOrig, full, `rv6m_${ts}_cloud1`)];
     for (const [i, c] of usedMore().entries()) {
       setStatus(`Uploading… ${i + 2}/${usedMore().length + 1}`);
-      images.push(await upload(await toJpeg(c), `rv6m_${ts}_cloud${i + 2}.jpg`));
+      images.push(await cloudUpload(c.orig, c, `rv6m_${ts}_cloud${i + 2}`));
     }
     const n = +$('count').value || 1, jobs = [], size = cloudSize();
     for (let i = 0; i < n; i++) {
@@ -901,7 +910,7 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1) {
         catch (e) { setStatus('Seedream is working… ' + secs + 's (reconnecting to the VM…)'); break; }
         if (j.status === 'error') throw new Error('Seedream failed: ' + j.error);
         if (j.status !== 'done') continue;
-        done[id] = { filename: j.filename, subfolder: '', type: 'output', seconds: j.seconds };
+        done[id] = { filename: j.filename, subfolder: '', type: 'output', seconds: j.seconds, sent: j.sent };
         addCloudRecent(j.filename);
         const got = jobs.filter(i => i in done).map(i => done[i]);
         showResult(got[0], got);
@@ -909,8 +918,8 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1) {
       }
       if (Object.keys(done).length === jobs.length) {
         const cloud = Math.max(...Object.values(done).map(d => d.seconds || 0));
-        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\n${/pro/i.test(cloudModel()) ? 'Seedream Pro · 2K' : 'Seedream · ' + size.replace('*', '×')}` +
-                  (nPhotos > 1 ? ` · ${nPhotos} photos` : '') + (jobs.length > 1 ? '\nTap a thumbnail to compare.' : ''));
+        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\n${sentSummary(Object.values(done)[0].sent, size)}` +
+                  (jobs.length > 1 ? '\nTap a thumbnail to compare.' : ''));
         loadRecent();
         return;
       }
@@ -918,6 +927,13 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1) {
   } finally {
     store('pendingCloud', '');
   }
+}
+// What the VM actually sent to Atlas, so results can be compared with Atlas's own playground
+function sentSummary(sent, size) {
+  if (!sent) return 'Seedream · ' + size.replace('*', '×');
+  const kb = (sent.images || []).map(x => +(x.match(/\((\d+) KB\)/) || [0, 0])[1]);
+  return `${String(sent.model).replace(/^bytedance\//, '')} · ${sent.resolution || String(sent.size || '').replace('*', '×')}` +
+         ` · sent ${kb.length} photo${kb.length > 1 ? 's' : ''} (${kb.map(k => k >= 1024 ? (k / 1024).toFixed(1) + ' MB' : k + ' KB').join(', ')})`;
 }
 // Cloud results aren't in ComfyUI's history, so Recent remembers them here
 function cloudRecent() { try { return JSON.parse(recall('cloudRecent') || '[]'); } catch (e) { return []; } }

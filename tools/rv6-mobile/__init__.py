@@ -4,7 +4,6 @@
 import asyncio
 import io
 import logging
-import math
 import os
 import threading
 
@@ -92,8 +91,7 @@ async def rv6m_segment(request):
 # or the ATLASCLOUD_API_KEY environment variable. It never reaches the page.
 ATLAS = "https://api.atlascloud.ai/api/v1/model"
 CLOUD_MODEL = os.environ.get("RV6M_CLOUD_MODEL", "bytedance/seedream-v5.0-pro/edit")
-# Pro takes a resolution tier plus an aspect ratio instead of Lite's exact "W*H" size
-RATIOS = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"]
+# Pro takes a resolution tier instead of Lite's exact "W*H" size
 KEY_FILE = os.path.expanduser("~/.atlascloud_key")
 # Atlas sits behind Cloudflare, which refuses Python's default "Python-urllib"
 # user agent with "error code: 1010"; send an ordinary one instead.
@@ -144,6 +142,19 @@ def _atlas(method, url, key, body=None):
         raise RuntimeError(f"Atlas said {e.code}: {e.read().decode(errors='replace')[:600]}")
 
 
+LOG_FILE = os.path.expanduser("~/rv6m_cloud_last.json")
+
+
+def _save_log(log):
+    """The last cloud request (without the photo data) and Atlas's replies, for troubleshooting."""
+    import json
+    try:
+        with open(LOG_FILE, "w") as f:
+            json.dump(log, f, indent=1, default=str)
+    except OSError:
+        pass
+
+
 def _cloud(names, prompt, size, model):
     import base64
     import time
@@ -154,30 +165,43 @@ def _cloud(names, prompt, size, model):
     images = []
     for n in names:
         path = folder_paths.get_annotated_filepath(n)
-        mime = "image/jpeg" if path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        low = path.lower()
+        mime = "image/png" if low.endswith(".png") else "image/webp" if low.endswith(".webp") else "image/jpeg"
         images.append(f"data:{mime};base64," + base64.b64encode(open(path, "rb").read()).decode())
     body = {"model": model, "prompt": prompt, "images": images, "enable_base64_output": False}
     if "pro" in model.lower():
-        w, h = (int(v) for v in size.split("*"))
+        # No aspect_ratio: like Atlas's playground, let the model keep picture 1's shape
         body["resolution"] = "2k"
-        body["aspect_ratio"] = min(RATIOS, key=lambda r: abs(math.log(w / h) - math.log(int(r.split(":")[0]) / int(r.split(":")[1]))))
     else:
         body["size"] = size
-    sub = _atlas("POST", ATLAS + "/generateImage", key, body)
+    sent = {k: v for k, v in body.items() if k != "images"}
+    sent["images"] = [f"{n} ({len(i) * 3 // 4 // 1024} KB)" for n, i in zip(names, images)]
+    log = {"sent": sent}
+    try:
+        sub = _atlas("POST", ATLAS + "/generateImage", key, body)
+        log["submit_reply"] = sub
+    except Exception as e:
+        log["error"] = str(e)
+        raise
+    finally:
+        _save_log(log)
     pid = _find(_data(sub), ["id", "prediction_id", "request_id"])
     if not pid:
         raise RuntimeError("Atlas reply had no job id: " + str(sub)[:600])
     t = time.time()
     while True:
         res = _data(_atlas("GET", f"{ATLAS}/prediction/{pid}", key))
+        log["last_reply"] = res
         status = str(_find(res, ["status"]) or "").lower()
         if status in ("completed", "succeeded", "success", "done"):
             break
         if status in ("failed", "error", "canceled", "cancelled"):
+            _save_log(log)
             raise RuntimeError("Atlas job failed: " + str(_find(res, ["error", "message"]) or res)[:600])
         if time.time() - t > 300:
             raise RuntimeError("Atlas took over 5 minutes; last reply: " + str(res)[:300])
         time.sleep(1.5)
+    _save_log(log)
     out = _find(res, ["outputs", "output", "images", "url"])
     url = out[0] if isinstance(out, list) else out
     if isinstance(url, dict):
@@ -193,7 +217,7 @@ def _cloud(names, prompt, size, model):
     name = f"rv6_cloud_{int(time.time() * 1000)}{ext}"
     with open(os.path.join(folder_paths.get_output_directory(), name), "wb") as f:
         f.write(data)
-    return name
+    return {"filename": name, "sent": sent}
 
 
 _jobs = {}  # job id -> {"status": "running"|"done"|"error", "filename", "error", "seconds"}
@@ -203,8 +227,8 @@ async def _run_cloud(jid, names, prompt, size, model):
     loop = asyncio.get_running_loop()
     t = loop.time()
     try:
-        name = await loop.run_in_executor(None, _cloud, names, prompt, size, model)
-        _jobs[jid].update(status="done", filename=name)
+        out = await loop.run_in_executor(None, _cloud, names, prompt, size, model)
+        _jobs[jid].update(status="done", **out)
     except Exception as e:
         logging.exception("[rv6_mobile] cloud edit failed")
         _jobs[jid].update(status="error", error=str(e))

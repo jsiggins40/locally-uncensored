@@ -72,7 +72,8 @@ else
 fi
 
 echo
-read -rp "Also add the SDXL models Anteros XXXL and bigASP (about 13 GB)? [y/N] " a </dev/tty || a=n
+a=n
+[ -n "${RV6M_NO_PROMPT:-}" ] || read -rp "Also add the SDXL models Anteros XXXL and bigASP (about 13 GB)? [y/N] " a </dev/tty || a=n
 if [[ "$a" =~ ^[Yy] ]]; then bash <(curl -fsSL "$SRC/add-models.sh"); fi
 
 echo "== Phone access"

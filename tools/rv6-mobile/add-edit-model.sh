@@ -15,7 +15,7 @@ from huggingface_hub import HfApi, hf_hub_download
 api = HfApi()
 want = os.environ.get("QWEN_PRECISION", "fp8")
 need_gb = 55 if want == "bf16" else 35
-free_gb = shutil.disk_usage(".").free / 1e9
+free_gb = shutil.disk_usage(os.path.realpath("models")).free / 1e9  # models may live on another disk (symlink)
 print(f"== Free disk: {free_gb:.0f} GB")
 if free_gb < need_gb:
     sys.exit(f"Need about {need_gb} GB free for the edit model. Delete some checkpoints first.")

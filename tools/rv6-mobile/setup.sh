@@ -47,7 +47,7 @@ step "4/7 Edit page (restarts ComfyUI, tests tap-to-select)"
 RV6M_NO_PROMPT=1 bash <(curl -fsSL "$SRC/install.sh") || echo "(page installer reported a problem above; continuing)"
 
 step "5/7 Qwen-Image-Edit (20-40 GB download)"
-free_gb=$(df --output=avail -BG "$COMFY" | tail -1 | tr -dc 0-9)
+free_gb=$(df --output=avail -BG "$(readlink -f "$COMFY/models")" | tail -1 | tr -dc 0-9)
 have_edit=$(ls models/diffusion_models/ 2>/dev/null | grep -i qwen_image_edit || true)
 if [ -n "$have_edit" ]; then
   echo "Already installed: $have_edit"

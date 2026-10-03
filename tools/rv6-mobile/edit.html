@@ -170,16 +170,15 @@
 </div>
 
 <div id="cloudBox" class="panel hidden" style="padding:10px 12px">
-  <div class="seg"><button id="takesBtn">🎲 Separate takes</button><button id="seriesBtn">🎞 Series</button></div>
   <div class="hint" id="cloudHint"></div>
   <details style="margin-top:6px">
     <summary class="hint">Cloud model</summary>
     <input id="cloudModel" style="width:100%;margin-top:6px" autocapitalize="off" autocorrect="off" spellcheck="false">
-    <div class="hint">Atlas Cloud model name. Leave empty for the default shown in grey.</div>
+    <div class="hint">Atlas Cloud model name. Leave empty for Seedream 5.0 Pro Edit.</div>
   </details>
 </div>
 <div class="panel" style="padding:10px 12px">
-  <label for="count" style="margin-top:0" id="countLabel">Variations (different random results to pick from)</label>
+  <label for="count" style="margin-top:0">Variations (different random results to pick from)</label>
   <select id="count"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="6">6</option></select>
 </div>
 <button id="go" class="primary">Generate</button>
@@ -305,7 +304,6 @@ function setMode(m) {
   $('res').previousElementSibling.classList.toggle('hidden', cloud);
   $('neg').closest('details').classList.toggle('hidden', cloud);
   $('cloudBox').classList.toggle('hidden', !cloud);
-  applySeries();
   $('speedBox').classList.toggle('hidden', !inst || !(qwen && qwen.lora));
   $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));
   const [hint, label, ph] = MODE_TEXT[m];
@@ -330,32 +328,15 @@ $('modeCloud').onclick = () => setMode('cloud');
 
 // Seedream on Atlas Cloud: the button only shows once the VM has a key
 let cloudCfg = { configured: false, model: '' };
-// Separate takes = Pro, one request per result. Series = Lite's sequential
-// edit: one request returns a matching set (same people across the images).
-let series = recall('cloudSeries') === '1';
-const isSeries = () => mode === 'cloud' && series;
-const cloudModel = () => {
-  const typed = $('cloudModel').value.trim();
-  return typed && /sequential/i.test(typed) === series ? typed : (series ? cloudCfg.seqModel : cloudCfg.model);
-};
-function applySeries() {
-  $('takesBtn').classList.toggle('on', !series); $('seriesBtn').classList.toggle('on', series);
-  $('cloudModel').placeholder = (series ? cloudCfg.seqModel : cloudCfg.model) || '';
-  const name = (cloudModel() || '').replace(/^bytedance\//, '');
-  $('cloudHint').textContent = series
-    ? `One request makes a matching set: the same people and look across every image (${name}; sequential only exists for Lite). Say in your prompt what each image should show. Paid per image.`
-    : `Independent results to pick from (${name}). Each one is a separate paid image.`;
-  $('countLabel').textContent = isSeries() ? 'Images in the series' : 'Variations (different random results to pick from)';
-}
-$('takesBtn').onclick = () => { series = false; store('cloudSeries', '0'); applySeries(); };
-$('seriesBtn').onclick = () => { series = true; store('cloudSeries', '1'); applySeries(); };
+const cloudModel = () => $('cloudModel').value.trim() || cloudCfg.model;
 $('cloudModel').value = recall('cloudModel') || '';
 $('cloudModel').addEventListener('change', () => store('cloudModel', $('cloudModel').value.trim()));
 const cloudReady = fetch('/rv6m/cloud/status').then(r => r.ok ? r.json() : null).then(c => {
   if (!c) return;
   cloudCfg = c;
   $('modeCloud').classList.toggle('hidden', !c.configured);
-  applySeries();
+  $('cloudModel').placeholder = c.model;
+  $('cloudHint').textContent = 'Runs on Atlas Cloud (' + c.model.replace(/^bytedance\//, '') + '), not on your GPU. Each variation is a separate paid image.';
 }).catch(() => {});
 
 function onModelChange() {
@@ -883,24 +864,17 @@ async function cloudGo() {
       setStatus(`Uploading… ${i + 2}/${usedMore().length + 1}`);
       images.push(await upload(await toJpeg(c), `rv6m_${ts}_cloud${i + 2}.jpg`));
     }
-    const jobs = [], size = cloudSize(), sr = series;
-    let n = +$('count').value || 1, prompt = $('prompt').value.trim();
-    if (sr) {
-      if (n < 2) n = 4;  // a series of one is just an edit
-      // Seedream's sequential mode wants the count in the prompt too
-      if (!new RegExp('\\b' + n + '\\b').test(prompt)) prompt = `Generate a series of ${n} images. ${prompt}`;
-    }
-    for (let i = 0; i < (sr ? 1 : n); i++) {
+    const n = +$('count').value || 1, jobs = [], size = cloudSize();
+    for (let i = 0; i < n; i++) {
       const r = await fetch('/rv6m/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images, prompt, size, model: cloudModel(), series: sr ? n : 0 }) });
+        body: JSON.stringify({ images, prompt: $('prompt').value.trim(), size, model: cloudModel() }) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || 'The VM refused the cloud edit (' + r.status + ')');
       jobs.push(j.job);
     }
     const t0 = Date.now();
-    const label = sr ? `Seedream series · ${n} images` : /pro/i.test(cloudModel()) ? 'Seedream Pro · 2K' : 'Seedream · ' + size.replace('*', '×');
-    store('pendingCloud', JSON.stringify({ jobs, t0, label, nPhotos: images.length }));
-    await waitForCloud(jobs, t0, label, images.length);
+    store('pendingCloud', JSON.stringify({ jobs, t0, size, nPhotos: images.length }));
+    await waitForCloud(jobs, t0, size, images.length);
   } catch (err) {
     setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
       ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.' : err.message, true);
@@ -910,7 +884,7 @@ async function cloudGo() {
 }
 // Cloud jobs run on the VM even while Safari is in the background; this
 // only asks the VM how they are doing, so switching apps loses nothing.
-async function waitForCloud(jobs, t0, label, nPhotos = 1) {
+async function waitForCloud(jobs, t0, size, nPhotos = 1) {
   const done = {};
   try {
     for (;;) {
@@ -927,16 +901,16 @@ async function waitForCloud(jobs, t0, label, nPhotos = 1) {
         catch (e) { setStatus('Seedream is working… ' + secs + 's (reconnecting to the VM…)'); break; }
         if (j.status === 'error') throw new Error('Seedream failed: ' + j.error);
         if (j.status !== 'done') continue;
-        done[id] = (j.filenames || [j.filename]).map(f => ({ filename: f, subfolder: '', type: 'output', seconds: j.seconds }));
-        for (const f of [...(j.filenames || [j.filename])].reverse()) addCloudRecent(f);
-        const got = jobs.filter(i => i in done).flatMap(i => done[i]);
+        done[id] = { filename: j.filename, subfolder: '', type: 'output', seconds: j.seconds };
+        addCloudRecent(j.filename);
+        const got = jobs.filter(i => i in done).map(i => done[i]);
         showResult(got[0], got);
         if (got.length === 1) $('result').scrollIntoView({ behavior: 'smooth' });
       }
       if (Object.keys(done).length === jobs.length) {
-        const all = Object.values(done).flat(), cloud = Math.max(...all.map(d => d.seconds || 0));
-        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\n${label}` +
-                  (nPhotos > 1 ? ` · ${nPhotos} photos` : '') + (all.length > 1 ? '\nTap a thumbnail to compare.' : ''));
+        const cloud = Math.max(...Object.values(done).map(d => d.seconds || 0));
+        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\n${/pro/i.test(cloudModel()) ? 'Seedream Pro · 2K' : 'Seedream · ' + size.replace('*', '×')}` +
+                  (nPhotos > 1 ? ` · ${nPhotos} photos` : '') + (jobs.length > 1 ? '\nTap a thumbnail to compare.' : ''));
         loadRecent();
         return;
       }
@@ -1024,7 +998,7 @@ async function resumePending() {
   if (pc && pc.jobs && pc.jobs.length && Date.now() - pc.t0 < 400 * 1000) {
     $('go').disabled = true; $('stop').classList.remove('hidden'); stopRequested = false;
     setStatus('Picking up your Seedream edit…');
-    try { await waitForCloud(pc.jobs, pc.t0, pc.label || 'Seedream', pc.nPhotos || 1); }
+    try { await waitForCloud(pc.jobs, pc.t0, pc.size || '', pc.nPhotos || 1); }
     catch (err) { setStatus(err.message, true); }
     finally { $('go').disabled = false; $('stop').classList.add('hidden'); }
     return;

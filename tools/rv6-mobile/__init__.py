@@ -93,8 +93,6 @@ async def rv6m_segment(request):
 ATLAS = "https://api.atlascloud.ai/api/v1/model"
 CLOUD_MODEL = os.environ.get("RV6M_CLOUD_MODEL", "bytedance/seedream-v5.0-pro/edit")
 # Pro takes a resolution tier plus an aspect ratio instead of Lite's exact "W*H" size
-# Sequential ("series") only exists for Lite: one request, a matching set of images
-SEQ_MODEL = os.environ.get("RV6M_SEQ_MODEL", "bytedance/seedream-v5.0-lite/edit-sequential")
 RATIOS = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"]
 KEY_FILE = os.path.expanduser("~/.atlascloud_key")
 
@@ -142,7 +140,7 @@ def _atlas(method, url, key, body=None):
         raise RuntimeError(f"Atlas said {e.code}: {e.read().decode(errors='replace')[:600]}")
 
 
-def _cloud(names, prompt, size, model, series=0):
+def _cloud(names, prompt, size, model):
     import base64
     import time
     import urllib.request
@@ -155,8 +153,6 @@ def _cloud(names, prompt, size, model, series=0):
         mime = "image/jpeg" if path.lower().endswith((".jpg", ".jpeg")) else "image/png"
         images.append(f"data:{mime};base64," + base64.b64encode(open(path, "rb").read()).decode())
     body = {"model": model, "prompt": prompt, "images": images, "enable_base64_output": False}
-    if series:
-        body["max_images"] = series
     if "pro" in model.lower():
         w, h = (int(v) for v in size.split("*"))
         body["resolution"] = "2k"
@@ -179,38 +175,32 @@ def _cloud(names, prompt, size, model, series=0):
             raise RuntimeError("Atlas took over 5 minutes; last reply: " + str(res)[:300])
         time.sleep(1.5)
     out = _find(res, ["outputs", "output", "images", "url"])
-    urls = [(_find(u, ["url"]) if isinstance(u, dict) else u) for u in (out if isinstance(out, list) else [out])]
-    urls = [u for u in urls if isinstance(u, str)]
-    if not urls:
+    url = out[0] if isinstance(out, list) else out
+    if isinstance(url, dict):
+        url = _find(url, ["url"])
+    if not isinstance(url, str):
         raise RuntimeError("Atlas reply had no image: " + str(res)[:600])
-    names, stamp = [], int(time.time() * 1000)
-    for i, url in enumerate(urls):
-        if url.startswith("http"):
-            with urllib.request.urlopen(url, timeout=120) as r:
-                data = r.read()
-        else:
-            data = base64.b64decode(url.split(",", 1)[-1])
-        ext = ".jpg" if data[:3] == b"\xff\xd8\xff" else ".webp" if data[8:12] == b"WEBP" else ".png"
-        name = f"rv6_cloud_{stamp}_{pid_tag(pid)}_{i}{ext}"
-        with open(os.path.join(folder_paths.get_output_directory(), name), "wb") as f:
-            f.write(data)
-        names.append(name)
-    return names
+    if url.startswith("http"):
+        with urllib.request.urlopen(url, timeout=120) as r:
+            data = r.read()
+    else:
+        data = base64.b64decode(url.split(",", 1)[-1])
+    ext = ".jpg" if data[:3] == b"\xff\xd8\xff" else ".webp" if data[8:12] == b"WEBP" else ".png"
+    name = f"rv6_cloud_{int(time.time() * 1000)}{ext}"
+    with open(os.path.join(folder_paths.get_output_directory(), name), "wb") as f:
+        f.write(data)
+    return name
 
 
-def pid_tag(pid):
-    return "".join(c for c in str(pid) if c.isalnum())[-8:] or "x"
+_jobs = {}  # job id -> {"status": "running"|"done"|"error", "filename", "error", "seconds"}
 
 
-_jobs = {}  # job id -> {"status": "running"|"done"|"error", "filenames", "error", "seconds"}
-
-
-async def _run_cloud(jid, names, prompt, size, model, series):
+async def _run_cloud(jid, names, prompt, size, model):
     loop = asyncio.get_running_loop()
     t = loop.time()
     try:
-        files = await loop.run_in_executor(None, _cloud, names, prompt, size, model, series)
-        _jobs[jid].update(status="done", filenames=files, filename=files[0])
+        name = await loop.run_in_executor(None, _cloud, names, prompt, size, model)
+        _jobs[jid].update(status="done", filename=name)
     except Exception as e:
         logging.exception("[rv6_mobile] cloud edit failed")
         _jobs[jid].update(status="error", error=str(e))
@@ -219,7 +209,7 @@ async def _run_cloud(jid, names, prompt, size, model, series):
 
 @PromptServer.instance.routes.get("/rv6m/cloud/status")
 async def rv6m_cloud_status(request):
-    return web.json_response({"configured": bool(_cloud_key()), "model": CLOUD_MODEL, "seqModel": SEQ_MODEL})
+    return web.json_response({"configured": bool(_cloud_key()), "model": CLOUD_MODEL})
 
 
 # Starts the edit in the background and returns a job id right away, so the
@@ -235,9 +225,8 @@ async def rv6m_cloud(request):
         return web.json_response({"error": "No Atlas API key on the VM (~/.atlascloud_key)"}, status=400)
     jid = uuid.uuid4().hex
     _jobs[jid] = {"status": "running"}
-    series = max(0, min(15, int(body.get("series") or 0)))
-    model = body.get("model") or (SEQ_MODEL if series else CLOUD_MODEL)
-    asyncio.ensure_future(_run_cloud(jid, names, body["prompt"], str(body.get("size") or "2048*2048"), model, series))
+    asyncio.ensure_future(_run_cloud(jid, names, body["prompt"], str(body.get("size") or "2048*2048"),
+                                     body.get("model") or CLOUD_MODEL))
     return web.json_response({"job": jid})
 
 

@@ -43,7 +43,14 @@
   #result img { width:100%; border-radius:10px; display:block; }
   .hint { color:var(--muted); font-size:13px; }
   .hidden { display:none !important; }
-  #variants { display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; margin-top:8px; }
+  #moreList { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-bottom:8px; }
+  #moreList:empty { display:none; }
+  #moreList div { position:relative; }
+  #moreList canvas { width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; display:block; }
+  #moreList span { position:absolute; left:4px; bottom:4px; background:#000a; border-radius:6px; padding:1px 6px; font-size:12px; }
+  #moreList button { position:absolute; right:4px; top:4px; padding:2px 8px; background:#000a; border-radius:12px; }
+  #moreList div.unused { opacity:.35; }
+  #variants { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; margin-top:8px; }
   #variants img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; opacity:.6; }
   #variants img.on { opacity:1; outline:2px solid var(--accent); }
   #recentList { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; margin-top:8px; }
@@ -92,24 +99,12 @@
     <canvas id="pts"></canvas>
   </div>
   <div id="secondBox" class="hidden" style="margin-top:10px">
-    <div id="secondEmpty">
-      <label class="btn" style="display:block;text-align:center;margin:0;color:var(--text)">
-        ➕ Add a 2nd photo (optional)
-        <input id="file2" type="file" accept="image/*" class="hidden">
-      </label>
-      <div class="hint" style="margin-top:6px">Combine people or things from two photos. In your instruction call them
-        <b>picture 1</b> (the main photo above) and <b>picture 2</b>.</div>
-    </div>
-    <div id="secondFull" class="hidden">
-      <div class="lbl" style="margin-top:0"><span>Picture 2</span></div>
-      <div class="row" style="align-items:flex-start">
-        <canvas id="second" style="flex:none;width:96px;border-radius:8px"></canvas>
-        <div>
-          <div class="hint">e.g. "the woman from picture 2 stands next to the man in picture 1, both smiling, same lighting as picture 1"</div>
-          <button id="removeSecond" style="margin-top:8px">Remove picture 2</button>
-        </div>
-      </div>
-    </div>
+    <div id="moreList"></div>
+    <label class="btn" id="addMore" style="display:block;text-align:center;margin:0;color:var(--text)">
+      <span id="addMoreText">➕ Add more photos (optional)</span>
+      <input id="file2" type="file" accept="image/*" multiple class="hidden">
+    </label>
+    <div class="hint" id="moreHint" style="margin-top:6px"></div>
   </div>
   <div id="paintTools">
   <div class="row" style="margin-top:10px">
@@ -184,7 +179,7 @@
 </div>
 <div class="panel" style="padding:10px 12px">
   <label for="count" style="margin-top:0">Variations (different random results to pick from)</label>
-  <select id="count"><option value="1">1</option><option value="2">2</option><option value="4">4</option></select>
+  <select id="count"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="6">6</option></select>
 </div>
 <button id="go" class="primary">Generate</button>
 <button id="stop" class="hidden" style="width:100%;margin-top:8px;padding:14px;background:var(--danger);color:#fff;font-weight:600">■ Stop</button>
@@ -313,7 +308,8 @@ function setMode(m) {
   $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));
   const [hint, label, ph] = MODE_TEXT[m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label;
-  $('prompt').placeholder = hasSecond() && (inst || cloud) ? 'e.g. the woman from picture 2 stands next to the man in picture 1' : ph;
+  $('prompt').placeholder = ph;
+  renderMore();
   if (cloud) {
     if (!wasWritten) $('prompt').value = '';
     if (!cloudCfg.configured) setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
@@ -453,26 +449,57 @@ $('count').addEventListener('change', () => store('count', $('count').value));
 $('fastBtn').onclick = () => { quality = false; store('quality', '0'); applySpeed(); };
 $('qualBtn').onclick = () => { quality = true; store('quality', '1'); applySpeed(); };
 
-// ---- Optional second photo for Describe edit (Qwen-Image-Edit Plus)
-const hasSecond = () => !$('secondFull').classList.contains('hidden');
-$('file2').addEventListener('change', e => {
-  const f = e.target.files[0]; if (!f) return;
-  const url = URL.createObjectURL(f), img = new Image();
-  img.onload = () => {
-    const c = $('second'), scale = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
-    c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
-    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-    URL.revokeObjectURL(url); e.target.value = '';
-    $('secondEmpty').classList.add('hidden'); $('secondFull').classList.remove('hidden');
-    $('prompt').placeholder = 'e.g. the woman from picture 2 stands next to the man in picture 1';
-  };
-  img.onerror = () => { URL.revokeObjectURL(url); setStatus('Could not read that photo', true); };
-  img.src = url;
+// ---- Extra photos: Seedream takes up to 10 in total (picture 1 + 9 more);
+// Describe edit (Qwen-Image-Edit Plus) uses only picture 2
+const more = [];  // canvases, picture 2 onwards
+const maxMore = () => mode === 'cloud' ? 9 : 1;
+const hasSecond = () => more.length > 0;
+const usedMore = () => more.slice(0, maxMore());
+function renderMore() {
+  const box = $('moreList'); box.innerHTML = '';
+  more.forEach((c, i) => {
+    const d = document.createElement('div'), x = document.createElement('button'), l = document.createElement('span');
+    d.classList.toggle('unused', i >= maxMore());
+    l.textContent = 'Picture ' + (i + 2); x.textContent = '✕'; x.setAttribute('aria-label', 'Remove picture ' + (i + 2));
+    x.onclick = () => { more.splice(i, 1); setStatus(''); renderMore(); };
+    d.append(c, l, x); box.append(d);
+  });
+  const left = maxMore() - more.length;
+  $('addMore').classList.toggle('hidden', left <= 0);
+  $('addMoreText').textContent = mode === 'cloud'
+    ? (more.length ? `➕ Add more photos (up to ${left} more)` : '➕ Add more photos (up to 9, optional)')
+    : '➕ Add a 2nd photo (optional)';
+  $('moreHint').textContent = more.length > maxMore()
+    ? 'Describe edit uses only picture 2. Switch to ☁️ Seedream to use all of them.'
+    : mode === 'cloud'
+      ? 'Combine people or things from several photos. Call them picture 1 (the main photo above), picture 2, picture 3…'
+      : 'Combine people or things from two photos. Call them picture 1 (the main photo above) and picture 2.';
+  if (mode === 'instruct' || mode === 'cloud')
+    $('prompt').placeholder = more.length ? 'e.g. the woman from picture 2 stands next to the man in picture 1' : MODE_TEXT[mode][2];
+}
+function readPhoto(f) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(f), img = new Image();
+    img.onload = () => {
+      // Picture 1 goes up at 2048 px; the others at 1536 keep a 10-photo request a sensible size
+      const c = document.createElement('canvas'), scale = Math.min(1, 1536 / Math.max(img.naturalWidth, img.naturalHeight));
+      c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url); resolve(c);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read one of those photos')); };
+    img.src = url;
+  });
+}
+$('file2').addEventListener('change', async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  const room = maxMore() - more.length;
+  if (files.length > room) setStatus(`Only ${room} more fit${mode === 'cloud' ? ' (10 photos in total)' : ''}; added the first ${room}.`, true);
+  for (const f of files.slice(0, Math.max(0, room))) {
+    try { more.push(await readPhoto(f)); } catch (err) { setStatus(err.message, true); }
+  }
+  renderMore();
 });
-$('removeSecond').onclick = () => {
-  $('secondFull').classList.add('hidden'); $('secondEmpty').classList.remove('hidden');
-  $('prompt').placeholder = MODE_TEXT[mode === 'cloud' ? 'cloud' : 'instruct'][2];
-};
 
 function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '', img2Name = null) {
   // The Plus encoder takes up to three images; the output keeps picture 1's size and layout
@@ -764,7 +791,7 @@ $('go').onclick = async () => {
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
       const instruction = [$('prompt').value.trim(), ...words].join(', ');
       // The negative only has an effect when CFG > 1, i.e. in Quality mode
-      const img2Name = hasSecond() ? await upload(await toJpeg($('second')), `rv6m_${ts}_img2.jpg`) : null;
+      const img2Name = hasSecond() ? await upload(await toJpeg(more[0]), `rv6m_${ts}_img2.jpg`) : null;
       p = buildInstructWorkflow(imgName, instruction, seed, +$('steps').value, +$('cfg').value, extras,
                                 fastActive() ? '' : $('neg').value, img2Name);
     } else if (mode === 'whole') {
@@ -833,7 +860,10 @@ async function cloudGo() {
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
     setStatus('Uploading…');
     const images = [await upload(await toJpeg(full), `rv6m_${ts}_cloud1.jpg`)];
-    if (hasSecond()) images.push(await upload(await toJpeg($('second')), `rv6m_${ts}_cloud2.jpg`));
+    for (const [i, c] of usedMore().entries()) {
+      setStatus(`Uploading… ${i + 2}/${usedMore().length + 1}`);
+      images.push(await upload(await toJpeg(c), `rv6m_${ts}_cloud${i + 2}.jpg`));
+    }
     const n = +$('count').value || 1, jobs = [], size = cloudSize();
     for (let i = 0; i < n; i++) {
       const r = await fetch('/rv6m/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -843,8 +873,8 @@ async function cloudGo() {
       jobs.push(j.job);
     }
     const t0 = Date.now();
-    store('pendingCloud', JSON.stringify({ jobs, t0, size }));
-    await waitForCloud(jobs, t0, size);
+    store('pendingCloud', JSON.stringify({ jobs, t0, size, nPhotos: images.length }));
+    await waitForCloud(jobs, t0, size, images.length);
   } catch (err) {
     setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
       ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.' : err.message, true);
@@ -854,7 +884,7 @@ async function cloudGo() {
 }
 // Cloud jobs run on the VM even while Safari is in the background; this
 // only asks the VM how they are doing, so switching apps loses nothing.
-async function waitForCloud(jobs, t0, size) {
+async function waitForCloud(jobs, t0, size, nPhotos = 1) {
   const done = {};
   try {
     for (;;) {
@@ -880,7 +910,7 @@ async function waitForCloud(jobs, t0, size) {
       if (Object.keys(done).length === jobs.length) {
         const cloud = Math.max(...Object.values(done).map(d => d.seconds || 0));
         setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\nSeedream · ${size.replace('*', '×')}` +
-                  (hasSecond() ? ' · 2 photos' : '') + (jobs.length > 1 ? '\nTap a thumbnail to compare.' : ''));
+                  (nPhotos > 1 ? ` · ${nPhotos} photos` : '') + (jobs.length > 1 ? '\nTap a thumbnail to compare.' : ''));
         loadRecent();
         return;
       }
@@ -968,7 +998,7 @@ async function resumePending() {
   if (pc && pc.jobs && pc.jobs.length && Date.now() - pc.t0 < 400 * 1000) {
     $('go').disabled = true; $('stop').classList.remove('hidden'); stopRequested = false;
     setStatus('Picking up your Seedream edit…');
-    try { await waitForCloud(pc.jobs, pc.t0, pc.size || ''); }
+    try { await waitForCloud(pc.jobs, pc.t0, pc.size || '', pc.nPhotos || 1); }
     catch (err) { setStatus(err.message, true); }
     finally { $('go').disabled = false; $('stop').classList.add('hidden'); }
     return;

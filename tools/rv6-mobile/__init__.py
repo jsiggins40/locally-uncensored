@@ -82,3 +82,149 @@ async def rv6m_segment(request):
     except Exception as e:
         logging.exception("[rv6_mobile] segment failed")
         return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+
+# --- Seedream (Atlas Cloud) -------------------------------------------------
+# POST /rv6m/cloud sends the photos in ComfyUI's input folder plus the prompt
+# to Atlas Cloud, waits for the result and saves it in the output folder so it
+# shows up like a local edit. The API key stays on this VM: ~/.atlascloud_key
+# or the ATLASCLOUD_API_KEY environment variable. It never reaches the page.
+ATLAS = "https://api.atlascloud.ai/api/v1/model"
+CLOUD_MODEL = os.environ.get("RV6M_CLOUD_MODEL", "bytedance/seedream-v5.0-lite/edit")
+KEY_FILE = os.path.expanduser("~/.atlascloud_key")
+
+
+def _cloud_key():
+    key = os.environ.get("ATLASCLOUD_API_KEY", "")
+    if not key and os.path.exists(KEY_FILE):
+        key = open(KEY_FILE).read().strip()
+    return key
+
+
+def _find(obj, keys):
+    """First value under any of keys, searched depth-first (Atlas may nest it in "data")."""
+    if isinstance(obj, dict):
+        for k in keys:
+            if obj.get(k) not in (None, "", []):
+                return obj[k]
+        for v in obj.values():
+            r = _find(v, keys)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _find(v, keys)
+            if r is not None:
+                return r
+    return None
+
+
+def _data(reply):
+    """Atlas wraps results as {"code": ..., "data": {...}}; look there first."""
+    return reply["data"] if isinstance(reply, dict) and isinstance(reply.get("data"), dict) else reply
+
+
+def _atlas(method, url, key, body=None):
+    import json
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body else None,
+                                 headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Atlas said {e.code}: {e.read().decode(errors='replace')[:600]}")
+
+
+def _cloud(names, prompt, size, model):
+    import base64
+    import time
+    import urllib.request
+    key = _cloud_key()
+    if not key:
+        raise RuntimeError("No Atlas API key on the VM (~/.atlascloud_key)")
+    images = []
+    for n in names:
+        path = folder_paths.get_annotated_filepath(n)
+        mime = "image/jpeg" if path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        images.append(f"data:{mime};base64," + base64.b64encode(open(path, "rb").read()).decode())
+    sub = _atlas("POST", ATLAS + "/generateImage", key,
+                 {"model": model, "prompt": prompt, "images": images, "size": size,
+                  "enable_base64_output": False})
+    pid = _find(_data(sub), ["id", "prediction_id", "request_id"])
+    if not pid:
+        raise RuntimeError("Atlas reply had no job id: " + str(sub)[:600])
+    t = time.time()
+    while True:
+        res = _data(_atlas("GET", f"{ATLAS}/prediction/{pid}", key))
+        status = str(_find(res, ["status"]) or "").lower()
+        if status in ("completed", "succeeded", "success", "done"):
+            break
+        if status in ("failed", "error", "canceled", "cancelled"):
+            raise RuntimeError("Atlas job failed: " + str(_find(res, ["error", "message"]) or res)[:600])
+        if time.time() - t > 300:
+            raise RuntimeError("Atlas took over 5 minutes; last reply: " + str(res)[:300])
+        time.sleep(1.5)
+    out = _find(res, ["outputs", "output", "images", "url"])
+    url = out[0] if isinstance(out, list) else out
+    if isinstance(url, dict):
+        url = _find(url, ["url"])
+    if not isinstance(url, str):
+        raise RuntimeError("Atlas reply had no image: " + str(res)[:600])
+    if url.startswith("http"):
+        with urllib.request.urlopen(url, timeout=120) as r:
+            data = r.read()
+    else:
+        data = base64.b64decode(url.split(",", 1)[-1])
+    ext = ".jpg" if data[:3] == b"\xff\xd8\xff" else ".webp" if data[8:12] == b"WEBP" else ".png"
+    name = f"rv6_cloud_{int(time.time() * 1000)}{ext}"
+    with open(os.path.join(folder_paths.get_output_directory(), name), "wb") as f:
+        f.write(data)
+    return name
+
+
+_jobs = {}  # job id -> {"status": "running"|"done"|"error", "filename", "error", "seconds"}
+
+
+async def _run_cloud(jid, names, prompt, size, model):
+    loop = asyncio.get_running_loop()
+    t = loop.time()
+    try:
+        name = await loop.run_in_executor(None, _cloud, names, prompt, size, model)
+        _jobs[jid].update(status="done", filename=name)
+    except Exception as e:
+        logging.exception("[rv6_mobile] cloud edit failed")
+        _jobs[jid].update(status="error", error=str(e))
+    _jobs[jid]["seconds"] = round(loop.time() - t, 1)
+
+
+@PromptServer.instance.routes.get("/rv6m/cloud/status")
+async def rv6m_cloud_status(request):
+    return web.json_response({"configured": bool(_cloud_key()), "model": CLOUD_MODEL})
+
+
+# Starts the edit in the background and returns a job id right away, so the
+# phone can switch apps (iOS drops long requests) and ask for it again later.
+@PromptServer.instance.routes.post("/rv6m/cloud")
+async def rv6m_cloud(request):
+    import uuid
+    body = await request.json()
+    names = [n for n in body.get("images", []) if n]
+    if not names or not str(body.get("prompt", "")).strip():
+        return web.json_response({"error": "need a photo and a prompt"}, status=400)
+    if not _cloud_key():
+        return web.json_response({"error": "No Atlas API key on the VM (~/.atlascloud_key)"}, status=400)
+    jid = uuid.uuid4().hex
+    _jobs[jid] = {"status": "running"}
+    asyncio.ensure_future(_run_cloud(jid, names, body["prompt"], str(body.get("size") or "2048*2048"),
+                                     body.get("model") or CLOUD_MODEL))
+    return web.json_response({"job": jid})
+
+
+@PromptServer.instance.routes.get("/rv6m/cloud/job/{jid}")
+async def rv6m_cloud_job(request):
+    job = _jobs.get(request.match_info["jid"])
+    if job is None:
+        return web.json_response({"status": "error", "error": "unknown job (ComfyUI was restarted?)"}, status=404)
+    return web.json_response(job)

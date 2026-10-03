@@ -97,6 +97,17 @@ shutil.rmtree("models/_hf_tmp", ignore_errors=True)
 json.dump(meta, open(meta_path, "w"), indent=1)
 PY
 
+# Optional: Seedream 5.0 edits through Atlas Cloud (the key stays on the VM)
+if [ ! -s "$HOME/.atlascloud_key" ]; then
+  echo
+  read -rp "Atlas Cloud API key for the Seedream button (Enter to skip): " akey </dev/tty || akey=""
+  if [ -n "$akey" ]; then
+    printf '%s' "$akey" > "$HOME/.atlascloud_key"; chmod 600 "$HOME/.atlascloud_key"
+    tmux kill-session -t comfy 2>/dev/null || true  # pick up the key
+    tmux new -d -s comfy "cd $COMFY && venv/bin/python main.py --listen 127.0.0.1 --port 8188"
+  fi
+fi
+
 step "7/7 Tailscale (private phone access)"
 command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh
 sudo systemctl enable --now tailscaled >/dev/null 2>&1 || true
@@ -115,5 +126,5 @@ echo
 echo "=============================================================="
 echo " ALL DONE. On your phone (Tailscale app connected) open:"
 echo "   https://$HOST/extensions/rv6_mobile/edit.html"
-echo " Choose ✨ Describe edit, then pick the LoRA in the LoRA menu."
+echo " Choose ✨ Describe edit (or ☁️ Seedream if you gave an Atlas key)."
 echo "=============================================================="

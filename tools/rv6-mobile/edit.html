@@ -82,6 +82,7 @@
     <button id="modeInstruct">✨ Describe edit</button>
     <button id="modeMask" class="on">Selected area</button>
     <button id="modeWhole">Restyle</button>
+    <button id="modeCloud" class="hidden">☁️ Seedream</button>
   </div>
   <div class="hint" id="modeHint" style="margin-bottom:8px">Tap or paint what you want changed. Everything else stays.</div>
   <div id="empty">Choose a photo, then tap or paint the area you want to change.</div>
@@ -173,6 +174,14 @@
   </details>
 </div>
 
+<div id="cloudBox" class="panel hidden" style="padding:10px 12px">
+  <div class="hint" id="cloudHint"></div>
+  <details style="margin-top:6px">
+    <summary class="hint">Cloud model</summary>
+    <input id="cloudModel" style="width:100%;margin-top:6px" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <div class="hint">Atlas Cloud model name. Leave empty for the default.</div>
+  </details>
+</div>
 <div class="panel" style="padding:10px 12px">
   <label for="count" style="margin-top:0">Variations (different random results to pick from)</label>
   <select id="count"><option value="1">1</option><option value="2">2</option><option value="4">4</option></select>
@@ -205,6 +214,7 @@ const clientId = Math.random().toString(36).slice(2);
 let erasing = false, drawing = false, last = null, undoStack = [], workflow = null;
 let tool = 'select', selLabel = 1, selPoints = [], selBase = null, baseUpload = null, segBusy = false, segPending = false;
 const pts = $('pts'), pctx = pts.getContext('2d');
+const full = document.createElement('canvas');  // the photo at up to 2048 px, for Seedream
 
 fetch('./workflow.json').then(r => r.json()).then(w => workflow = w)
   .catch(e => setStatus('Could not load workflow.json: ' + e, true));
@@ -274,6 +284,8 @@ $('prompt').value = 'RAW photo, natural light'; syncChips();
 // 'mask' (inpaint the selected area), 'whole' (img2img restyle)
 let mode = 'mask', qwen = null, maskPrompt = null;
 const MODE_TEXT = {
+  cloud: ['Seedream 5.0 on Atlas Cloud: describe the change like in ✨ Describe edit. Sharper, bigger results (about 2048 px) in 10-40s, a few cents each. Photos are sent to Atlas.',
+          'What should change?', 'e.g. change the background to a beach at sunset'],
   instruct: ['Say what to change and the model edits the photo, e.g. "make her hair red" or "put her on a beach at sunset".',
              'What should change?', 'e.g. change the background to a beach at sunset'],
   mask: ['Tap or paint what you want changed. Everything else stays.',
@@ -282,20 +294,31 @@ const MODE_TEXT = {
           'Describe the whole image you want', 'e.g. woman on a beach at golden hour'],
 };
 function setMode(m) {
-  if (m === 'instruct' && mode !== 'instruct') maskPrompt = $('prompt').value;
-  if (m !== 'instruct' && mode === 'instruct' && maskPrompt !== null) $('prompt').value = maskPrompt;
+  // Describe edit and Seedream share the instruction text; the tag modes keep their own
+  const written = k => k === 'instruct' || k === 'cloud';
+  if (written(m) && !written(mode)) maskPrompt = $('prompt').value;
+  if (!written(m) && written(mode) && maskPrompt !== null) $('prompt').value = maskPrompt;
+  const wasWritten = written(mode);
   mode = m; store('mode', m); setStatus('');
-  for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole']]) $(id).classList.toggle('on', k === m);
-  const masked = m === 'mask', inst = m === 'instruct';
-  $('secondBox').classList.toggle('hidden', !inst || !(qwen && qwen.plus));
+  for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole'], ['modeCloud', 'cloud']]) $(id).classList.toggle('on', k === m);
+  const masked = m === 'mask', inst = m === 'instruct', cloud = m === 'cloud';
+  $('secondBox').classList.toggle('hidden', !(cloud || (inst && qwen && qwen.plus)));
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
-  for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst);
+  for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud);
+  for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud);
+  $('res').previousElementSibling.classList.toggle('hidden', cloud);
+  $('neg').closest('details').classList.toggle('hidden', cloud);
+  $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !(qwen && qwen.lora));
   $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));
   const [hint, label, ph] = MODE_TEXT[m];
-  $('modeHint').textContent = hint; $('promptLabel').textContent = label; $('prompt').placeholder = ph;
-  if (inst) {
-    $('prompt').value = '';
+  $('modeHint').textContent = hint; $('promptLabel').textContent = label;
+  $('prompt').placeholder = hasSecond() && (inst || cloud) ? 'e.g. the woman from picture 2 stands next to the man in picture 1' : ph;
+  if (cloud) {
+    if (!wasWritten) $('prompt').value = '';
+    if (!cloudCfg.configured) setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
+  } else if (inst) {
+    if (!wasWritten) $('prompt').value = '';
     if (!qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
     applySpeed();
   } else if (m === 'whole') { applyPreset(); setVal($('denoise'), 0.5); }
@@ -305,10 +328,24 @@ function setMode(m) {
 $('modeInstruct').onclick = () => setMode('instruct');
 $('modeMask').onclick = () => setMode('mask');
 $('modeWhole').onclick = () => setMode('whole');
+$('modeCloud').onclick = () => setMode('cloud');
+
+// Seedream on Atlas Cloud: the button only shows once the VM has a key
+let cloudCfg = { configured: false, model: '' };
+const cloudModel = () => $('cloudModel').value.trim() || cloudCfg.model;
+$('cloudModel').value = recall('cloudModel') || '';
+$('cloudModel').addEventListener('change', () => store('cloudModel', $('cloudModel').value.trim()));
+const cloudReady = fetch('/rv6m/cloud/status').then(r => r.ok ? r.json() : null).then(c => {
+  if (!c) return;
+  cloudCfg = c;
+  $('modeCloud').classList.toggle('hidden', !c.configured);
+  $('cloudModel').placeholder = c.model;
+  $('cloudHint').textContent = 'Runs on Atlas Cloud (' + c.model.replace(/^bytedance\//, '') + '), not on your GPU. Each variation is a separate paid image.';
+}).catch(() => {});
 
 function onModelChange() {
   store('model', $('model').value);
-  if (mode === 'instruct') return;  // Describe edit has its own fixed settings; the checkpoint list loading must not overwrite them
+  if (mode === 'instruct' || mode === 'cloud') return;  // Describe edit has its own fixed settings; the checkpoint list loading must not overwrite them
   applyPreset(); if (mode === 'whole') setVal($('denoise'), 0.5);
 }
 
@@ -341,7 +378,9 @@ async function info(node) {
     .filter(n => /qwen/i.test((meta[n] || {}).baseModel || '') || (!meta[n] && /qwen/i.test(n)))
     .map(n => ({ file: n, label: (meta[n] || {}).name || n.replace(/\.safetensors$/, ''), words: (meta[n] || {}).trainedWords || [] }));
   if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) { qwen = q; renderLoras(); }
-  const saved = recall('mode');
+  await cloudReady;
+  let saved = recall('mode');
+  if (saved === 'cloud' && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
   if (saved && saved !== mode) setMode(saved);
   else if (mode === 'instruct') setMode('instruct');  // re-run now that the model is known
   if (qwen) warmUp();
@@ -420,7 +459,7 @@ $('file2').addEventListener('change', e => {
   const f = e.target.files[0]; if (!f) return;
   const url = URL.createObjectURL(f), img = new Image();
   img.onload = () => {
-    const c = $('second'), scale = Math.min(1, 1024 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = $('second'), scale = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
     c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
     URL.revokeObjectURL(url); e.target.value = '';
@@ -432,7 +471,7 @@ $('file2').addEventListener('change', e => {
 });
 $('removeSecond').onclick = () => {
   $('secondFull').classList.add('hidden'); $('secondEmpty').classList.remove('hidden');
-  $('prompt').placeholder = MODE_TEXT.instruct[2];
+  $('prompt').placeholder = MODE_TEXT[mode === 'cloud' ? 'cloud' : 'instruct'][2];
 };
 
 function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '', img2Name = null) {
@@ -477,7 +516,7 @@ fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.json()).then(info =
   const names = allModels.filter(n => !/^Realistic_Vision_V6\.0_NV_B1_fp16/.test(n));
   if (!allModels.length) {
     $('modeMask').classList.add('hidden'); $('modeWhole').classList.add('hidden');
-    if (mode !== 'instruct') setMode('instruct');
+    if (mode !== 'instruct' && mode !== 'cloud') setMode('instruct');
   }
   $('model').innerHTML = '';
   for (const n of names) $('model').add(new Option(n.replace(/\.safetensors$/, ''), n));
@@ -532,6 +571,9 @@ function loadIntoCanvas(src) {
       base.width = mask.width = pts.width = w; base.height = mask.height = pts.height = h;
       baseUpload = null; selPoints = []; selBase = null; drawPts();
       bctx.drawImage(img, 0, 0, w, h);
+      const fs = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
+      full.width = Math.round(img.naturalWidth * fs); full.height = Math.round(img.naturalHeight * fs);
+      full.getContext('2d').drawImage(img, 0, 0, full.width, full.height);
       mctx.clearRect(0, 0, w, h);
       undoStack = [];
       $('empty').classList.add('hidden'); $('stage').classList.remove('hidden');
@@ -545,7 +587,7 @@ function loadIntoCanvas(src) {
 $('file').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   const url = URL.createObjectURL(f);
-  try { await loadIntoCanvas(url); setStatus('Tap the person or object to change, or use Paint.'); }
+  try { await loadIntoCanvas(url); setStatus(mode === 'mask' ? 'Tap the person or object to change, or use Paint.' : 'Now type what to change.'); }
   catch (err) { setStatus(err.message, true); }
   finally { URL.revokeObjectURL(url); e.target.value = ''; }
 });
@@ -700,6 +742,7 @@ async function upload(blob, name) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 $('go').onclick = async () => {
+  if (mode === 'cloud') return cloudGo();
   if (!workflow) return setStatus('Workflow not loaded yet, reload the page.', true);
   if ($('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
   if (mode === 'mask' && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
@@ -721,7 +764,7 @@ $('go').onclick = async () => {
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
       const instruction = [$('prompt').value.trim(), ...words].join(', ');
       // The negative only has an effect when CFG > 1, i.e. in Quality mode
-      const img2Name = hasSecond() ? await upload(await toBlob($('second')), `rv6m_${ts}_img2.png`) : null;
+      const img2Name = hasSecond() ? await upload(await toJpeg($('second')), `rv6m_${ts}_img2.jpg`) : null;
       p = buildInstructWorkflow(imgName, instruction, seed, +$('steps').value, +$('cfg').value, extras,
                                 fastActive() ? '' : $('neg').value, img2Name);
     } else if (mode === 'whole') {
@@ -770,6 +813,89 @@ $('go').onclick = async () => {
     $('stop').classList.add('hidden');
   }
 };
+
+// Seedream wants about 4 megapixels or more; keep the photo's shape, sides in multiples of 16
+function cloudSize() {
+  const r = full.width / full.height, area = 2048 * 2048;
+  const clamp = v => Math.min(4096, Math.max(1024, Math.round(v / 16) * 16));
+  return clamp(Math.sqrt(area * r)) + '*' + clamp(Math.sqrt(area / r));
+}
+const toJpeg = c => new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
+async function cloudGo() {
+  if ($('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
+  if (!$('prompt').value.trim()) return setStatus('Type what you want changed first.', true);
+  if (!cloudCfg.configured) return setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
+  $('go').disabled = true; stopRequested = false; currentJobs = [];
+  $('stop').classList.remove('hidden');
+  try {
+    const ts = Date.now();
+    setStatus('Connecting…');
+    if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
+    setStatus('Uploading…');
+    const images = [await upload(await toJpeg(full), `rv6m_${ts}_cloud1.jpg`)];
+    if (hasSecond()) images.push(await upload(await toJpeg($('second')), `rv6m_${ts}_cloud2.jpg`));
+    const n = +$('count').value || 1, jobs = [], size = cloudSize();
+    for (let i = 0; i < n; i++) {
+      const r = await fetch('/rv6m/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ images, prompt: $('prompt').value.trim(), size, model: cloudModel() }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'The VM refused the cloud edit (' + r.status + ')');
+      jobs.push(j.job);
+    }
+    const t0 = Date.now();
+    store('pendingCloud', JSON.stringify({ jobs, t0, size }));
+    await waitForCloud(jobs, t0, size);
+  } catch (err) {
+    setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
+      ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.' : err.message, true);
+  } finally {
+    $('go').disabled = false; $('stop').classList.add('hidden');
+  }
+}
+// Cloud jobs run on the VM even while Safari is in the background; this
+// only asks the VM how they are doing, so switching apps loses nothing.
+async function waitForCloud(jobs, t0, size) {
+  const done = {};
+  try {
+    for (;;) {
+      await sleep(1500);
+      // Atlas jobs can't be cancelled (and are charged anyway); Stop just stops waiting
+      if (stopRequested) { setStatus('Stopped waiting. A finished image still shows up under Recent edits.'); return; }
+      const secs = Math.round((Date.now() - t0) / 1000);
+      if (secs > 400) throw new Error('Timed out waiting for Atlas Cloud.');
+      const count = jobs.length > 1 ? ` (${Object.keys(done).length}/${jobs.length} done)` : '';
+      setStatus('Seedream is working… ' + secs + 's' + count);
+      for (const id of jobs.filter(i => !(i in done))) {
+        let j;
+        try { j = await (await fetch('/rv6m/cloud/job/' + id, { cache: 'no-store' })).json(); }
+        catch (e) { setStatus('Seedream is working… ' + secs + 's (reconnecting to the VM…)'); break; }
+        if (j.status === 'error') throw new Error('Seedream failed: ' + j.error);
+        if (j.status !== 'done') continue;
+        done[id] = { filename: j.filename, subfolder: '', type: 'output', seconds: j.seconds };
+        addCloudRecent(j.filename);
+        const got = jobs.filter(i => i in done).map(i => done[i]);
+        showResult(got[0], got);
+        if (got.length === 1) $('result').scrollIntoView({ behavior: 'smooth' });
+      }
+      if (Object.keys(done).length === jobs.length) {
+        const cloud = Math.max(...Object.values(done).map(d => d.seconds || 0));
+        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\nSeedream · ${size.replace('*', '×')}` +
+                  (hasSecond() ? ' · 2 photos' : '') + (jobs.length > 1 ? '\nTap a thumbnail to compare.' : ''));
+        loadRecent();
+        return;
+      }
+    }
+  } finally {
+    store('pendingCloud', '');
+  }
+}
+// Cloud results aren't in ComfyUI's history, so Recent remembers them here
+function cloudRecent() { try { return JSON.parse(recall('cloudRecent') || '[]'); } catch (e) { return []; } }
+function addCloudRecent(filename) {
+  const list = cloudRecent().filter(x => x.f !== filename);
+  list.unshift({ f: filename, t: Date.now() / 1000 });
+  store('cloudRecent', JSON.stringify(list.slice(0, 24)));
+}
 
 const viewUrl = o => `/api/view?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}&type=${o.type || 'output'}`;
 function showResult(o, variants = []) {
@@ -838,6 +964,15 @@ async function waitForJobs(ids, t0) {
 // Pick up an edit that was still running when the page was left or reloaded
 // (called at the end of the script, once every variable it uses exists)
 async function resumePending() {
+  let pc = null; try { pc = JSON.parse(recall('pendingCloud') || 'null'); } catch (e) {}
+  if (pc && pc.jobs && pc.jobs.length && Date.now() - pc.t0 < 400 * 1000) {
+    $('go').disabled = true; $('stop').classList.remove('hidden'); stopRequested = false;
+    setStatus('Picking up your Seedream edit…');
+    try { await waitForCloud(pc.jobs, pc.t0, pc.size || ''); }
+    catch (err) { setStatus(err.message, true); }
+    finally { $('go').disabled = false; $('stop').classList.add('hidden'); }
+    return;
+  }
   let pj = null; try { pj = JSON.parse(recall('pendingJob') || 'null'); } catch (e) {}
   const ids = pj && (pj.ids || (pj.id ? [pj.id] : []));
   if (!ids || !ids.length || Date.now() - pj.t0 > 15 * 60 * 1000 * ids.length) return;
@@ -857,6 +992,8 @@ async function loadRecent() {
       .map(j => ({ t: (j.status.messages || []).map(m => m[1] && m[1].timestamp).filter(Boolean).pop() || 0,
                    img: (j.outputs && j.outputs['9'] && j.outputs['9'].images || [])[0] }))
       .filter(x => x.img && x.img.type === 'output' && /^rv6_edit_\d/.test(x.img.filename))
+      .map(x => ({ ...x, t: x.t / 1000 }))  // ComfyUI timestamps are in ms
+      .concat(cloudRecent().map(c => ({ t: c.t, img: { filename: c.f, subfolder: '', type: 'output' } })))
       .sort((a, b) => b.t - a.t).slice(0, 12);
     const box = $('recentList'); box.innerHTML = '';
     for (const x of items) {

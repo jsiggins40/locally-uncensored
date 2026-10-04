@@ -400,7 +400,7 @@ async function info(node) {
     ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit',
      'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader'].map(info));
   const f = {
-    unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /flux/i.test(n) && /fill/i.test(n))
+    unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /fill/i.test(n) && /flux|onereward/i.test(n))
             .sort((a, b) => /onereward/i.test(a) - /onereward/i.test(b) || /fp8/i.test(b) - /fp8/i.test(a)).pop(),
     t5: optionsOf(dual, 'DualCLIPLoader', 'clip_name1').filter(n => /t5xxl/i.test(n)).sort().pop(),
     clipl: optionsOf(dual, 'DualCLIPLoader', 'clip_name2').filter(n => /(^|\/)clip_l/i.test(n)).sort().pop(),

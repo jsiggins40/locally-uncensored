@@ -18,8 +18,8 @@ print(f"== Free disk: {free_gb:.0f} GB")
 if free_gb < 40:
     sys.exit("Need about 40 GB free for the Fix model. Delete something first.")
 
-def fetch(repo, path, subdir):
-    dest = os.path.join("models", subdir, os.path.basename(path))
+def fetch(repo, path, subdir, name=None):
+    dest = os.path.join("models", subdir, name or os.path.basename(path))
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
         print("   already have", dest); return
     print(f"   downloading {os.path.basename(path)} from {repo}")
@@ -37,7 +37,9 @@ if not files:
     sys.exit(f"No model file found in {repo}")
 for s in files: print(f"   found {s.rfilename} ({(s.size or 0) / 1e9:.1f} GB)")
 best = max(files, key=lambda s: ("dynamic" not in s.rfilename.lower(), "fp8" not in s.rfilename.lower(), s.size or 0))
-fetch(repo, best.rfilename, "diffusion_models")
+# Saved under a fixed name so the page and the test always recognise it
+fetch(repo, best.rfilename, "diffusion_models",
+      "flux1-fill-dev-OneReward" + ("-fp8" if "fp8" in best.rfilename.lower() else "") + ".safetensors")
 
 print("== Flux text encoders and VAE")
 fetch("comfyanonymous/flux_text_encoders", "clip_l.safetensors", "text_encoders")

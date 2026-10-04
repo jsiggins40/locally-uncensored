@@ -148,6 +148,15 @@
     <div class="seg" style="margin-top:12px"><button id="fastBtn">⚡ Fast</button><button id="qualBtn">✨ Quality</button></div>
     <div class="hint" id="speedHint"></div>
   </div>
+  <div id="fluxLoraBox" class="hidden">
+    <label for="fluxLoraSel">Flux LoRA (for 🩹 Fix)</label>
+    <select id="fluxLoraSel"></select>
+    <div id="fluxLoraTune">
+      <div class="lbl"><span>LoRA strength</span></div>
+      <div class="ctl"><button class="step" data-for="fluxLoraW" data-dir="-1" aria-label="Less">−</button><input id="fluxLoraW" type="range" min="0" max="1.5" step="0.05" value="0.9" data-nudge="0.1"><button class="step" data-for="fluxLoraW" data-dir="1" aria-label="More">+</button><span class="val" id="fluxLoraWVal"></span></div>
+      <div class="hint" id="fluxLoraWords"></div>
+    </div>
+  </div>
   <div id="loraBox" class="hidden">
     <label for="loraSel">LoRA</label>
     <select id="loraSel"></select>
@@ -333,6 +342,7 @@ function setMode(m) {
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !(qwen && qwen.lora));
   $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));
+  $('fluxLoraBox').classList.toggle('hidden', !fx || !fill.loras.length);
   const [hint, label, ph] = MODE_TEXT[fx ? 'fmask' : m === 'mask' && q ? 'qmask' : m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label;
   $('prompt').placeholder = ph;
@@ -424,6 +434,12 @@ async function info(node) {
     .filter(n => /qwen/i.test((meta[n] || {}).baseModel || '') || (!meta[n] && /qwen/i.test(n)))
     .map(n => ({ file: n, label: (meta[n] || {}).name || n.replace(/\.safetensors$/, ''), words: (meta[n] || {}).trainedWords || [] }));
   if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) { qwen = q; renderLoras(); }
+  if (fill) {
+    fill.loras = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name')
+      .filter(n => /flux/i.test((meta[n] || {}).baseModel || '') || (!meta[n] && /flux/i.test(n) && !/fill|lightning/i.test(n)))
+      .map(n => ({ file: n, label: (meta[n] || {}).name || n.replace(/\.safetensors$/, ''), words: (meta[n] || {}).trainedWords || [] }));
+    renderFluxLoras();
+  }
   await cloudReady; await ckptReady.catch(() => {});
   $('modeMask').classList.toggle('hidden', !qwen && !fill && !allModels.length);
   let saved = recall('mode') || mode;
@@ -460,6 +476,38 @@ function renderLoras() {
 $('loraSel').addEventListener('change', () => { showLora(); saveLora(); });
 $('loraW').addEventListener('input', saveLora);
 for (const b of document.querySelectorAll('button.step[data-for=loraW]')) b.addEventListener('pointerup', saveLora);
+// The Fix engine's LoRA, kept apart from Qwen's: Flux LoRAs only load on Flux.
+// The first one is on by default (that is what it was installed for).
+function fluxLoraState() { try { return JSON.parse(recall('fluxLora') || '{}'); } catch (e) { return {}; } }
+function saveFluxLora() {
+  const st = fluxLoraState(); st.file = $('fluxLoraSel').value;
+  st.w = st.w || {}; if (st.file) st.w[st.file] = +$('fluxLoraW').value;
+  store('fluxLora', JSON.stringify(st));
+}
+function showFluxLora() {
+  const l = fill.loras.find(x => x.file === $('fluxLoraSel').value), st = fluxLoraState();
+  $('fluxLoraTune').classList.toggle('hidden', !l);
+  if (!l) return;
+  setVal($('fluxLoraW'), (st.w && st.w[l.file]) ?? 0.9);
+  $('fluxLoraWords').textContent = (l.words.length ? 'Trigger words (added automatically): ' + l.words.join(', ') + '. ' : '') +
+    'Made for regular Flux, so on Fix it can be weaker: raise the strength if it has little effect.';
+}
+function renderFluxLoras() {
+  const sel = $('fluxLoraSel'); sel.innerHTML = '';
+  sel.add(new Option('None', ''));
+  for (const l of fill.loras) sel.add(new Option(l.label, l.file));
+  const st = fluxLoraState();
+  sel.value = 'file' in st ? (fill.loras.some(l => l.file === st.file) ? st.file : '') : (fill.loras[0] || {}).file || '';
+  showFluxLora();
+}
+$('fluxLoraSel').addEventListener('change', () => { showFluxLora(); saveFluxLora(); });
+$('fluxLoraW').addEventListener('input', saveFluxLora);
+for (const b of document.querySelectorAll('button.step[data-for=fluxLoraW]')) b.addEventListener('pointerup', saveFluxLora);
+function activeFluxLora() {
+  const l = fill && fill.loras.find(x => x.file === $('fluxLoraSel').value);
+  return l && +$('fluxLoraW').value > 0 ? { ...l, w: +$('fluxLoraW').value } : null;
+}
+
 function activeLoras() {
   const l = qwen && qwen.extras.find(x => x.file === $('loraSel').value);
   return l && +$('loraW').value > 0 ? [{ ...l, w: +$('loraW').value }] : [];
@@ -553,10 +601,10 @@ $('file2').addEventListener('change', async e => {
   renderMore();
 });
 
-function buildFillWorkflow(imgName, maskName, text, seed) {
+function buildFillWorkflow(imgName, maskName, text, seed, lora = null) {
   // ComfyUI's standard Flux Fill inpaint (guidance 30, differential diffusion),
   // then the same soft-edged paste-back over the original as Qwen's selection
-  return {
+  const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: fill.unet, weight_dtype: 'default' } },
     '2': { class_type: 'DualCLIPLoader', inputs: { clip_name1: fill.t5, clip_name2: fill.clipl, type: 'flux' } },
     '13': { class_type: 'VAELoader', inputs: { vae_name: fill.vae } },
@@ -579,6 +627,11 @@ function buildFillWorkflow(imgName, maskName, text, seed) {
                                                           resize_source: false, mask: ['35', 0] } },
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['36', 0] } },
   };
+  if (lora) {
+    p['43'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: lora.file, strength_model: lora.w } };
+    p['42'].inputs.model = ['43', 0];
+  }
+  return p;
 }
 
 function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '', img2Name = null, maskName = null) {
@@ -653,7 +706,7 @@ const ckptReady = fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.j
 
 function setStatus(msg, err) { $('status').textContent = msg; $('status').classList.toggle('err', !!err); }
 
-const FMT = { loraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
+const FMT = { loraW: v => (+v).toFixed(2), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
 function paint(r) {
   const pct = (r.value - r.min) / (r.max - r.min) * 100;
   r.style.setProperty('--pct', pct + '%');
@@ -885,7 +938,10 @@ $('go').onclick = async () => {
     let p = JSON.parse(JSON.stringify(workflow));
     let model = $('model').value;
     if (fixMask()) {
-      p = buildFillWorkflow(imgName, await upload(await exportMask(), `rv6m_${ts}_mask.png`), $('prompt').value.trim(), seed);
+      const fl = activeFluxLora();
+      const words = fl ? fl.words.filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase())) : [];
+      p = buildFillWorkflow(imgName, await upload(await exportMask(), `rv6m_${ts}_mask.png`),
+                            [$('prompt').value.trim(), ...words].filter(Boolean).join(', '), seed, fl);
     } else if (usesQwen()) {
       const extras = activeLoras();
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
@@ -1083,7 +1139,7 @@ async function waitForJobs(ids, t0) {
       }
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
-        const what = fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` : usesQwen()
+        const what = fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
           ? `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
             (activeLoras().length ? ' · LoRA' : '') + (mode === 'instruct' && hasSecond() ? ' · 2 photos' : '') + (qwenMask() ? ' · selected area' : '')
           : `${$('steps').value} steps · ${base.width}×${base.height}`;

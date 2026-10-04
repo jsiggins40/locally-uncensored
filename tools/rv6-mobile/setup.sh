@@ -107,6 +107,10 @@ if ls models/diffusion_models/ 2>/dev/null | grep -qi "fill.*onereward\|onerewar
 else
   bash <(curl -fsSL "$SRC/add-fill-model.sh") || echo "(Fix engine install failed; everything else works. Re-run: bash <(curl -fsSL $SRC/add-fill-model.sh))"
 fi
+# Fix runs on Flux, which needs its own NSFW LoRA (the Qwen one doesn't load on it)
+if ls models/diffusion_models/ 2>/dev/null | grep -qi "fill"; then
+  bash <(curl -fsSL "$SRC/add-flux-lora.sh") || echo "(Flux LoRA install failed; Fix still works without it)"
+fi
 
 # Optional: Seedream 5.0 edits through Atlas Cloud (the key stays on the VM)
 if [ ! -s "$HOME/.atlascloud_key" ]; then

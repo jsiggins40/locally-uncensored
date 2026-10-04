@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-shot setup of a fresh Ubuntu 24.04 CUDA GPU VM for the phone edit page:
-# GPU driver check/fix, ComfyUI + PyTorch, the edit page, Qwen-Image-Edit,
+# GPU driver check/fix, ComfyUI + PyTorch, the edit page, Qwen-Image-Edit (newest, 2511),
 # the Qwen Edit Plus NSFW LoRA and Tailscale. Safe to re-run: finished steps
 # are skipped. Run it inside tmux so a dropped connection doesn't stop it:
 #   tmux new -s setup "bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/setup.sh); bash"
@@ -64,7 +64,7 @@ fi
 step "4/7 Edit page (restarts ComfyUI, tests tap-to-select)"
 RV6M_NO_PROMPT=1 bash <(curl -fsSL "$SRC/install.sh") || echo "(page installer reported a problem above; continuing)"
 
-step "5/7 Qwen-Image-Edit (20-40 GB download)"
+step "5/7 Qwen-Image-Edit, newest version + its Lightning LoRA (20-45 GB download)"
 free_gb=$(df --output=avail -BG "$(readlink -f "$COMFY/models")" | tail -1 | tr -dc 0-9)
 have_edit=$(ls models/diffusion_models/ 2>/dev/null | grep -i qwen_image_edit || true)
 if [ -n "$have_edit" ]; then
@@ -126,5 +126,6 @@ echo
 echo "=============================================================="
 echo " ALL DONE. On your phone (Tailscale app connected) open:"
 echo "   https://$HOST/extensions/rv6_mobile/edit.html"
-echo " Choose ✨ Describe edit (or ☁️ Seedream if you gave an Atlas key)."
+echo " ✨ Describe edit: say what to change. Selected area: tap/paint a spot,"
+echo " say what to do with it, and only that spot changes."
 echo "=============================================================="

@@ -62,26 +62,36 @@ if not te or not vae:
 fetch("Comfy-Org/Qwen-Image_ComfyUI", max(te, key=precision), "text_encoders")
 fetch("Comfy-Org/Qwen-Image_ComfyUI", vae[0], "vae")
 
-print("== Fast 8-step LoRA (optional)")
-try:
-    lfiles = api.list_repo_files("lightx2v/Qwen-Image-Lightning")
-    v = version(edit_name)
-    loras = [f for f in lfiles if f.endswith(".safetensors") and "edit" in f.lower() and "8step" in f.lower()
-             and (version(f) == v)]
+print("== Fast Lightning LoRA (optional)")
+# 2509's lives in lightx2v/Qwen-Image-Lightning; newer versions get their own
+# repo (lightx2v/Qwen-Image-Edit-2511-Lightning). Those repos also hold 20 GB
+# merged models with "lightning" in the name: only take the small LoRA files.
+v = version(edit_name)
+found = None
+for repo in (f"lightx2v/Qwen-Image-Edit-{v}-Lightning", "lightx2v/Qwen-Image-Lightning"):
+    try:
+        lfiles = api.list_repo_files(repo)
+    except Exception as e:
+        print(f"   {repo}: not available ({type(e).__name__})"); continue
+    loras = [f for f in lfiles if f.endswith(".safetensors") and "edit" in f.lower() and "lightning" in f.lower()
+             and re.search(r"[48]step", f.lower()) and version(f) == v
+             and "e4m3fn" not in f.lower() and not os.path.basename(f).lower().startswith("qwen_image_edit")]
     if loras:
-        lora = max(loras, key=lambda f: (re.findall(r"V(\d+(?:\.\d+)?)", f) or ["0"])[-1] + str(precision(f)))
-        fetch("lightx2v/Qwen-Image-Lightning", lora, "loras")
-    else:
-        print("   none matches this edit model version; edits will use 30 steps")
-except Exception as e:
-    print("   skipped:", e)
+        # 8 steps over 4 (better quality), newest V, bf16 over fp32 (half the size)
+        found = (repo, max(loras, key=lambda f: ("8step" in f.lower(), (re.findall(r"V(\d+(?:\.\d+)?)", f) or ["0"])[-1],
+                                                 "bf16" in f.lower())))
+        break
+if found:
+    fetch(found[0], found[1], "loras")
+else:
+    print("   none matches this edit model version; edits will use 30 steps")
 shutil.rmtree("models/_hf_tmp", ignore_errors=True)
 PY
 
 echo "== Test edit on the GPU (first load of a 20B model takes a minute or two)"
 curl -fsS -o /dev/null -X POST localhost:8188/api/refresh 2>/dev/null || true
 venv/bin/python - <<'PY'
-import json, time, urllib.request, urllib.error
+import json, re, time, urllib.request, urllib.error
 def get(path):
     return json.load(urllib.request.urlopen("http://127.0.0.1:8188" + path))
 def opts(node, inp):
@@ -92,9 +102,14 @@ pick = lambda xs, f: sorted(x for x in xs if f(x.lower()))[-1:] or [None]
 unet = pick(opts("UNETLoader", "unet_name"), lambda n: "qwen" in n and "edit" in n)[0]
 clip = pick(opts("CLIPLoader", "clip_name"), lambda n: "qwen_2.5_vl" in n)[0]
 vae = pick(opts("VAELoader", "vae_name"), lambda n: "qwen_image_vae" in n)[0]
-lora = pick(opts("LoraLoaderModelOnly", "lora_name"), lambda n: "edit" in n and "lightning" in n)[0]
+ver = lambda n: (re.findall(r"(2\d{3})", n or "") or [""])[0]
+lights = [n for n in opts("LoraLoaderModelOnly", "lora_name") if "edit" in n.lower() and "lightning" in n.lower() and ver(n) == ver(unet)]
+lora = (sorted(n for n in lights if "8step" in n.lower()) or sorted(lights) or [None])[-1]
+steps_fast = 4 if lora and "4step" in lora.lower() else 8
+rm = get("/api/object_info/FluxKontextMultiReferenceLatentMethod").get("FluxKontextMultiReferenceLatentMethod", {}).get("input", {}).get("required", {})
+ref_key = next((k for k, v in rm.items() if "index_timestep_zero" in json.dumps(v)), None) if ver(unet) not in ("", "2509") else None
 plus = bool(get("/api/object_info/TextEncodeQwenImageEditPlus"))
-print("ComfyUI sees:", unet, "|", clip, "|", vae, "| lora:", lora, "| Plus encoder:", plus)
+print("ComfyUI sees:", unet, "|", clip, "|", vae, "| lora:", lora, "| Plus encoder:", plus, "| 2511 reference method:", bool(ref_key))
 if not (unet and clip and vae):
     raise SystemExit("EDIT TEST: files not visible to ComfyUI")
 enc = lambda t: ({"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["2", 0], "prompt": t, "vae": ["13", 0], "image1": ["5", 0]}}
@@ -109,13 +124,17 @@ p = {
     "6": {"class_type": "VAEEncode", "inputs": {"pixels": ["5", 0], "vae": ["13", 0]}},
     "12": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0], "shift": 3}},
     "7": {"class_type": "KSampler", "inputs": {"model": ["12", 0], "positive": ["3", 0], "negative": ["4", 0], "latent_image": ["6", 0],
-          "seed": 1, "steps": 8 if lora else 30, "cfg": 1 if lora else 2.5, "sampler_name": "euler", "scheduler": "simple", "denoise": 1}},
+          "seed": 1, "steps": steps_fast if lora else 30, "cfg": 1 if lora else 2.5, "sampler_name": "euler", "scheduler": "simple", "denoise": 1}},
     "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["13", 0]}},
     "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "rv6_edit_test", "images": ["8", 0]}},
 }
 if lora:
     p["11"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": lora, "strength_model": 1}}
     p["12"]["inputs"]["model"] = ["11", 0]
+if ref_key:
+    p["16"] = {"class_type": "FluxKontextMultiReferenceLatentMethod", "inputs": {"conditioning": ["3", 0], ref_key: "index_timestep_zero"}}
+    p["17"] = {"class_type": "FluxKontextMultiReferenceLatentMethod", "inputs": {"conditioning": ["4", 0], ref_key: "index_timestep_zero"}}
+    p["7"]["inputs"]["positive"] = ["16", 0]; p["7"]["inputs"]["negative"] = ["17", 0]
 req = urllib.request.Request("http://127.0.0.1:8188/api/prompt", json.dumps({"prompt": p}).encode(), {"Content-Type": "application/json"})
 try:
     pid = json.load(urllib.request.urlopen(req))["prompt_id"]

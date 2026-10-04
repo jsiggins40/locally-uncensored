@@ -77,6 +77,16 @@
   <select id="model"><option>Loading…</option></select>
   <div class="hint" id="modelHint"></div>
   </div>
+  <div id="aspectBox" class="hidden">
+    <label for="aspect">Picture shape</label>
+    <select id="aspect">
+      <option value="1104x1472">Portrait 3:4</option>
+      <option value="928x1664">Portrait 9:16 (phone)</option>
+      <option value="1328x1328">Square</option>
+      <option value="1472x1104">Landscape 4:3</option>
+      <option value="1664x928">Landscape 16:9</option>
+    </select>
+  </div>
   <label for="res">Working size (long side)</label>
   <select id="res">
     <option value="768">768 px (faster)</option>
@@ -90,6 +100,7 @@
     <button id="modeMask" class="on">Selected area</button>
     <button id="modeWhole">Restyle</button>
     <button id="modeCloud" class="hidden">☁️ Seedream</button>
+    <button id="modeCreate" class="hidden">✍️ Create</button>
   </div>
   <div id="engineBox" class="hidden">
     <div class="seg"><button id="engChange">✨ Change (Qwen)</button><button id="engFix">🩹 Fix (OneReward)</button></div>
@@ -306,10 +317,14 @@ let mode = 'mask', qwen = null, maskPrompt = null;
 let fill = null, engine = recall('maskEngine') || 'change';
 const fixMask = () => mode === 'mask' && !!fill && (engine === 'fix' || !qwen);
 const qwenMask = () => mode === 'mask' && !!qwen && !fixMask();
-const usesQwen = () => mode === 'instruct' || qwenMask();
+// ✍️ Create = Qwen-Image 2512: a new picture from text, no photo involved
+let create = null;
+const usesQwen = () => mode === 'instruct' || mode === 'create' || qwenMask();
 const MODE_TEXT = {
   cloud: ['Seedream 5.0 Pro on Atlas Cloud: describe the change like in ✨ Describe edit. 2K results, up to 10 photos, paid per image. Photos are sent to Atlas.',
           'What should change?', 'e.g. change the background to a beach at sunset'],
+  create: ['Describe a new picture and Qwen-Image 2512 makes it from scratch, no photo needed. Use "Keep editing this result" afterwards to edit it like any photo.',
+           'Describe the picture', 'e.g. photo of a woman on a beach at golden hour, natural light, 35mm'],
   instruct: ['Say what to change and the model edits the photo, e.g. "make her hair red" or "put her on a beach at sunset".',
              'What should change?', 'e.g. change the background to a beach at sunset'],
   mask: ['Tap or paint what you want changed. Everything else stays.',
@@ -323,25 +338,29 @@ const MODE_TEXT = {
 };
 function setMode(m) {
   // Describe edit and Seedream share the instruction text; the tag modes keep their own
-  const written = k => k === 'instruct' || k === 'cloud' || (k === 'mask' && !!(qwen || fill));
+  const written = k => k === 'instruct' || k === 'cloud' || k === 'create' || (k === 'mask' && !!(qwen || fill));
   if (written(m) && !written(mode)) maskPrompt = $('prompt').value;
   if (!written(m) && written(mode) && maskPrompt !== null) $('prompt').value = maskPrompt;
   const wasWritten = written(mode);
   mode = m; store('mode', m); setStatus('');
-  for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole'], ['modeCloud', 'cloud']]) $(id).classList.toggle('on', k === m);
+  for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole'], ['modeCloud', 'cloud'], ['modeCreate', 'create']]) $(id).classList.toggle('on', k === m);
+  const cr = m === 'create';
+  // No photo in Create: hide the photo area (its loaded/empty state is kept for when you switch back)
+  $('stage').style.display = $('empty').style.display = cr ? 'none' : '';
+  $('aspectBox').classList.toggle('hidden', !cr);
   const masked = m === 'mask', cloud = m === 'cloud', q = usesQwen(), inst = q, fx = fixMask();
   $('engineBox').classList.toggle('hidden', !(masked && fill && qwen));
   $('engChange').classList.toggle('on', masked && !fx); $('engFix').classList.toggle('on', fx);
   $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus)));
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud || fx);
-  for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud);
+  for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr);
   $('tagBox').classList.toggle('hidden', cloud || q || fx);
-  $('res').previousElementSibling.classList.toggle('hidden', cloud);
+  $('res').previousElementSibling.classList.toggle('hidden', cloud || cr);
   $('neg').closest('details').classList.toggle('hidden', cloud || fx);
   $('cloudBox').classList.toggle('hidden', !cloud);
-  $('speedBox').classList.toggle('hidden', !inst || !(qwen && qwen.lora));
-  $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));
+  $('speedBox').classList.toggle('hidden', !inst || !speedLora());
+  $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
   $('fluxLoraBox').classList.toggle('hidden', !fx || !fill.loras.length);
   const [hint, label, ph] = MODE_TEXT[fx ? 'fmask' : m === 'mask' && q ? 'qmask' : m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label;
@@ -351,6 +370,9 @@ function setMode(m) {
   if (cloud) {
     if (!wasWritten) $('prompt').value = '';
     if (!cloudCfg.configured) setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
+  } else if (cr) {
+    if (!wasWritten) $('prompt').value = '';
+    applySpeed();
   } else if (inst) {
     if (!wasWritten) $('prompt').value = '';
     if (!qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
@@ -365,6 +387,9 @@ $('modeInstruct').onclick = () => setMode('instruct');
 $('modeMask').onclick = () => setMode('mask');
 $('modeWhole').onclick = () => setMode('whole');
 $('modeCloud').onclick = () => setMode('cloud');
+$('modeCreate').onclick = () => setMode('create');
+$('aspect').value = recall('aspect') || '1104x1472';
+$('aspect').addEventListener('change', () => store('aspect', $('aspect').value));
 $('engChange').onclick = () => { engine = 'change'; store('maskEngine', engine); setMode('mask'); };
 $('engFix').onclick = () => { engine = 'fix'; store('maskEngine', engine); setMode('mask'); };
 
@@ -433,6 +458,16 @@ async function info(node) {
     .filter(n => n !== q.lora && !/lightning/i.test(n))
     .filter(n => /qwen/i.test((meta[n] || {}).baseModel || '') || (!meta[n] && /qwen/i.test(n)))
     .map(n => ({ file: n, label: (meta[n] || {}).name || n.replace(/\.safetensors$/, ''), words: (meta[n] || {}).trainedWords || [] }));
+  // Text-to-image Qwen (qwen_image_2512_...): newest version, bf16 first; shares the edit model's encoder and VAE
+  const cver = n => +((String(n).match(/(\d{4})/) || [])[1] || 0);
+  const cunet = optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /(^|\/)qwen_image_\d{4}/i.test(n) && !/edit/i.test(n))
+    .sort((a, b) => cver(a) - cver(b) || /bf16/i.test(a) - /bf16/i.test(b)).pop();
+  if (cunet && q.clip && q.vae) {
+    const cl = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name').filter(n => /lightning/i.test(n) && !/edit/i.test(n) && cver(n) === cver(cunet));
+    const cLora = cl.filter(n => /8step/i.test(n)).sort().pop() || cl.filter(n => /4step/i.test(n)).sort().pop() || null;
+    create = { unet: cunet, clip: q.clip, vae: q.vae, lora: cLora, loraSteps: cLora && /4step/i.test(cLora) && !/8step/i.test(cLora) ? 4 : 8 };
+    $('modeCreate').classList.remove('hidden');
+  }
   if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) { qwen = q; renderLoras(); }
   if (fill) {
     fill.loras = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name')
@@ -445,6 +480,7 @@ async function info(node) {
   let saved = recall('mode') || mode;
   if (saved === 'cloud' && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'whole' && !allModels.length) saved = 'instruct';
+  if (saved === 'create' && !create) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'mask' && !qwen && !fill && !allModels.length) saved = 'instruct';
   setMode(saved);  // (re-)run now that the models are known
   if (qwen) warmUp();
@@ -535,11 +571,16 @@ async function warmUp() {
 // model's own sampling (30 steps, CFG 4): about 3-4x slower, follows
 // structural instructions much better.
 let quality = recall('quality') === '1';
-function fastActive() { return !!(qwen && qwen.lora) && !quality; }
+const speedLora = () => mode === 'create' ? create && create.lora : qwen && qwen.lora;
+function fastActive() { return !!speedLora() && !quality; }
 function applySpeed() {
-  if (!qwen) return;
+  const cr = mode === 'create';
+  if (!(cr ? create : qwen)) return;
   $('fastBtn').classList.toggle('on', fastActive()); $('qualBtn').classList.toggle('on', !fastActive());
-  setVal($('steps'), fastActive() ? qwen.loraSteps : 30); setVal($('cfg'), fastActive() ? 1 : 4);
+  setVal($('steps'), fastActive() ? (cr ? create : qwen).loraSteps : cr ? 40 : 30); setVal($('cfg'), fastActive() ? 1 : 4);
+  if (cr) return void ($('speedHint').textContent = fastActive()
+    ? 'Fast: a few seconds per picture. Use Quality for the most detail and realism.'
+    : 'Quality: 40 steps, the most detail and realism. About 5x slower.');
   $('speedHint').textContent = fastActive()
     ? 'Fast: small changes (clothes, colours, objects). For poses or big changes use Quality.'
     : 'Quality: follows bigger changes like poses and layout. About 3-4x slower.';
@@ -600,6 +641,35 @@ $('file2').addEventListener('change', async e => {
   }
   renderMore();
 });
+
+function buildCreateWorkflow(text, negative, seed, steps, cfg, w, h, extras = []) {
+  // ComfyUI's Qwen-Image text-to-image graph (EmptySD3LatentImage, shift 3.1)
+  const p = {
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: create.unet, weight_dtype: 'default' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: create.clip, type: 'qwen_image' } },
+    '13': { class_type: 'VAELoader', inputs: { vae_name: create.vae } },
+    '3': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text } },
+    '4': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: negative } },
+    '6': { class_type: 'EmptySD3LatentImage', inputs: { width: w, height: h, batch_size: 1 } },
+    '12': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3.1 } },
+    '7': { class_type: 'KSampler', inputs: { model: ['12', 0], positive: ['3', 0], negative: ['4', 0], latent_image: ['6', 0],
+                                              seed, steps, cfg, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
+  };
+  let last = ['1', 0];
+  if (fastActive()) {
+    p['11'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: last, lora_name: create.lora, strength_model: 1 } };
+    last = ['11', 0];
+  }
+  extras.forEach((l, i) => {
+    const id = String(20 + i);
+    p[id] = { class_type: 'LoraLoaderModelOnly', inputs: { model: last, lora_name: l.file, strength_model: l.w } };
+    last = [id, 0];
+  });
+  p['12'].inputs.model = last;
+  return p;
+}
 
 function buildFillWorkflow(imgName, maskName, text, seed, lora = null) {
   // ComfyUI's standard Flux Fill inpaint (guidance 30, differential diffusion),
@@ -922,7 +992,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 $('go').onclick = async () => {
   if (mode === 'cloud') return cloudGo();
   if (!workflow) return setStatus('Workflow not loaded yet, reload the page.', true);
-  if ($('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
+  if (mode !== 'create' && $('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
   if (mode === 'mask' && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
   if (!$('prompt').value.trim() && !fixMask()) return setStatus(usesQwen() ? 'Type what you want changed first.' : 'Type a prompt or tap some tags first.', true);
   if (mode === 'instruct' && !qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
@@ -933,11 +1003,17 @@ $('go').onclick = async () => {
     setStatus('Connecting…');
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
     setStatus('Uploading…');
-    const imgName = await upload(await toBlob(base), `rv6m_${ts}_img.png`);
+    const imgName = mode === 'create' ? null : await upload(await toBlob(base), `rv6m_${ts}_img.png`);
     const seed = Math.floor(Math.random() * 2 ** 32);
     let p = JSON.parse(JSON.stringify(workflow));
     let model = $('model').value;
-    if (fixMask()) {
+    if (mode === 'create') {
+      const [w, h] = $('aspect').value.split('x').map(Number);
+      const extras = activeLoras();
+      const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
+      p = buildCreateWorkflow([$('prompt').value.trim(), ...words].join(', '), fastActive() ? '' : $('neg').value,
+                              seed, +$('steps').value, +$('cfg').value, w, h, extras);
+    } else if (fixMask()) {
       const fl = activeFluxLora();
       const words = fl ? fl.words.filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase())) : [];
       p = buildFillWorkflow(imgName, await upload(await exportMask(), `rv6m_${ts}_mask.png`),
@@ -1139,7 +1215,8 @@ async function waitForJobs(ids, t0) {
       }
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
-        const what = fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
+        const what = mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${$('aspect').value.replace('x', '×')}` +
+            (activeLoras().length ? ' · LoRA' : '') : fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
           ? `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
             (activeLoras().length ? ' · LoRA' : '') + (mode === 'instruct' && hasSecond() ? ' · 2 photos' : '') + (qwenMask() ? ' · selected area' : '')
           : `${$('steps').value} steps · ${base.width}×${base.height}`;
@@ -1223,6 +1300,7 @@ $('stop').onclick = async () => {
 
 $('again').onclick = async () => {
   await loadIntoCanvas($('out').src);
+  if (mode === 'create') setMode(qwen ? 'instruct' : 'mask');  // a created picture is edited like any photo
   $('result').classList.add('hidden');
   window.scrollTo({ top: 0, behavior: 'smooth' });
   setStatus('Paint the next area to change.');

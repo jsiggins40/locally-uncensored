@@ -112,6 +112,13 @@ if ls models/diffusion_models/ 2>/dev/null | grep -qi "fill"; then
   bash <(curl -fsSL "$SRC/add-flux-lora.sh") || echo "(Flux LoRA install failed; Fix still works without it)"
 fi
 
+step "6c/7 ✍️ Create: Qwen-Image 2512 text-to-image (about 41 GB)"
+if ls models/diffusion_models/ 2>/dev/null | grep -qiE "^qwen_image_[0-9]{4}"; then
+  echo "Already installed"
+else
+  bash <(curl -fsSL "$SRC/add-create-model.sh") || echo "(Create model install failed; editing works without it)"
+fi
+
 # Optional: Seedream 5.0 edits through Atlas Cloud (the key stays on the VM)
 if [ ! -s "$HOME/.atlascloud_key" ]; then
   echo

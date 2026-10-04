@@ -31,6 +31,9 @@ else
 fi
 
 step "2/7 System packages"
+# Refresh the package list first: a fresh image's list is often stale and
+# points at package versions Ubuntu has since replaced (404 Not Found)
+sudo apt-get update -qq
 sudo apt-get install -y -qq python3-venv git tmux wget curl >/dev/null
 
 step "3/7 ComfyUI and PyTorch"

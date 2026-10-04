@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-shot setup of a fresh Ubuntu 24.04 CUDA GPU VM for the phone edit page:
 # GPU driver check/fix, ComfyUI + PyTorch, the edit page, Qwen-Image-Edit (newest, 2511),
+# the FLUX Fill OneReward repair model,
 # the Qwen Edit Plus NSFW LoRA and Tailscale. Safe to re-run: finished steps
 # are skipped. Run it inside tmux so a dropped connection doesn't stop it:
 #   tmux new -s setup "bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/setup.sh); bash"
@@ -97,6 +98,13 @@ shutil.rmtree("models/_hf_tmp", ignore_errors=True)
 json.dump(meta, open(meta_path, "w"), indent=1)
 PY
 
+step "6b/7 🩹 Fix engine: FLUX.1 Fill dev OneReward (about 35 GB)"
+if ls models/diffusion_models/ 2>/dev/null | grep -qi "fill.*onereward\|onereward.*fill"; then
+  echo "Already installed"
+else
+  bash <(curl -fsSL "$SRC/add-fill-model.sh") || echo "(Fix engine install failed; everything else works. Re-run: bash <(curl -fsSL $SRC/add-fill-model.sh))"
+fi
+
 # Optional: Seedream 5.0 edits through Atlas Cloud (the key stays on the VM)
 if [ ! -s "$HOME/.atlascloud_key" ]; then
   echo
@@ -127,5 +135,6 @@ echo "=============================================================="
 echo " ALL DONE. On your phone (Tailscale app connected) open:"
 echo "   https://$HOST/extensions/rv6_mobile/edit.html"
 echo " ✨ Describe edit: say what to change. Selected area: tap/paint a spot,"
-echo " say what to do with it, and only that spot changes."
+echo " say what to do with it, and only that spot changes. Switch it to"
+echo " 🩹 Fix to repair or remove things with no prompt needed."
 echo "=============================================================="

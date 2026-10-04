@@ -91,6 +91,9 @@
     <button id="modeWhole">Restyle</button>
     <button id="modeCloud" class="hidden">☁️ Seedream</button>
   </div>
+  <div id="engineBox" class="hidden">
+    <div class="seg"><button id="engChange">✨ Change (Qwen)</button><button id="engFix">🩹 Fix (OneReward)</button></div>
+  </div>
   <div class="hint" id="modeHint" style="margin-bottom:8px">Tap or paint what you want changed. Everything else stays.</div>
   <div id="empty">Choose a photo, then tap or paint the area you want to change.</div>
   <div id="stage" class="hidden">
@@ -289,7 +292,11 @@ $('prompt').value = 'RAW photo, natural light'; syncChips();
 let mode = 'mask', qwen = null, maskPrompt = null;
 // Selected area runs on Qwen-Image-Edit too when it is installed: Qwen edits
 // only the masked part (latent noise mask) and the rest is pasted back untouched
-const qwenMask = () => mode === 'mask' && !!qwen;
+// 🩹 Fix = FLUX.1 Fill dev OneReward: repairs/removes the selection with natural
+// edges and colour; the prompt is optional (it describes what belongs there)
+let fill = null, engine = recall('maskEngine') || 'change';
+const fixMask = () => mode === 'mask' && !!fill && (engine === 'fix' || !qwen);
+const qwenMask = () => mode === 'mask' && !!qwen && !fixMask();
 const usesQwen = () => mode === 'instruct' || qwenMask();
 const MODE_TEXT = {
   cloud: ['Seedream 5.0 Pro on Atlas Cloud: describe the change like in ✨ Describe edit. 2K results, up to 10 photos, paid per image. Photos are sent to Atlas.',
@@ -300,33 +307,37 @@ const MODE_TEXT = {
          'What should appear in the painted area?', 'e.g. red silk dress'],
   qmask: ['Tap or paint the area to change, then say what to do with it. Everything outside it stays exactly as it was.',
           'What should change in the selected area?', 'e.g. make it a red silk dress'],
+  fmask: ['Paint over what to repair or remove (a blemish, a stray object, a bad hand, a seam). Leave the text empty to just fix it, or say what belongs there.',
+          'What belongs there? (optional)', 'e.g. bare wall, smooth skin, a natural hand'],
   whole: ['Changes the whole photo while keeping its layout. Lower strength keeps more of the original.',
           'Describe the whole image you want', 'e.g. woman on a beach at golden hour'],
 };
 function setMode(m) {
   // Describe edit and Seedream share the instruction text; the tag modes keep their own
-  const written = k => k === 'instruct' || k === 'cloud' || (k === 'mask' && !!qwen);
+  const written = k => k === 'instruct' || k === 'cloud' || (k === 'mask' && !!(qwen || fill));
   if (written(m) && !written(mode)) maskPrompt = $('prompt').value;
   if (!written(m) && written(mode) && maskPrompt !== null) $('prompt').value = maskPrompt;
   const wasWritten = written(mode);
   mode = m; store('mode', m); setStatus('');
   for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole'], ['modeCloud', 'cloud']]) $(id).classList.toggle('on', k === m);
-  const masked = m === 'mask', cloud = m === 'cloud', q = usesQwen(), inst = q;
+  const masked = m === 'mask', cloud = m === 'cloud', q = usesQwen(), inst = q, fx = fixMask();
+  $('engineBox').classList.toggle('hidden', !(masked && fill && qwen));
+  $('engChange').classList.toggle('on', masked && !fx); $('engFix').classList.toggle('on', fx);
   $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus)));
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
-  for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud);
+  for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud || fx);
   for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud);
-  $('tagBox').classList.toggle('hidden', cloud || q);
+  $('tagBox').classList.toggle('hidden', cloud || q || fx);
   $('res').previousElementSibling.classList.toggle('hidden', cloud);
-  $('neg').closest('details').classList.toggle('hidden', cloud);
+  $('neg').closest('details').classList.toggle('hidden', cloud || fx);
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !(qwen && qwen.lora));
   $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));
-  const [hint, label, ph] = MODE_TEXT[m === 'mask' && q ? 'qmask' : m];
+  const [hint, label, ph] = MODE_TEXT[fx ? 'fmask' : m === 'mask' && q ? 'qmask' : m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label;
   $('prompt').placeholder = ph;
   renderMore();
-  if (q && $('prompt').value === 'RAW photo, natural light') $('prompt').value = '';  // the tag modes' starter text
+  if ((q || fx) && $('prompt').value === 'RAW photo, natural light') $('prompt').value = '';  // the tag modes' starter text
   if (cloud) {
     if (!wasWritten) $('prompt').value = '';
     if (!cloudCfg.configured) setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
@@ -334,6 +345,8 @@ function setMode(m) {
     if (!wasWritten) $('prompt').value = '';
     if (!qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
     applySpeed();
+  } else if (fx) {
+    if (!wasWritten) $('prompt').value = '';
   } else if (m === 'whole') { applyPreset(); setVal($('denoise'), 0.5); }
   else applyPreset();
   syncChips();
@@ -342,6 +355,8 @@ $('modeInstruct').onclick = () => setMode('instruct');
 $('modeMask').onclick = () => setMode('mask');
 $('modeWhole').onclick = () => setMode('whole');
 $('modeCloud').onclick = () => setMode('cloud');
+$('engChange').onclick = () => { engine = 'change'; store('maskEngine', engine); setMode('mask'); };
+$('engFix').onclick = () => { engine = 'fix'; store('maskEngine', engine); setMode('mask'); };
 
 // Seedream on Atlas Cloud: the button only shows once the VM has a key
 let cloudCfg = { configured: false, model: '' };
@@ -358,7 +373,7 @@ const cloudReady = fetch('/rv6m/cloud/status').then(r => r.ok ? r.json() : null)
 
 function onModelChange() {
   store('model', $('model').value);
-  if (usesQwen() || mode === 'cloud') return;  // Qwen modes have its own fixed settings; the checkpoint list loading must not overwrite them
+  if (usesQwen() || fixMask() || mode === 'cloud') return;  // Qwen/Fix modes have its own fixed settings; the checkpoint list loading must not overwrite them
   applyPreset(); if (mode === 'whole') setVal($('denoise'), 0.5);
 }
 
@@ -371,9 +386,17 @@ async function info(node) {
   try { const r = await fetch('/api/object_info/' + node); return r.ok ? await r.json() : {}; } catch (e) { return {}; }
 }
 (async () => {
-  const [unet, clip, vae, lora, plus, single, refm] = await Promise.all(
+  const [unet, clip, vae, lora, plus, single, refm, dual] = await Promise.all(
     ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit',
-     'FluxKontextMultiReferenceLatentMethod'].map(info));
+     'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader'].map(info));
+  const f = {
+    unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /flux/i.test(n) && /fill/i.test(n))
+            .sort((a, b) => /onereward/i.test(a) - /onereward/i.test(b) || /fp8/i.test(b) - /fp8/i.test(a)).pop(),
+    t5: optionsOf(dual, 'DualCLIPLoader', 'clip_name1').filter(n => /t5xxl/i.test(n)).sort().pop(),
+    clipl: optionsOf(dual, 'DualCLIPLoader', 'clip_name2').filter(n => /(^|\/)clip_l/i.test(n)).sort().pop(),
+    vae: optionsOf(vae, 'VAELoader', 'vae_name').find(n => /(^|\/)ae\.(safetensors|sft)$/i.test(n)),
+  };
+  if (f.unet && f.t5 && f.clipl && f.vae) fill = f;
   const pick = (list, re) => list.filter(n => re.test(n)).sort().pop();
   const q = {
     // bf16 over fp8 when both exist: A100-class GPUs have no native fp8
@@ -402,11 +425,11 @@ async function info(node) {
     .map(n => ({ file: n, label: (meta[n] || {}).name || n.replace(/\.safetensors$/, ''), words: (meta[n] || {}).trainedWords || [] }));
   if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) { qwen = q; renderLoras(); }
   await cloudReady; await ckptReady.catch(() => {});
-  $('modeMask').classList.toggle('hidden', !qwen && !allModels.length);
+  $('modeMask').classList.toggle('hidden', !qwen && !fill && !allModels.length);
   let saved = recall('mode') || mode;
   if (saved === 'cloud' && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'whole' && !allModels.length) saved = 'instruct';
-  if (saved === 'mask' && !qwen && !allModels.length) saved = 'instruct';
+  if (saved === 'mask' && !qwen && !fill && !allModels.length) saved = 'instruct';
   setMode(saved);  // (re-)run now that the models are known
   if (qwen) warmUp();
 })();
@@ -529,6 +552,34 @@ $('file2').addEventListener('change', async e => {
   }
   renderMore();
 });
+
+function buildFillWorkflow(imgName, maskName, text, seed) {
+  // ComfyUI's standard Flux Fill inpaint (guidance 30, differential diffusion),
+  // then the same soft-edged paste-back over the original as Qwen's selection
+  return {
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: fill.unet, weight_dtype: 'default' } },
+    '2': { class_type: 'DualCLIPLoader', inputs: { clip_name1: fill.t5, clip_name2: fill.clipl, type: 'flux' } },
+    '13': { class_type: 'VAELoader', inputs: { vae_name: fill.vae } },
+    '5': { class_type: 'LoadImage', inputs: { image: imgName } },
+    '30': { class_type: 'LoadImageMask', inputs: { image: maskName, channel: 'red' } },
+    '31': { class_type: 'GrowMask', inputs: { mask: ['30', 0], expand: 6, tapered_corners: true } },
+    '3': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text } },
+    '4': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: '' } },
+    '40': { class_type: 'FluxGuidance', inputs: { conditioning: ['3', 0], guidance: 30 } },
+    '41': { class_type: 'InpaintModelConditioning', inputs: { positive: ['40', 0], negative: ['4', 0], vae: ['13', 0],
+                                                               pixels: ['5', 0], mask: ['31', 0], noise_mask: true } },
+    '42': { class_type: 'DifferentialDiffusion', inputs: { model: ['1', 0] } },
+    '7': { class_type: 'KSampler', inputs: { model: ['42', 0], positive: ['41', 0], negative: ['41', 1], latent_image: ['41', 2],
+                                              seed, steps: 28, cfg: 1, sampler_name: 'euler', scheduler: 'normal', denoise: 1 } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
+    '33': { class_type: 'MaskToImage', inputs: { mask: ['31', 0] } },
+    '34': { class_type: 'ImageBlur', inputs: { image: ['33', 0], blur_radius: 8, sigma: 4 } },
+    '35': { class_type: 'ImageToMask', inputs: { image: ['34', 0], channel: 'red' } },
+    '36': { class_type: 'ImageCompositeMasked', inputs: { destination: ['5', 0], source: ['8', 0], x: 0, y: 0,
+                                                          resize_source: false, mask: ['35', 0] } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['36', 0] } },
+  };
+}
 
 function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '', img2Name = null, maskName = null) {
   // The Plus encoder takes up to three images; the output keeps picture 1's size and layout
@@ -820,7 +871,7 @@ $('go').onclick = async () => {
   if (!workflow) return setStatus('Workflow not loaded yet, reload the page.', true);
   if ($('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
   if (mode === 'mask' && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
-  if (!$('prompt').value.trim()) return setStatus(usesQwen() ? 'Type what you want changed first.' : 'Type a prompt or tap some tags first.', true);
+  if (!$('prompt').value.trim() && !fixMask()) return setStatus(usesQwen() ? 'Type what you want changed first.' : 'Type a prompt or tap some tags first.', true);
   if (mode === 'instruct' && !qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
   $('go').disabled = true; stopRequested = false; currentJobs = [];
   $('stop').classList.remove('hidden');
@@ -833,7 +884,9 @@ $('go').onclick = async () => {
     const seed = Math.floor(Math.random() * 2 ** 32);
     let p = JSON.parse(JSON.stringify(workflow));
     let model = $('model').value;
-    if (usesQwen()) {
+    if (fixMask()) {
+      p = buildFillWorkflow(imgName, await upload(await exportMask(), `rv6m_${ts}_mask.png`), $('prompt').value.trim(), seed);
+    } else if (usesQwen()) {
       const extras = activeLoras();
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
       const instruction = [$('prompt').value.trim(), ...words].join(', ');
@@ -855,7 +908,7 @@ $('go').onclick = async () => {
     } else {
       p['10'].inputs.image = await upload(await exportMask(), `rv6m_${ts}_mask.png`);
     }
-    if (!usesQwen()) {
+    if (!usesQwen() && !fixMask()) {
       p['1'].inputs.ckpt_name = model;
       if (!isRV(model)) { p['6'].inputs.vae = ['1', 2]; p['8'].inputs.vae = ['1', 2]; delete p['2']; }
       p['5'].inputs.image = imgName;
@@ -1030,7 +1083,7 @@ async function waitForJobs(ids, t0) {
       }
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
-        const what = usesQwen()
+        const what = fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` : usesQwen()
           ? `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
             (activeLoras().length ? ' · LoRA' : '') + (mode === 'instruct' && hasSecond() ? ' · 2 photos' : '') + (qwenMask() ? ' · selected area' : '')
           : `${$('steps').value} steps · ${base.width}×${base.height}`;

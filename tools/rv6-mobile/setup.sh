@@ -119,6 +119,9 @@ else
   bash <(curl -fsSL "$SRC/add-create-model.sh") || echo "(Create model install failed; editing works without it)"
 fi
 
+step "6d/7 🔓 Abliterated text encoder for Qwen (about 16 GB)"
+bash <(curl -fsSL "$SRC/add-abliterated-encoder.sh") || echo "(Abliterated encoder install failed; the standard one still works)"
+
 # Optional: Seedream 5.0 edits through Atlas Cloud (the key stays on the VM)
 if [ ! -s "$HOME/.atlascloud_key" ]; then
   echo

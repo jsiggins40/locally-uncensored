@@ -159,6 +159,11 @@
     <div class="seg" style="margin-top:12px"><button id="fastBtn">⚡ Fast</button><button id="qualBtn">✨ Quality</button></div>
     <div class="hint" id="speedHint"></div>
   </div>
+  <div id="encBox" class="hidden">
+    <label>Text encoder (reads your instruction)</label>
+    <div class="seg"><button id="encStd">Standard</button><button id="encAbl">🔓 Abliterated</button></div>
+    <div class="hint" id="encHint"></div>
+  </div>
   <div id="fluxLoraBox" class="hidden">
     <label for="fluxLoraSel">Flux LoRA (for 🩹 Fix)</label>
     <select id="fluxLoraSel"></select>
@@ -360,6 +365,9 @@ function setMode(m) {
   $('neg').closest('details').classList.toggle('hidden', cloud || fx);
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !speedLora());
+  const encOwner = cr ? create : qwen;
+  $('encBox').classList.toggle('hidden', !inst || !(encOwner && encOwner.clipAbl));
+  applyEncoder();
   $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
   $('fluxLoraBox').classList.toggle('hidden', !fx || !fill.loras.length);
   const [hint, label, ph] = MODE_TEXT[fx ? 'fmask' : m === 'mask' && q ? 'qmask' : m];
@@ -437,7 +445,9 @@ async function info(node) {
     // bf16 over fp8 when both exist: A100-class GPUs have no native fp8
     unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /qwen.?image.?edit/i.test(n))
             .sort((a, b) => /bf16/i.test(a) - /bf16/i.test(b) || a.localeCompare(b)).pop(),
-    clip: pick(optionsOf(clip, 'CLIPLoader', 'clip_name'), /qwen_?2\.5_?vl/i),
+    clip: optionsOf(clip, 'CLIPLoader', 'clip_name').filter(n => /qwen_?2\.5_?vl/i.test(n) && !/abliterat|uncensor|heretic/i.test(n)).sort().pop(),
+    // Abliterated Qwen2.5-VL (add-abliterated-encoder.sh): offered as a switch
+    clipAbl: optionsOf(clip, 'CLIPLoader', 'clip_name').filter(n => /qwen_?2\.5_?vl/i.test(n) && /abliterat|uncensor|heretic/i.test(n)).sort().pop() || null,
     vae: pick(optionsOf(vae, 'VAELoader', 'vae_name'), /qwen_image_vae/i),
     plus: !!plus.TextEncodeQwenImageEditPlus,
   };
@@ -465,7 +475,7 @@ async function info(node) {
   if (cunet && q.clip && q.vae) {
     const cl = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name').filter(n => /lightning/i.test(n) && !/edit/i.test(n) && cver(n) === cver(cunet));
     const cLora = cl.filter(n => /8step/i.test(n)).sort().pop() || cl.filter(n => /4step/i.test(n)).sort().pop() || null;
-    create = { unet: cunet, clip: q.clip, vae: q.vae, lora: cLora, loraSteps: cLora && /4step/i.test(cLora) && !/8step/i.test(cLora) ? 4 : 8 };
+    create = { unet: cunet, clip: q.clip, clipAbl: q.clipAbl, vae: q.vae, lora: cLora, loraSteps: cLora && /4step/i.test(cLora) && !/8step/i.test(cLora) ? 4 : 8 };
     $('modeCreate').classList.remove('hidden');
   }
   if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) { qwen = q; renderLoras(); }
@@ -571,6 +581,20 @@ async function warmUp() {
 // model's own sampling (30 steps, CFG 4): about 3-4x slower, follows
 // structural instructions much better.
 let quality = recall('quality') === '1';
+// Text encoder switch: the abliterated Qwen2.5-VL passes explicit instructions
+// on unsoftened. Same choice for Describe edit, Change and Create.
+let encoder = recall('encoder') || 'abl';
+const activeClip = m => encoder === 'abl' && m.clipAbl ? m.clipAbl : m.clip;
+const ablActive = () => { const m = mode === 'create' ? create : qwen; return !!(m && m.clipAbl && encoder === 'abl'); };
+function applyEncoder() {
+  $('encStd').classList.toggle('on', encoder !== 'abl'); $('encAbl').classList.toggle('on', encoder === 'abl');
+  $('encHint').textContent = encoder === 'abl'
+    ? 'Abliterated: explicit instructions reach the model unsoftened. Pair it with the NSFW LoRA for anatomy.'
+    : 'Standard: Qwen\'s original encoder.';
+}
+$('encStd').onclick = () => { encoder = 'std'; store('encoder', encoder); applyEncoder(); };
+$('encAbl').onclick = () => { encoder = 'abl'; store('encoder', encoder); applyEncoder(); };
+
 const speedLora = () => mode === 'create' ? create && create.lora : qwen && qwen.lora;
 function fastActive() { return !!speedLora() && !quality; }
 function applySpeed() {
@@ -646,7 +670,7 @@ function buildCreateWorkflow(text, negative, seed, steps, cfg, w, h, extras = []
   // ComfyUI's Qwen-Image text-to-image graph (EmptySD3LatentImage, shift 3.1)
   const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: create.unet, weight_dtype: 'default' } },
-    '2': { class_type: 'CLIPLoader', inputs: { clip_name: create.clip, type: 'qwen_image' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: activeClip(create), type: 'qwen_image' } },
     '13': { class_type: 'VAELoader', inputs: { vae_name: create.vae } },
     '3': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text } },
     '4': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: negative } },
@@ -712,7 +736,7 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = 
     : { class_type: 'TextEncodeQwenImageEdit', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image: ['5', 0] } };
   const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: qwen.unet, weight_dtype: 'default' } },
-    '2': { class_type: 'CLIPLoader', inputs: { clip_name: qwen.clip, type: 'qwen_image' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: activeClip(qwen), type: 'qwen_image' } },
     '13': { class_type: 'VAELoader', inputs: { vae_name: qwen.vae } },
     '5': { class_type: 'LoadImage', inputs: { image: imgName } },
     ...(img2Name ? { '15': { class_type: 'LoadImage', inputs: { image: img2Name } } } : {}),
@@ -1216,9 +1240,9 @@ async function waitForJobs(ids, t0) {
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
         const what = mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${$('aspect').value.replace('x', '×')}` +
-            (activeLoras().length ? ' · LoRA' : '') : fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
+            (activeLoras().length ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') : fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
           ? `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
-            (activeLoras().length ? ' · LoRA' : '') + (mode === 'instruct' && hasSecond() ? ' · 2 photos' : '') + (qwenMask() ? ' · selected area' : '')
+            (activeLoras().length ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') + (mode === 'instruct' && hasSecond() ? ' · 2 photos' : '') + (qwenMask() ? ' · selected area' : '')
           : `${$('steps').value} steps · ${base.width}×${base.height}`;
         setStatus(`Done in ${secs}s. GPU time ${gpu ? gpu.toFixed(1) + 's' : '?'}` +
                   (ids.length > 1 ? ` for ${ids.length} images` : '') + `, waiting/loading ${gpu ? Math.max(0, secs - gpu).toFixed(0) + 's' : '?'}.` +

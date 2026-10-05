@@ -155,6 +155,11 @@
   <div class="ctl"><button class="step" data-for="denoise" data-dir="-1" aria-label="Less">−</button><input id="denoise" type="range" min="0.3" max="1" step="0.01" value="1" data-nudge="0.05"><button class="step" data-for="denoise" data-dir="1" aria-label="More">+</button><span class="val" id="denoiseVal"></span></div>
   <div class="hint" id="denoiseHint">1.0 replaces the area completely. 0.5–0.7 keeps more of the original.</div>
   </div>
+  <div id="editModelBox" class="hidden">
+    <label>Edit model</label>
+    <div class="seg"><button id="emQwen">Qwen 2511 + LoRA</button><button id="emAio">⚡ Rapid AIO NSFW</button></div>
+    <div class="hint" id="emHint"></div>
+  </div>
   <div id="speedBox" class="hidden">
     <div class="seg" style="margin-top:12px"><button id="fastBtn">⚡ Fast</button><button id="qualBtn">✨ Quality</button></div>
     <div class="hint" id="speedHint"></div>
@@ -253,7 +258,7 @@ fetch('./workflow.json').then(r => r.json()).then(w => workflow = w)
 
 // SD1.5 Realistic Vision uses the separate VAE file; SDXL checkpoints use their own.
 const isRV = name => /realistic_vision/i.test(name);
-let allModels = [];
+let allModels = [], aioCkpt = null;
 const isInpaint = name => /inpaint/i.test(name);
 function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
@@ -368,7 +373,9 @@ function setMode(m) {
   const encOwner = cr ? create : qwen;
   $('encBox').classList.toggle('hidden', !inst || !(encOwner && encOwner.clipAbl));
   applyEncoder();
-  $('loraBox').classList.toggle('hidden', !inst || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
+  $('editModelBox').classList.toggle('hidden', !(aioCkpt && qwen && (m === 'instruct' || (masked && !fx))));
+  applyEditModel();
+  $('loraBox').classList.toggle('hidden', !inst || aioActive() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
   $('fluxLoraBox').classList.toggle('hidden', !fx || !fill.loras.length);
   const [hint, label, ph] = MODE_TEXT[fx ? 'fmask' : m === 'mask' && q ? 'qmask' : m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label;
@@ -595,12 +602,29 @@ function applyEncoder() {
 $('encStd').onclick = () => { encoder = 'std'; store('encoder', encoder); applyEncoder(); };
 $('encAbl').onclick = () => { encoder = 'abl'; store('encoder', encoder); applyEncoder(); };
 
-const speedLora = () => mode === 'create' ? create && create.lora : qwen && qwen.lora;
+// ⚡ Rapid AIO (Phr00t): 2511 + NSFW LoRAs + Lightning + encoder/VAE in one fp8
+// checkpoint; 4 (Fast) or 8 (Quality) steps at CFG 1. Only with a Qwen edit model too
+// (it uses the same Plus encoder node). Chosen per device.
+let editModel = recall('editModel') || 'aio';
+const aioActive = () => !!(aioCkpt && qwen) && editModel === 'aio' && (mode === 'instruct' || qwenMask());
+function applyEditModel() {
+  $('emQwen').classList.toggle('on', editModel !== 'aio'); $('emAio').classList.toggle('on', editModel === 'aio');
+  $('emHint').textContent = editModel === 'aio'
+    ? 'Rapid AIO: NSFW and speed-up built in, so no LoRA menu. Fast = 4 steps, Quality = 8.'
+    : 'Qwen 2511 with your LoRA menu (Scottzilla NSFW etc.).';
+}
+$('emQwen').onclick = () => { editModel = 'qwen'; store('editModel', editModel); setMode(mode); };
+$('emAio').onclick = () => { editModel = 'aio'; store('editModel', editModel); setMode(mode); };
+const speedLora = () => aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
 function fastActive() { return !!speedLora() && !quality; }
 function applySpeed() {
   const cr = mode === 'create';
   if (!(cr ? create : qwen)) return;
   $('fastBtn').classList.toggle('on', fastActive()); $('qualBtn').classList.toggle('on', !fastActive());
+  if (aioActive()) {
+    setVal($('steps'), fastActive() ? 4 : 8); setVal($('cfg'), 1);
+    return void ($('speedHint').textContent = fastActive() ? 'Fast: 4 steps.' : 'Quality: 8 steps, a little more detail.');
+  }
   setVal($('steps'), fastActive() ? (cr ? create : qwen).loraSteps : cr ? 40 : 30); setVal($('cfg'), fastActive() ? 1 : 4);
   if (cr) return void ($('speedHint').textContent = fastActive()
     ? 'Fast: a few seconds per picture. Use Quality for the most detail and realism.'
@@ -780,6 +804,23 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = 
     p['7'].inputs.latent_image = ['32', 0];
     p['9'].inputs.images = ['36', 0];
   }
+  return aioActive() ? toAio(p) : p;
+}
+
+// Same graph on the Rapid AIO checkpoint: its model/encoder/VAE replace the
+// separate loaders (the 🔓 abliterated encoder still swaps in when chosen); the
+// speed-up and NSFW LoRAs are baked in, so no LoRA nodes; Phr00t's sampler.
+function toAio(p) {
+  const useAbl = !!(qwen.clipAbl && encoder === 'abl');
+  for (const id of ['11', '12', '13', ...Object.keys(p).filter(k => +k >= 20 && +k < 30)]) delete p[id];
+  if (!useAbl) delete p['2'];
+  p['1'] = { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: aioCkpt } };
+  for (const n of Object.values(p)) for (const [k, v] of Object.entries(n.inputs)) {
+    if (!Array.isArray(v)) continue;
+    if (v[0] === '13') n.inputs[k] = ['1', 2];
+    else if (v[0] === '2' && !useAbl) n.inputs[k] = ['1', 1];
+  }
+  Object.assign(p['7'].inputs, { model: ['1', 0], cfg: 1, sampler_name: 'euler_ancestral', scheduler: 'beta' });
   return p;
 }
 $('resetPreset').onclick = applyPreset;
@@ -787,7 +828,9 @@ $('model').addEventListener('change', onModelChange);
 
 const ckptReady = fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.json()).then(info => {
   const v = info.CheckpointLoaderSimple.input.required.ckpt_name;
-  allModels = Array.isArray(v[0]) ? v[0] : (v[1] && v[1].options) || [];
+  const ck = Array.isArray(v[0]) ? v[0] : (v[1] && v[1].options) || [];
+  aioCkpt = ck.filter(n => /rapid.?aio/i.test(n)).sort().pop() || null;
+  allModels = ck.filter(n => !/rapid.?aio/i.test(n));
   const names = allModels.filter(n => !/^Realistic_Vision_V6\.0_NV_B1_fp16/.test(n));
   $('modeWhole').classList.toggle('hidden', !allModels.length);
   $('model').innerHTML = '';
@@ -1043,7 +1086,7 @@ $('go').onclick = async () => {
       p = buildFillWorkflow(imgName, await upload(await exportMask(), `rv6m_${ts}_mask.png`),
                             [$('prompt').value.trim(), ...words].filter(Boolean).join(', '), seed, fl);
     } else if (usesQwen()) {
-      const extras = activeLoras();
+      const extras = aioActive() ? [] : activeLoras();  // the AIO has its NSFW LoRAs baked in
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
       const instruction = [$('prompt').value.trim(), ...words].join(', ');
       // The negative only has an effect when CFG > 1, i.e. in Quality mode
@@ -1241,8 +1284,8 @@ async function waitForJobs(ids, t0) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
         const what = mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${$('aspect').value.replace('x', '×')}` +
             (activeLoras().length ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') : fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
-          ? `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
-            (activeLoras().length ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') + (mode === 'instruct' && hasSecond() ? ' · 2 photos' : '') + (qwenMask() ? ' · selected area' : '')
+          ? (aioActive() ? 'Rapid AIO · ' : '') + `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
+            (activeLoras().length && !aioActive() ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') + (mode === 'instruct' && hasSecond() ? ' · 2 photos' : '') + (qwenMask() ? ' · selected area' : '')
           : `${$('steps').value} steps · ${base.width}×${base.height}`;
         setStatus(`Done in ${secs}s. GPU time ${gpu ? gpu.toFixed(1) + 's' : '?'}` +
                   (ids.length > 1 ? ` for ${ids.length} images` : '') + `, waiting/loading ${gpu ? Math.max(0, secs - gpu).toFixed(0) + 's' : '?'}.` +

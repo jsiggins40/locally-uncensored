@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-shot setup of a fresh Ubuntu 24.04 CUDA GPU VM for the phone edit page:
 # GPU driver check/fix, ComfyUI + PyTorch, the edit page, Qwen-Image-Edit (newest, 2511),
-# the FLUX Fill OneReward repair model,
+# the Rapid AIO NSFW edit model,
 # the Qwen Edit Plus NSFW LoRA and Tailscale. Safe to re-run: finished steps
 # are skipped. Run it inside tmux so a dropped connection doesn't stop it:
 #   tmux new -s setup "bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/setup.sh); bash"
@@ -101,16 +101,8 @@ shutil.rmtree("models/_hf_tmp", ignore_errors=True)
 json.dump(meta, open(meta_path, "w"), indent=1)
 PY
 
-step "6b/7 🩹 Fix engine: FLUX.1 Fill dev OneReward (about 35 GB)"
-if ls models/diffusion_models/ 2>/dev/null | grep -qi "fill.*onereward\|onereward.*fill"; then
-  echo "Already installed"
-else
-  bash <(curl -fsSL "$SRC/add-fill-model.sh") || echo "(Fix engine install failed; everything else works. Re-run: bash <(curl -fsSL $SRC/add-fill-model.sh))"
-fi
-# Fix runs on Flux, which needs its own NSFW LoRA (the Qwen one doesn't load on it)
-if ls models/diffusion_models/ 2>/dev/null | grep -qi "fill"; then
-  bash <(curl -fsSL "$SRC/add-flux-lora.sh") || echo "(Flux LoRA install failed; Fix still works without it)"
-fi
+step "6b/7 ⚡ Rapid AIO NSFW edit model (about 28 GB)"
+bash <(curl -fsSL "$SRC/add-aio-model.sh") || echo "(Rapid AIO install failed; Qwen 2511 + LoRA still works)"
 
 step "6c/7 ✍️ Create: Qwen-Image 2512 text-to-image (about 41 GB)"
 if ls models/diffusion_models/ 2>/dev/null | grep -qiE "^qwen_image_[0-9]{4}"; then
@@ -152,6 +144,5 @@ echo "=============================================================="
 echo " ALL DONE. On your phone (Tailscale app connected) open:"
 echo "   https://$HOST/extensions/rv6_mobile/edit.html"
 echo " ✨ Describe edit: say what to change. Selected area: tap/paint a spot,"
-echo " say what to do with it, and only that spot changes. Switch it to"
-echo " 🩹 Fix to repair or remove things with no prompt needed."
+echo " say what to do with it, and only that spot changes."
 echo "=============================================================="

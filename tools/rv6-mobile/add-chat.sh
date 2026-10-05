@@ -13,8 +13,12 @@
 # Safe to re-run: finished steps are skipped.
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-chat.sh)
 # Pick models:  CHAT_MODELS="qwen 8b 70b" bash <(curl ...)
+# Qwen on the CPU (default) keeps the whole GPU for images/video; slower
+# replies (a few words a second), so it uses the smaller Q4 file and thinks
+# "low". On the GPU instead:  CHAT_DEVICE=gpu bash <(curl ...)
 set -euo pipefail
-WANT="${CHAT_MODELS:-qwen 8b}"
+WANT="${CHAT_MODELS:-qwen}"
+DEVICE="${CHAT_DEVICE:-cpu}"
 has() { [[ " $WANT " == *" $1 "* ]]; }
 ok=1
 if mountpoint -q /ephemeral 2>/dev/null; then BIG=/ephemeral; else BIG="$HOME"; fi
@@ -72,10 +76,22 @@ if has 8b || has 70b; then
   fi
 fi
 
+if ! has 8b && ! has 70b && systemctl is-active --quiet ollama 2>/dev/null; then
+  sudo systemctl disable --now ollama >/dev/null 2>&1 && echo "== Ollama switched off (only Qwen runs now)"
+fi
+
 # ---------------------------------------------------- llama.cpp + Qwen 3.8
 if has qwen; then
   echo "== llama.cpp (llama-server with the GPU)"
   SERVER="$HOME/llama.cpp/build/bin/llama-server"
+  if [ ! -x "$SERVER" ] && [ "$DEVICE" = cpu ]; then
+    # CPU only: no CUDA needed, quick build
+    sudo apt-get install -y -qq git cmake build-essential >/dev/null
+    [ -d "$HOME/llama.cpp" ] || git clone -q --depth 1 https://github.com/ggml-org/llama.cpp "$HOME/llama.cpp"
+    echo "   building for the CPU (a few minutes)"
+    cmake -S "$HOME/llama.cpp" -B "$HOME/llama.cpp/build" -DGGML_NATIVE=ON -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release >/dev/null
+    cmake --build "$HOME/llama.cpp/build" --target llama-server -j"$(nproc)" >/dev/null
+  fi
   if [ ! -x "$SERVER" ]; then
     sudo apt-get install -y -qq git cmake build-essential >/dev/null
     export PATH="/usr/local/cuda/bin:$PATH"
@@ -98,12 +114,14 @@ if has qwen; then
   fi
   "$SERVER" --version 2>&1 | head -2
 
-  echo "== Qwen 3.8 27B Uncensored (about 23 GB)"
+  echo "== Qwen 3.8 27B Uncensored ($([ "$DEVICE" = cpu ] && echo 'Q4, about 17 GB' || echo 'Q6, about 23 GB'))"
   mkdir -p "$LLM"
-  "$HOME/ComfyUI/venv/bin/python" - "$LLM" <<'PY' || ok=0
+  "$HOME/ComfyUI/venv/bin/python" - "$LLM" "$DEVICE" <<'PY' || ok=0
 import os, sys
 from huggingface_hub import HfApi, hf_hub_download
-out = sys.argv[1]
+out, device = sys.argv[1], sys.argv[2]
+# CPU speed is limited by memory reads, so the smaller Q4 first there
+order = ("Q4_K_M", "Q4_K", "Q5_K_M", "Q5_K", "Q6_K") if device == "cpu" else ("Q6_K", "Q6_K_L", "Q5_K_M", "Q5_K", "Q4_K_M", "Q4_K")
 api = HfApi()
 # OrcaRouter's build (best compliance in the Sep 2026 benchmarks) via bartowski's
 # open mirror; OrcaRouter's own repo is gated; huihui-ai's is the fallback.
@@ -117,7 +135,7 @@ for repo, label in sources:
         print(f"   {repo}: {type(e).__name__}"); continue
     ggufs = [f for f in files if f.endswith(".gguf") and "mmproj" not in f.lower()]
     model = None
-    for q in ("Q6_K", "Q6_K_L", "Q5_K_M", "Q5_K", "Q4_K_M", "Q4_K"):
+    for q in order:
         parts = sorted(f for f in ggufs if f"-{q}." in f or f"-{q}-" in f or f"_{q}." in f or f"/{q}/" in f)
         if parts: model = parts; break
     mm = sorted((f for f in files if "mmproj" in f.lower() and f.endswith(".gguf")),
@@ -136,14 +154,20 @@ for repo, label in sources:
 else:
     sys.exit("   COULD NOT GET Qwen 3.8 from any source")
 PY
-  # Runs llama-server with Qwen's own template (--jinja), thinking at "medium",
-  # 32K context, everything on the GPU
+  # Runs llama-server with Qwen's own template (--jinja). GPU: everything on
+  # the GPU, thinking "medium", 32K context. CPU: the GPU is hidden from it
+  # entirely, all cores, thinking "low", 16K context.
+  if [ "$DEVICE" = cpu ]; then
+    run='CUDA_VISIBLE_DEVICES= exec'; dev="-ngl 0 -t $(nproc) -c 16384"; effort=low
+  else
+    run=exec; dev="-ngl 99 -c 32768"; effort=medium
+  fi
   cat > "$HOME/.local/bin/qwen-start" <<SH
 #!/usr/bin/env bash
 . "$LLM/qwen-chat.env"
 mm=(); [ -n "\$MMPROJ" ] && mm=(--mmproj "\$MMPROJ")
-exec "$SERVER" -m "\$MODEL" "\${mm[@]}" --jinja -ngl 99 -c 32768 --host 127.0.0.1 --port 8081 \\
-  --alias qwen3.8-27b-uncensored --chat-template-kwargs '{"reasoning_effort":"medium"}'
+$run "$SERVER" -m "\$MODEL" "\${mm[@]}" --jinja $dev --host 127.0.0.1 --port 8081 \\
+  --alias qwen3.8-27b-uncensored --chat-template-kwargs '{"reasoning_effort":"$effort"}'
 SH
   chmod +x "$HOME/.local/bin/qwen-start"
 fi
@@ -167,7 +191,7 @@ if [ -x "$HOME/.local/bin/qwen-start" ]; then
 else
   env+=(ENABLE_OPENAI_API=False)
 fi
-if command -v ollama >/dev/null; then env+=(ENABLE_OLLAMA_API=True OLLAMA_BASE_URL=http://127.0.0.1:11434); else env+=(ENABLE_OLLAMA_API=False); fi
+if systemctl is-active --quiet ollama 2>/dev/null; then env+=(ENABLE_OLLAMA_API=True OLLAMA_BASE_URL=http://127.0.0.1:11434); else env+=(ENABLE_OLLAMA_API=False); fi
 tmux kill-session -t chat 2>/dev/null || true
 tmux new -d -s chat "env ${env[*]} open-webui serve --host 127.0.0.1 --port 8080"
 SH
@@ -186,14 +210,14 @@ if has qwen; then
   echo "   loading Qwen onto the GPU..."
   for i in $(seq 1 120); do curl -sf -o /dev/null localhost:8081/health && break; sleep 3; done
   echo -n "CHAT TEST (Qwen 3.8): "
-  curl -s -m 300 localhost:8081/v1/chat/completions -H 'Content-Type: application/json' \
-    -d '{"messages":[{"role":"user","content":"Reply with just the word ready."}],"max_tokens":3000}' \
+  curl -s -m 900 localhost:8081/v1/chat/completions -H 'Content-Type: application/json' \
+    -d '{"messages":[{"role":"user","content":"Reply with just the word ready."}],"max_tokens":20,"chat_template_kwargs":{"enable_thinking":false}}' \
     | python3 -c 'import json,sys
 try: print(json.load(sys.stdin)["choices"][0]["message"]["content"].strip()[:60])
 except Exception as e: print("no reply:", e)' || true
   curl -sf -o /dev/null localhost:8081/health || { echo "llama-server is not up. Last lines:"; tmux capture-pane -pt qwenchat | tail -15; }
 fi
-if command -v ollama >/dev/null && ollama list | grep -q "llama3.1-8b-abliterated"; then
+if systemctl is-active --quiet ollama 2>/dev/null && ollama list | grep -q "llama3.1-8b-abliterated"; then
   echo -n "CHAT TEST (Llama 8B): "
   curl -s localhost:11434/api/generate -d '{"model":"llama3.1-8b-abliterated","prompt":"Reply with just the word ready.","stream":false,"keep_alive":"1m"}' \
     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("response","").strip()[:60])' || true
@@ -202,8 +226,8 @@ echo
 echo "=============================================================="
 echo " CHAT READY. On your phone (Tailscale app connected) open:"
 echo "   https://${HOST:-<your-vm>.ts.net}:8443/"
-echo " Pick the model at the top: qwen3.8-27b-uncensored is the smart one"
-echo " (tap the paperclip to show it a photo); llama3.1-8b is quick."
+echo " Model: qwen3.8-27b-uncensored (tap the paperclip to show it a photo)."
+[ "$DEVICE" = cpu ] && echo " Running on the CPU: replies come at a few words a second."
 echo " After a VM restart, run: chat-start"
 echo "=============================================================="
 [ "$ok" = 1 ] || echo "NOTE: a model above could not be downloaded; see the COULD NOT GET line."

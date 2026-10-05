@@ -2,12 +2,18 @@
 # Private uncensored chat on the VM, used from the phone like the edit page:
 # Ollama runs the models, Open WebUI is the ChatGPT-style page, Tailscale
 # serves it at https://<vm>.ts.net:8443 (tailnet only, no login needed).
-# Models: abliterated Llama 3.1 8B and 70B ("abliterated" = refusals removed).
+# Models ("abliterated" = refusals removed):
+#   qwen  Qwen 3.8 27B abliterated (huihui-ai, Sep 2026): the smartest uncensored
+#         local model as of Sep 2026; reads images too. ~18 GB, so it shares the
+#         GPU with image editing.
+#   8b    Llama 3.1 8B abliterated: small and fast.
+#   70b   Llama 3.1 70B lorablated: only on request; older, and 43 GB crowds
+#         out image editing.
 # Safe to re-run: finished steps are skipped.
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-chat.sh)
-# Only the 8B (6 GB):  CHAT_MODELS=8b bash <(curl ...)
+# Pick models:  CHAT_MODELS="qwen 8b 70b" bash <(curl ...)
 set -euo pipefail
-WANT="${CHAT_MODELS:-8b 70b}"
+WANT="${CHAT_MODELS:-qwen 8b}"
 
 echo "== 1/4 Ollama"
 command -v ollama >/dev/null || curl -fsSL https://ollama.com/install.sh | sh
@@ -42,6 +48,14 @@ pull_as() {
   echo "   COULD NOT GET $name from any source"; return 1
 }
 ok=1
+if [[ " $WANT " == *" qwen "* ]]; then
+  # The Ollama-library build first: its chat template, image projector and
+  # thinking mode are set up for Ollama. The raw GGUFs are fallbacks.
+  pull_as qwen3.8-27b-abliterated \
+    huihui_ai/Qwen3.8-abliterated:27b \
+    hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Q4_K \
+    hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Q5_K || ok=0
+fi
 if [[ " $WANT " == *" 8b "* ]]; then
   # mlabonne's abliterated 8B; Q8 is near-lossless and only ~9 GB on an 80 GB GPU
   pull_as llama3.1-8b-abliterated \
@@ -83,7 +97,7 @@ fi
 echo "== 4/4 Phone access and a test reply"
 sudo tailscale serve --bg --https=8443 http://127.0.0.1:8080 >/dev/null
 HOST=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
-test_model=$(ollama list | awk 'NR>1 && /abliterated/ {print $1}' | sort | head -1)
+test_model=$(ollama list | awk 'NR>1 && /abliterated/ {print $1}' | sort -r | head -1)  # qwen first
 if [ -n "$test_model" ]; then
   echo -n "CHAT TEST ($test_model): "
   curl -s localhost:11434/api/generate -d "{\"model\":\"$test_model\",\"prompt\":\"Reply with just the word ready.\",\"stream\":false,\"keep_alive\":\"1m\"}" \
@@ -93,7 +107,8 @@ echo
 echo "=============================================================="
 echo " CHAT READY. On your phone (Tailscale app connected) open:"
 echo "   https://${HOST:-<your-vm>.ts.net}:8443/"
-echo " Pick the model at the top of the chat."
+echo " Pick the model at the top of the chat: qwen3.8-27b-abliterated is the"
+echo " smart one (tap the paperclip to show it a photo); llama3.1-8b is quick."
 echo " After a VM restart, run: chat-start"
 echo "=============================================================="
 [ "$ok" = 1 ] || echo "NOTE: a model above could not be downloaded; see the COULD NOT GET line."

@@ -15,7 +15,9 @@
 # Pick models:  CHAT_MODELS="qwen 8b 70b" bash <(curl ...)
 # Qwen on the CPU (default) keeps the whole GPU for images/video; slower
 # replies (a few words a second), so it uses the smaller Q4 file and thinks
-# "low". On the GPU instead:  CHAT_DEVICE=gpu bash <(curl ...)
+# "low". On the GPU, sharing it with image editing:  CHAT_DEVICE=gpu bash <(curl ...)
+# Everything for Qwen (stops image editing; edit-restart brings it back),
+# best quality Q8_0, 128K context:  CHAT_DEVICE=max bash <(curl ...)
 set -euo pipefail
 WANT="${CHAT_MODELS:-qwen}"
 DEVICE="${CHAT_DEVICE:-cpu}"
@@ -82,15 +84,17 @@ fi
 
 # ---------------------------------------------------- llama.cpp + Qwen 3.8
 if has qwen; then
-  echo "== llama.cpp (llama-server with the GPU)"
-  SERVER="$HOME/llama.cpp/build/bin/llama-server"
+  echo "== llama.cpp ($DEVICE)"
+  # Separate builds: a CPU one (no CUDA needed) and a GPU one
+  BUILD="$HOME/llama.cpp/build-$([ "$DEVICE" = cpu ] && echo cpu || echo cuda)"
+  SERVER="$BUILD/bin/llama-server"
   if [ ! -x "$SERVER" ] && [ "$DEVICE" = cpu ]; then
     # CPU only: no CUDA needed, quick build
     sudo apt-get install -y -qq git cmake build-essential >/dev/null
     [ -d "$HOME/llama.cpp" ] || git clone -q --depth 1 https://github.com/ggml-org/llama.cpp "$HOME/llama.cpp"
     echo "   building for the CPU (a few minutes)"
-    cmake -S "$HOME/llama.cpp" -B "$HOME/llama.cpp/build" -DGGML_NATIVE=ON -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release >/dev/null
-    cmake --build "$HOME/llama.cpp/build" --target llama-server -j"$(nproc)" >/dev/null
+    cmake -S "$HOME/llama.cpp" -B "$BUILD" -DGGML_NATIVE=ON -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release >/dev/null
+    cmake --build "$BUILD" --target llama-server -j"$(nproc)" >/dev/null
   fi
   if [ ! -x "$SERVER" ]; then
     sudo apt-get install -y -qq git cmake build-essential >/dev/null
@@ -108,20 +112,22 @@ if has qwen; then
     fi
     [ -d "$HOME/llama.cpp" ] || git clone -q --depth 1 https://github.com/ggml-org/llama.cpp "$HOME/llama.cpp"
     echo "   building (5-10 minutes)"
-    cmake -S "$HOME/llama.cpp" -B "$HOME/llama.cpp/build" -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native \
+    cmake -S "$HOME/llama.cpp" -B "$BUILD" -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native \
       -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release "${host_cc[@]}" >/dev/null
-    cmake --build "$HOME/llama.cpp/build" --target llama-server -j"$(nproc)" >/dev/null
+    cmake --build "$BUILD" --target llama-server -j"$(nproc)" >/dev/null
   fi
   "$SERVER" --version 2>&1 | head -2
 
-  echo "== Qwen 3.8 27B Uncensored ($([ "$DEVICE" = cpu ] && echo 'Q4, about 17 GB' || echo 'Q6, about 23 GB'))"
+  echo "== Qwen 3.8 27B Uncensored ($(case $DEVICE in cpu) echo 'Q4, about 17 GB';; max) echo 'Q8, about 29 GB';; *) echo 'Q6, about 23 GB';; esac))"
   mkdir -p "$LLM"
   "$HOME/ComfyUI/venv/bin/python" - "$LLM" "$DEVICE" <<'PY' || ok=0
 import os, sys
 from huggingface_hub import HfApi, hf_hub_download
 out, device = sys.argv[1], sys.argv[2]
 # CPU speed is limited by memory reads, so the smaller Q4 first there
-order = ("Q4_K_M", "Q4_K", "Q5_K_M", "Q5_K", "Q6_K") if device == "cpu" else ("Q6_K", "Q6_K_L", "Q5_K_M", "Q5_K", "Q4_K_M", "Q4_K")
+order = {"cpu": ("Q4_K_M", "Q4_K", "Q5_K_M", "Q5_K", "Q6_K"),
+         "max": ("Q8_0", "Q6_K_L", "Q6_K", "Q5_K_M", "Q5_K", "Q4_K_M", "Q4_K")}.get(
+         device, ("Q6_K", "Q6_K_L", "Q5_K_M", "Q5_K", "Q4_K_M", "Q4_K"))
 api = HfApi()
 # OrcaRouter's build (best compliance in the Sep 2026 benchmarks) via bartowski's
 # open mirror; OrcaRouter's own repo is gated; huihui-ai's is the fallback.
@@ -160,7 +166,10 @@ PY
   if [ "$DEVICE" = cpu ]; then
     run='CUDA_VISIBLE_DEVICES= exec'; dev="-ngl 0 -t $(nproc) -c 16384"; effort=low
   else
-    run=exec; dev="-ngl 99 -c 32768"; effort=medium
+    run=exec; dev="-ngl 99 -c $([ "$DEVICE" = max ] && echo 131072 || echo 32768)"; effort=medium
+  fi
+  if [ "$DEVICE" = max ] && tmux has-session -t comfy 2>/dev/null; then
+    tmux kill-session -t comfy && echo "   image editing stopped to give Qwen the whole GPU (edit-restart brings it back)"
   fi
   cat > "$HOME/.local/bin/qwen-start" <<SH
 #!/usr/bin/env bash

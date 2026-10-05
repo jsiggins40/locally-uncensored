@@ -12,6 +12,10 @@
 #   70b   Llama 3.1 70B lorablated on Ollama: only on request (43 GB).
 # Safe to re-run: finished steps are skipped.
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-chat.sh)
+#   glm   GLM-5.3-Flash Uncensored (320B MoE, 18B active; #3 open model in Sep
+#         2026, the biggest uncensored one this VM can hold): core on the GPU,
+#         experts in system RAM. Takes the whole machine (stops image editing)
+#         and replaces Qwen in the chat.  CHAT_MODELS=glm bash <(curl ...)
 # Pick models:  CHAT_MODELS="qwen 8b 70b" bash <(curl ...)
 # Qwen on the CPU (default) keeps the whole GPU for images/video; slower
 # replies (a few words a second), so it uses the smaller Q4 file and thinks
@@ -21,6 +25,7 @@
 set -euo pipefail
 WANT="${CHAT_MODELS:-qwen}"
 DEVICE="${CHAT_DEVICE:-cpu}"
+if [[ " $WANT " == *" glm "* ]]; then DEVICE=max; fi  # GLM needs the GPU plus all RAM
 has() { [[ " $WANT " == *" $1 "* ]]; }
 ok=1
 if mountpoint -q /ephemeral 2>/dev/null; then BIG=/ephemeral; else BIG="$HOME"; fi
@@ -83,7 +88,7 @@ if ! has 8b && ! has 70b && systemctl is-active --quiet ollama 2>/dev/null; then
 fi
 
 # ---------------------------------------------------- llama.cpp + Qwen 3.8
-if has qwen; then
+if has qwen || has glm; then
   echo "== llama.cpp ($DEVICE)"
   # Separate builds: a CPU one (no CUDA needed) and a GPU one
   BUILD="$HOME/llama.cpp/build-$([ "$DEVICE" = cpu ] && echo cpu || echo cuda)"
@@ -118,6 +123,7 @@ if has qwen; then
   fi
   "$SERVER" --version 2>&1 | head -2
 
+  if ! has glm; then
   echo "== Qwen 3.8 27B Uncensored ($(case $DEVICE in cpu) echo 'Q4, about 17 GB';; max) echo 'Q8, about 29 GB';; *) echo 'Q6, about 23 GB';; esac))"
   mkdir -p "$LLM"
   "$HOME/ComfyUI/venv/bin/python" - "$LLM" "$DEVICE" <<'PY' || ok=0
@@ -160,16 +166,78 @@ for repo, label in sources:
 else:
     sys.exit("   COULD NOT GET Qwen 3.8 from any source")
 PY
+  else
+  # GLM-5.3-Flash: pick the best quant that fits. Its experts (most of the
+  # file) live in system RAM, so the file must fit in RAM with room to spare.
+  ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo)
+  echo "== GLM-5.3-Flash Uncensored (biggest quant that fits ${ram_gb} GB of RAM)"
+  mkdir -p "$LLM"
+  "$HOME/ComfyUI/venv/bin/python" - "$LLM" "$ram_gb" <<'PY' || ok=0
+import os, re, shutil, sys
+from huggingface_hub import HfApi, hf_hub_download
+out, ram = sys.argv[1], float(sys.argv[2])
+budget = ram * 0.85 * 1e9        # leave RAM for the OS, the chat page and context
+api = HfApi()
+# Best quality first; the first one that fits the budget is used
+prefs = ["Q4_K_M", "UD-Q4_K_XL", "Q4_K_S", "IQ4_XS", "IQ4_NL", "UD-Q3_K_XL", "Q3_K_M", "IQ3_M",
+         "UD-IQ3_XXS", "IQ3_XXS", "Q3_K_S", "UD-Q2_K_XL", "Q2_K", "IQ2_M", "IQ2_XS"]
+sources = [("orcarouter/GLM-5.3-Flash-Uncensored-GGUF", "GLM-5.3-Flash Uncensored (OrcaRouter)"),
+           ("huihui-ai/Huihui-GLM-5.3-Flash-abliterated-GGUF", "GLM-5.3-Flash Abliterated (huihui)")]
+def quant_of(path):
+    name = os.path.basename(path); folder = os.path.dirname(path)
+    for q in sorted(prefs, key=len, reverse=True):  # longest first: UD-Q4_K_XL before Q4_K
+        if re.search(r"(^|[-_./])" + re.escape(q) + r"([-_.]|$)", name) or os.path.basename(folder) == q:
+            return q
+    return None
+for repo, label in sources:
+    try:
+        sib = api.model_info(repo, files_metadata=True).siblings
+    except Exception as e:
+        print(f"   {repo}: {type(e).__name__} (gated or missing)"); continue
+    groups = {}
+    for s in sib:
+        if s.rfilename.endswith(".gguf") and "mmproj" not in s.rfilename.lower():
+            q = quant_of(s.rfilename)
+            if q: groups.setdefault(q, []).append(s)
+    for q in prefs:
+        if q in groups: print(f"   {repo}: {q} {sum(x.size or 0 for x in groups[q]) / 1e9:.0f} GB")
+    pick = next((q for q in prefs if q in groups and sum(x.size or 0 for x in groups[q]) <= budget), None)
+    if not pick:
+        print(f"   {repo}: nothing fits {budget / 1e9:.0f} GB"); continue
+    size = sum(x.size or 0 for x in groups[pick])
+    if shutil.disk_usage(out).free < size + 10e9:
+        sys.exit(f"   not enough disk for {size / 1e9:.0f} GB")
+    print(f"== Downloading {pick} ({size / 1e9:.0f} GB) from {repo}; this takes a while")
+    try:
+        paths = sorted(hf_hub_download(repo, x.rfilename, local_dir=out) for x in groups[pick])
+    except Exception as e:
+        print(f"   download failed ({type(e).__name__}: {e})"); continue
+    with open(os.path.join(out, "glm-chat.env"), "w") as f:
+        f.write(f'MODEL="{paths[0]}"\nLABEL="{label} {pick}"\n')
+    print("   ready:", label, pick)
+    break
+else:
+    sys.exit("   COULD NOT GET GLM-5.3-Flash from any source")
+PY
+  fi
   # Runs llama-server with Qwen's own template (--jinja). GPU: everything on
   # the GPU, thinking "medium", 32K context. CPU: the GPU is hidden from it
   # entirely, all cores, thinking "low", 16K context.
+  if has glm; then
+    # Core layers on the GPU, all routed experts in system RAM (-ot exps=CPU);
+    # GLM uses its own template defaults (no reasoning_effort switch)
+    cat > "$HOME/.local/bin/qwen-start" <<SH
+#!/usr/bin/env bash
+. "$LLM/glm-chat.env"
+exec "$SERVER" -m "\$MODEL" --jinja -ngl 99 -ot "exps=CPU" -t $(nproc) -c 65536 --host 127.0.0.1 --port 8081 \\
+  --alias glm-5.3-flash-uncensored
+SH
+    chmod +x "$HOME/.local/bin/qwen-start"
+  else
   if [ "$DEVICE" = cpu ]; then
     run='CUDA_VISIBLE_DEVICES= exec'; dev="-ngl 0 -t $(nproc) -c 16384"; effort=low
   else
     run=exec; dev="-ngl 99 -c $([ "$DEVICE" = max ] && echo 131072 || echo 32768)"; effort=medium
-  fi
-  if [ "$DEVICE" = max ] && tmux has-session -t comfy 2>/dev/null; then
-    tmux kill-session -t comfy && echo "   image editing stopped to give Qwen the whole GPU (edit-restart brings it back)"
   fi
   cat > "$HOME/.local/bin/qwen-start" <<SH
 #!/usr/bin/env bash
@@ -179,6 +247,10 @@ $run "$SERVER" -m "\$MODEL" "\${mm[@]}" --jinja $dev --host 127.0.0.1 --port 808
   --alias qwen3.8-27b-uncensored --chat-template-kwargs '{"reasoning_effort":"$effort"}'
 SH
   chmod +x "$HOME/.local/bin/qwen-start"
+  fi
+  if [ "$DEVICE" = max ] && tmux has-session -t comfy 2>/dev/null; then
+    tmux kill-session -t comfy && echo "   image editing stopped to give the chat model the whole GPU (edit-restart brings it back)"
+  fi
 fi
 
 # ------------------------------------------------------------- Open WebUI
@@ -215,10 +287,10 @@ fi
 echo "== Phone access and test replies"
 sudo tailscale serve --bg --https=8443 http://127.0.0.1:8080 >/dev/null
 HOST=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
-if has qwen; then
-  echo "   loading Qwen onto the GPU..."
-  for i in $(seq 1 120); do curl -sf -o /dev/null localhost:8081/health && break; sleep 3; done
-  echo -n "CHAT TEST (Qwen 3.8): "
+if has qwen || has glm; then
+  echo "   loading the model (GLM takes several minutes)..."
+  for i in $(seq 1 400); do curl -sf -o /dev/null localhost:8081/health && break; sleep 3; done
+  echo -n "CHAT TEST ($(has glm && echo GLM-5.3-Flash || echo Qwen 3.8)): "
   curl -s -m 900 localhost:8081/v1/chat/completions -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"Reply with just the word ready."}],"max_tokens":20,"chat_template_kwargs":{"enable_thinking":false}}' \
     | python3 -c 'import json,sys
@@ -235,7 +307,8 @@ echo
 echo "=============================================================="
 echo " CHAT READY. On your phone (Tailscale app connected) open:"
 echo "   https://${HOST:-<your-vm>.ts.net}:8443/"
-echo " Model: qwen3.8-27b-uncensored (tap the paperclip to show it a photo)."
+if has glm; then echo " Model: glm-5.3-flash-uncensored (image editing is stopped; edit-restart brings it back)."
+else echo " Model: qwen3.8-27b-uncensored (tap the paperclip to show it a photo)."; fi
 [ "$DEVICE" = cpu ] && echo " Running on the CPU: replies come at a few words a second."
 echo " After a VM restart, run: chat-start"
 echo "=============================================================="

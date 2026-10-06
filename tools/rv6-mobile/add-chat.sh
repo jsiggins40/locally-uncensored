@@ -16,6 +16,9 @@
 #         2026, the biggest uncensored one this VM can hold): core on the GPU,
 #         experts in system RAM. Takes the whole machine (stops image editing)
 #         and replaces Qwen in the chat.  CHAT_MODELS=glm bash <(curl ...)
+#   glmmax GLM-5.2 Uncensored, the full 754B flagship (40B active): for big
+#         machines like B300s. Fully on the GPUs when they hold it (fast),
+#         otherwise core on GPU + experts in RAM.  CHAT_MODELS=glmmax bash <(curl ...)
 # Pick models:  CHAT_MODELS="qwen 8b 70b" bash <(curl ...)
 # Qwen on the CPU (default) keeps the whole GPU for images/video; slower
 # replies (a few words a second), so it uses the smaller Q4 file and thinks
@@ -25,6 +28,8 @@
 set -euo pipefail
 WANT="${CHAT_MODELS:-qwen}"
 DEVICE="${CHAT_DEVICE:-cpu}"
+GLMBIG=0
+if [[ " $WANT " == *" glmmax "* ]]; then WANT="$WANT glm"; GLMBIG=1; fi
 if [[ " $WANT " == *" glm "* ]]; then DEVICE=max; fi  # GLM needs the GPU plus all RAM
 has() { [[ " $WANT " == *" $1 "* ]]; }
 ok=1
@@ -170,19 +175,29 @@ PY
   # GLM-5.3-Flash: pick the best quant that fits. Its experts (most of the
   # file) live in system RAM, so the file must fit in RAM with room to spare.
   ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo)
-  echo "== GLM-5.3-Flash Uncensored (biggest quant that fits ${ram_gb} GB of RAM)"
+  vram_gb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk '{s+=$1} END {printf "%d", s/1024}')
+  echo "== $([ $GLMBIG = 1 ] && echo 'GLM-5.2 Uncensored 754B' || echo 'GLM-5.3-Flash Uncensored') (best quant for ${vram_gb} GB GPU + ${ram_gb} GB RAM)"
   mkdir -p "$LLM"
-  "$HOME/ComfyUI/venv/bin/python" - "$LLM" "$ram_gb" <<'PY' || ok=0
+  "$HOME/ComfyUI/venv/bin/python" - "$LLM" "$ram_gb" "${vram_gb:-0}" "$GLMBIG" <<'PY' || ok=0
 import os, re, shutil, sys
 from huggingface_hub import HfApi, hf_hub_download
-out, ram = sys.argv[1], float(sys.argv[2])
-budget = ram * 0.85 * 1e9        # leave RAM for the OS, the chat page and context
+out, ram, vram, big = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4] == "1"
+# Either the whole file fits the GPUs (fast), or the experts (most of the
+# file) go to system RAM and must fit there. Leave room for context/OS.
+gpu_fit, ram_fit = vram * 0.88 * 1e9, ram * 0.85 * 1e9
+budget = max(gpu_fit, ram_fit)
 api = HfApi()
 # Best quality first; the first one that fits the budget is used
 prefs = ["Q4_K_M", "UD-Q4_K_XL", "Q4_K_S", "IQ4_XS", "IQ4_NL", "UD-Q3_K_XL", "Q3_K_M", "IQ3_M",
          "UD-IQ3_XXS", "IQ3_XXS", "Q3_K_S", "UD-Q2_K_XL", "Q2_K", "IQ2_M", "IQ2_XS"]
-sources = [("orcarouter/GLM-5.3-Flash-Uncensored-GGUF", "GLM-5.3-Flash Uncensored (OrcaRouter)"),
-           ("huihui-ai/Huihui-GLM-5.3-Flash-abliterated-GGUF", "GLM-5.3-Flash Abliterated (huihui)")]
+if big:   # the full 754B flagship; the full GLM-5.3 has no uncensored build yet
+    sources = [("phaseonx11/GLM-5.2-Uncensored-GGUF", "GLM-5.2 Uncensored 754B"),
+               ("huihui-ai/Huihui-GLM-5.2-abliterated-GGUF", "GLM-5.2 Abliterated 754B (huihui)")]
+    alias = "glm-5.2-754b-uncensored"
+else:
+    sources = [("orcarouter/GLM-5.3-Flash-Uncensored-GGUF", "GLM-5.3-Flash Uncensored (OrcaRouter)"),
+               ("huihui-ai/Huihui-GLM-5.3-Flash-abliterated-GGUF", "GLM-5.3-Flash Abliterated (huihui)")]
+    alias = "glm-5.3-flash-uncensored"
 def quant_of(path):
     name = os.path.basename(path); folder = os.path.dirname(path)
     for q in sorted(prefs, key=len, reverse=True):  # longest first: UD-Q4_K_XL before Q4_K
@@ -213,8 +228,9 @@ for repo, label in sources:
     except Exception as e:
         print(f"   download failed ({type(e).__name__}: {e})"); continue
     with open(os.path.join(out, "glm-chat.env"), "w") as f:
-        f.write(f'MODEL="{paths[0]}"\nLABEL="{label} {pick}"\n')
-    print("   ready:", label, pick)
+        mode = "gpu" if size <= gpu_fit else "split"
+        f.write(f'MODEL="{paths[0]}"\nLABEL="{label} {pick}"\nALIAS="{alias}"\nMODE="{mode}"\n')
+    print("   ready:", label, pick, "| runs", "fully on the GPU(s)" if size <= gpu_fit else "split: core on GPU, experts in RAM")
     break
 else:
     sys.exit("   COULD NOT GET GLM-5.3-Flash from any source")
@@ -224,13 +240,15 @@ PY
   # the GPU, thinking "medium", 32K context. CPU: the GPU is hidden from it
   # entirely, all cores, thinking "low", 16K context.
   if has glm; then
-    # Core layers on the GPU, all routed experts in system RAM (-ot exps=CPU);
-    # GLM uses its own template defaults (no reasoning_effort switch)
+    # MODE=gpu: everything on the GPU(s), spread across them by llama.cpp.
+    # MODE=split: core layers on the GPU, routed experts in system RAM.
+    # GLM uses its own template defaults (no reasoning_effort switch).
     cat > "$HOME/.local/bin/qwen-start" <<SH
 #!/usr/bin/env bash
 . "$LLM/glm-chat.env"
-exec "$SERVER" -m "\$MODEL" --jinja -ngl 99 -ot "exps=CPU" -t $(nproc) -c 65536 --host 127.0.0.1 --port 8081 \\
-  --alias glm-5.3-flash-uncensored
+place=(); [ "\$MODE" = split ] && place=(-ot "exps=CPU")
+exec "$SERVER" -m "\$MODEL" --jinja -ngl 99 "\${place[@]}" -t $(nproc) -c 65536 --host 127.0.0.1 --port 8081 \\
+  --alias "\$ALIAS"
 SH
     chmod +x "$HOME/.local/bin/qwen-start"
   else
@@ -248,7 +266,10 @@ $run "$SERVER" -m "\$MODEL" "\${mm[@]}" --jinja $dev --host 127.0.0.1 --port 808
 SH
   chmod +x "$HOME/.local/bin/qwen-start"
   fi
-  if [ "$DEVICE" = max ] && tmux has-session -t comfy 2>/dev/null; then
+  # Only stop image editing when the GPU is too small to share (an 80 GB H100);
+  # on big machines (B300s) ComfyUI keeps running next to the chat model
+  gpu_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk '{s+=$1} END {printf "%d", s/1024}')
+  if [ "$DEVICE" = max ] && [ "${gpu_total:-0}" -lt 200 ] && tmux has-session -t comfy 2>/dev/null; then
     tmux kill-session -t comfy && echo "   image editing stopped to give the chat model the whole GPU (edit-restart brings it back)"
   fi
 fi
@@ -290,7 +311,7 @@ HOST=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(
 if has qwen || has glm; then
   echo "   loading the model (GLM takes several minutes)..."
   for i in $(seq 1 400); do curl -sf -o /dev/null localhost:8081/health && break; sleep 3; done
-  echo -n "CHAT TEST ($(has glm && echo GLM-5.3-Flash || echo Qwen 3.8)): "
+  echo -n "CHAT TEST ($(has glm && (. "$LLM/glm-chat.env" 2>/dev/null; echo "$LABEL") || echo Qwen 3.8)): "
   curl -s -m 900 localhost:8081/v1/chat/completions -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"Reply with just the word ready."}],"max_tokens":20,"chat_template_kwargs":{"enable_thinking":false}}' \
     | python3 -c 'import json,sys
@@ -307,7 +328,7 @@ echo
 echo "=============================================================="
 echo " CHAT READY. On your phone (Tailscale app connected) open:"
 echo "   https://${HOST:-<your-vm>.ts.net}:8443/"
-if has glm; then echo " Model: glm-5.3-flash-uncensored (image editing is stopped; edit-restart brings it back)."
+if has glm; then echo " Model: $(. "$LLM/glm-chat.env" 2>/dev/null; echo "$ALIAS") (on GPUs under 200 GB image editing is stopped; edit-restart brings it back)."
 else echo " Model: qwen3.8-27b-uncensored (tap the paperclip to show it a photo)."; fi
 [ "$DEVICE" = cpu ] && echo " Running on the CPU: replies come at a few words a second."
 echo " After a VM restart, run: chat-start"

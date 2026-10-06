@@ -651,9 +651,9 @@ $('fastBtn').onclick = () => { quality = false; store('quality', '0'); applySpee
 $('qualBtn').onclick = () => { quality = true; store('quality', '1'); applySpeed(); };
 
 // ---- Extra photos: Seedream takes up to 10 in total (picture 1 + 9 more);
-// Describe edit (Qwen-Image-Edit Plus) uses only picture 2
+// Describe edit (Qwen-Image-Edit Plus) takes pictures 2 and 3
 const more = [];  // canvases, picture 2 onwards
-const maxMore = () => mode === 'cloud' ? 9 : 1;
+const maxMore = () => mode === 'cloud' ? 9 : 2;
 const hasSecond = () => more.length > 0;
 const usedMore = () => more.slice(0, maxMore());
 function renderMore() {
@@ -669,12 +669,12 @@ function renderMore() {
   $('addMore').classList.toggle('hidden', left <= 0);
   $('addMoreText').textContent = mode === 'cloud'
     ? (more.length ? `➕ Add more photos (up to ${left} more)` : '➕ Add more photos (up to 9, optional)')
-    : '➕ Add a 2nd photo (optional)';
+    : more.length ? '➕ Add a 3rd photo (optional)' : '➕ Add a 2nd or 3rd photo (optional)';
   $('moreHint').textContent = more.length > maxMore()
-    ? 'Describe edit uses only picture 2. Switch to ☁️ Seedream to use all of them.'
+    ? 'Describe edit uses pictures 2 and 3 only. Switch to ☁️ Seedream to use all of them.'
     : mode === 'cloud'
       ? 'Combine people or things from several photos. Call them picture 1 (the main photo above), picture 2, picture 3…'
-      : 'Combine people or things from two photos. Call them picture 1 (the main photo above) and picture 2.';
+      : 'Combine people or things from up to three photos. Call them picture 1 (the main photo above), picture 2 and picture 3. Each extra photo makes it a little slower.';
   if (mode === 'instruct' || mode === 'cloud')
     $('prompt').placeholder = more.length ? 'e.g. the woman from picture 2 stands next to the man in picture 1' : MODE_TEXT[mode][2];
 }
@@ -764,11 +764,12 @@ function buildFillWorkflow(imgName, maskName, text, seed, lora = null) {
   return p;
 }
 
-function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '', img2Name = null, maskName = null) {
+function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '', moreNames = [], maskName = null) {
+  const [img2Name, img3Name] = moreNames || [];
   // The Plus encoder takes up to three images; the output keeps picture 1's size and layout
   const enc = text => qwen.plus
     ? { class_type: 'TextEncodeQwenImageEditPlus', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image1: ['5', 0],
-                                                               ...(img2Name ? { image2: ['15', 0] } : {}) } }
+                                                               ...(img2Name ? { image2: ['15', 0] } : {}), ...(img3Name ? { image3: ['18', 0] } : {}) } }
     : { class_type: 'TextEncodeQwenImageEdit', inputs: { clip: ['2', 0], prompt: text, vae: ['13', 0], image: ['5', 0] } };
   const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: qwen.unet, weight_dtype: 'default' } },
@@ -776,6 +777,7 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = 
     '13': { class_type: 'VAELoader', inputs: { vae_name: qwen.vae } },
     '5': { class_type: 'LoadImage', inputs: { image: imgName } },
     ...(img2Name ? { '15': { class_type: 'LoadImage', inputs: { image: img2Name } } } : {}),
+    ...(img3Name ? { '18': { class_type: 'LoadImage', inputs: { image: img3Name } } } : {}),
     '3': enc(instruction), '4': enc(negative),
     '6': { class_type: 'VAEEncode', inputs: { pixels: ['5', 0], vae: ['13', 0] } },
     '12': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
@@ -1132,10 +1134,11 @@ $('go').onclick = async () => {
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
       const instruction = [$('prompt').value.trim(), ...words].join(', ');
       // The negative only has an effect when CFG > 1, i.e. in Quality mode
-      const img2Name = mode === 'instruct' && hasSecond() ? await upload(await toJpeg(more[0]), `rv6m_${ts}_img2.jpg`) : null;
+      const moreNames = [];
+      if (mode === 'instruct' && qwen.plus) for (const [i, c] of usedMore().entries()) moreNames.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
       const maskName = qwenMask() ? await upload(await exportMask(), `rv6m_${ts}_mask.png`) : null;
       p = buildInstructWorkflow(imgName, instruction, seed, +$('steps').value, +$('cfg').value, extras,
-                                fastActive() ? '' : $('neg').value, img2Name, maskName);
+                                fastActive() ? '' : $('neg').value, moreNames, maskName);
     } else if (mode === 'whole') {
       // Inpainting checkpoints need a mask; restyling uses the regular Realistic Vision instead
       if (isInpaint(model)) {
@@ -1327,7 +1330,7 @@ async function waitForJobs(ids, t0) {
         const what = mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${createDims().join('×')}` +
             (activeLoras().length ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') : fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
           ? (aioActive() ? 'Rapid AIO · ' : '') + `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
-            (activeLoras().length && !aioActive() ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') + (mode === 'instruct' && hasSecond() ? ' · 2 photos' : '') + (qwenMask() ? ' · selected area' : '')
+            (activeLoras().length && !aioActive() ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') + (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')
           : `${$('steps').value} steps · ${base.width}×${base.height}`;
         setStatus(`Done in ${secs}s. GPU time ${gpu ? gpu.toFixed(1) + 's' : '?'}` +
                   (ids.length > 1 ? ` for ${ids.length} images` : '') + `, waiting/loading ${gpu ? Math.max(0, secs - gpu).toFixed(0) + 's' : '?'}.` +

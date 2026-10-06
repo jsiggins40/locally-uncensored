@@ -12,6 +12,8 @@ COMFY="$HOME/ComfyUI"
 NSFW_LORA_REPO="ScottzillaSystems/qwen-image-edit-plus-nsfw-lora"
 
 step() { echo; echo "===== $* ====="; }
+# Drop arrow-key/paste escape codes and spaces that end up in a pasted key
+clean_key() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*[A-Za-z~]//g; s/\[20[01]~//g' | tr -d '[:space:][:cntrl:]'; }
 
 step "1/7 GPU driver"
 if nvidia-smi >/dev/null 2>&1; then
@@ -118,6 +120,7 @@ bash <(curl -fsSL "$SRC/add-abliterated-encoder.sh") || echo "(Abliterated encod
 if [ ! -s "$HOME/.atlascloud_key" ]; then
   echo
   read -rp "Atlas Cloud API key for the Seedream button (Enter to skip): " akey </dev/tty || akey=""
+  akey=$(clean_key "$akey"); [[ "$akey" =~ ^[A-Za-z0-9_.-]{20,}$ ]] || akey=""  # junk (stray keys) = skip
   if [ -n "$akey" ]; then
     printf '%s' "$akey" > "$HOME/.atlascloud_key"; chmod 600 "$HOME/.atlascloud_key"
     tmux kill-session -t comfy 2>/dev/null || true  # pick up the key
@@ -134,9 +137,16 @@ if grep -qi "logged out\|NeedsLogin\|not logged in" <<<"$ts_state"; then
   echo "Easiest: make an auth key at login.tailscale.com/admin/settings/keys (Generate auth key),"
   echo "copy it, and paste it below. Or just press Enter to get a login link instead."
   read -rp "Auth key (tskey-auth-...): " key </dev/tty || key=""
-  if [ -n "$key" ]; then sudo tailscale up --reset --auth-key="$key"; else sudo tailscale up --reset; fi
+  key=$(clean_key "$key"); key=${key#"${key%%tskey-*}"}  # drop anything typed before the key itself
+  if [[ "$key" == tskey-* ]] && sudo tailscale up --reset --auth-key="$key"; then :
+  else
+    [ -n "$key" ] && echo "That key didn't work; use the login link below instead (open it on your phone)."
+    sudo tailscale up --reset
+  fi
 fi
 sudo tailscale serve --bg 8188 >/dev/null
+# `edit-restart`: gets the latest page and restarts ComfyUI in one command
+sudo curl -fsSL "$SRC/edit-restart.sh" -o /usr/local/bin/edit-restart && sudo chmod +x /usr/local/bin/edit-restart || true
 HOST=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
 
 echo
@@ -145,4 +155,5 @@ echo " ALL DONE. On your phone (Tailscale app connected) open:"
 echo "   https://$HOST/extensions/rv6_mobile/edit.html"
 echo " ✨ Describe edit: say what to change. Selected area: tap/paint a spot,"
 echo " say what to do with it, and only that spot changes."
+echo " Later: type  edit-restart  to get page updates or bring it back up."
 echo "=============================================================="

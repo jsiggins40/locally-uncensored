@@ -86,12 +86,24 @@
       <option value="1472x1104">Landscape 4:3</option>
       <option value="1664x928">Landscape 16:9</option>
     </select>
+    <label for="createSize">Size</label>
+    <select id="createSize">
+      <option value="0.75">Small (faster)</option>
+      <option value="1" selected>Standard (what the model is made for)</option>
+      <option value="1.25">Large</option>
+      <option value="1.5">Extra large (slow, may repeat things)</option>
+    </select>
+    <div class="hint" id="createSizeHint"></div>
   </div>
-  <label for="res">Working size (long side)</label>
+  <label for="res">Output size (long side)</label>
   <select id="res">
-    <option value="768">768 px (faster)</option>
+    <option value="768">768 px (fastest)</option>
     <option value="1024" selected>1024 px</option>
+    <option value="1328">1328 px</option>
+    <option value="1536">1536 px</option>
+    <option value="2048">2048 px (slow, may blur or double things)</option>
   </select>
+  <div class="hint" id="resHint"></div>
 </div>
 
 <div class="panel">
@@ -266,24 +278,23 @@ function recall(k) { try { return localStorage.getItem(k); } catch (e) { return 
 // Starting points per model; each model's Civitai page has the author's own advice.
 const PRESETS = [
   { match: /realistic_vision.*inpaint/i, label: 'Realistic Vision inpainting',
-    steps: 28, cfg: 6, denoise: 1.0, res: '1024',
+    steps: 28, cfg: 6, denoise: 1.0,
     hint: 'Best for replacing an area completely.' },
   { match: /realistic_vision/i, label: 'Realistic Vision',
-    steps: 28, cfg: 6, denoise: 0.7, res: '1024', hint: 'Regular SD1.5 model: keep strength 0.6–0.8.' },
+    steps: 28, cfg: 6, denoise: 0.7, hint: 'Regular SD1.5 model: keep strength 0.6–0.8.' },
   { match: /anteros/i, label: 'Anteros XXXL',
-    steps: 30, cfg: 4.5, denoise: 0.75, res: '1024',
+    steps: 30, cfg: 4.5, denoise: 0.75,
     hint: 'SDXL photoreal. CFG above ~6 starts to look plastic.' },
   { match: /bigasp/i, label: 'bigASP',
-    steps: 35, cfg: 4, denoise: 0.75, res: '1024',
+    steps: 35, cfg: 4, denoise: 0.75,
     hint: 'SDXL photoreal. Burns easily at high CFG; keep 3.5–5.' },
   { match: /./, label: 'SDXL model',
-    steps: 30, cfg: 5, denoise: 0.75, res: '1024', hint: 'Regular model: strength 0.6–0.85 blends best.' },
+    steps: 30, cfg: 5, denoise: 0.75, hint: 'Regular model: strength 0.6–0.85 blends best.' },
 ];
 function applyPreset() {
   const m = $('model').value, p = PRESETS.find(p => p.match.test(m));
   if (!m || !p) return;  // no checkpoints installed (Describe-edit only)
   setVal($('steps'), p.steps); setVal($('cfg'), p.cfg); setVal($('denoise'), p.denoise);
-  $('res').value = p.res;
   $('modelHint').textContent = `${p.label} defaults: ${p.steps} steps · CFG ${p.cfg} · strength ${p.denoise.toFixed(2)}. ${p.hint}`;
 }
 // ---- Tags: tap to add/remove from the prompt
@@ -367,6 +378,7 @@ function setMode(m) {
   for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr);
   $('tagBox').classList.toggle('hidden', cloud || q || fx);
   $('res').previousElementSibling.classList.toggle('hidden', cloud || cr);
+  $('resHint').classList.toggle('hidden', cloud || cr);
   $('neg').closest('details').classList.toggle('hidden', cloud || fx);
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !speedLora());
@@ -404,7 +416,7 @@ $('modeWhole').onclick = () => setMode('whole');
 $('modeCloud').onclick = () => setMode('cloud');
 $('modeCreate').onclick = () => setMode('create');
 $('aspect').value = recall('aspect') || '1104x1472';
-$('aspect').addEventListener('change', () => store('aspect', $('aspect').value));
+$('aspect').addEventListener('change', () => { store('aspect', $('aspect').value); createSizeHint(); });
 $('engChange').onclick = () => { engine = 'change'; store('maskEngine', engine); setMode('mask'); };
 $('engFix').onclick = () => { engine = 'fix'; store('maskEngine', engine); setMode('mask'); };
 
@@ -873,24 +885,54 @@ for (const b of document.querySelectorAll('button.step')) {
   for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, stop);
 }
 
+// Size the working canvases from the photo (kept at up to 2048 px in `full`) to the
+// chosen output size. keepMask rescales an existing selection instead of clearing it.
+let photoIn = false;  // canvases start at 300x150 before any photo
+function fitToRes(keepMask) {
+  const max = +$('res').value;
+  const scale = Math.min(1, max / Math.max(full.width, full.height));
+  // Multiples of 16 suit SD (8) and Qwen-Image (16) alike
+  const w = Math.max(16, Math.floor(full.width * scale / 16) * 16);
+  const h = Math.max(16, Math.floor(full.height * scale / 16) * 16);
+  let old = null;
+  if (keepMask && mask.width) { old = document.createElement('canvas'); old.width = mask.width; old.height = mask.height; old.getContext('2d').drawImage(mask, 0, 0); }
+  base.width = mask.width = pts.width = w; base.height = mask.height = pts.height = h;
+  baseUpload = null; selPoints = []; selBase = null; drawPts();
+  bctx.drawImage(full, 0, 0, w, h);
+  mctx.clearRect(0, 0, w, h);
+  if (old) mctx.drawImage(old, 0, 0, w, h);
+  undoStack = [];
+  resHint();
+}
+function resHint() {
+  const loaded = photoIn;
+  const small = loaded && Math.max(full.width, full.height) < +$('res').value;
+  $('resHint').textContent = (loaded ? `This photo: ${base.width}×${base.height}` +
+      (small ? ' (the photo itself is smaller, so it stays at its own size)' : '') + '. ' : '') +
+    'About 1024–1328 is what the edit models are made for; bigger takes longer and can look soft or repeat things.';
+}
+$('res').value = recall('res') || '1024';
+if (!$('res').value) $('res').value = '1024';
+$('res').addEventListener('change', () => { store('res', $('res').value); if (photoIn) fitToRes(true); else resHint(); });
+function createDims() {
+  const k = +$('createSize').value || 1, [w, h] = $('aspect').value.split('x').map(Number);
+  return [Math.round(w * k / 16) * 16, Math.round(h * k / 16) * 16];
+}
+function createSizeHint() { const [w, h] = createDims(); $('createSizeHint').textContent = `${w}×${h} (${(w * h / 1e6).toFixed(1)} MP)`; }
+$('createSize').value = recall('createSize') || '1';
+if (!$('createSize').value) $('createSize').value = '1';
+$('createSize').addEventListener('change', () => { store('createSize', $('createSize').value); createSizeHint(); });
+createSizeHint(); resHint();
+
 function loadIntoCanvas(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      const max = +$('res').value;
-      const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
-      // SD works on multiples of 8
-      // Multiples of 16 suit SD (8) and Qwen-Image (16) alike
-      const w = Math.max(16, Math.floor(img.naturalWidth * scale / 16) * 16);
-      const h = Math.max(16, Math.floor(img.naturalHeight * scale / 16) * 16);
-      base.width = mask.width = pts.width = w; base.height = mask.height = pts.height = h;
-      baseUpload = null; selPoints = []; selBase = null; drawPts(); mainOrig = null;
-      bctx.drawImage(img, 0, 0, w, h);
       const fs = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
       full.width = Math.round(img.naturalWidth * fs); full.height = Math.round(img.naturalHeight * fs);
       full.getContext('2d').drawImage(img, 0, 0, full.width, full.height);
-      mctx.clearRect(0, 0, w, h);
-      undoStack = [];
+      mainOrig = null; photoIn = true;
+      fitToRes(false);
       $('empty').classList.add('hidden'); $('stage').classList.remove('hidden');
       resolve();
     };
@@ -1075,7 +1117,7 @@ $('go').onclick = async () => {
     let p = JSON.parse(JSON.stringify(workflow));
     let model = $('model').value;
     if (mode === 'create') {
-      const [w, h] = $('aspect').value.split('x').map(Number);
+      const [w, h] = createDims();
       const extras = activeLoras();
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
       p = buildCreateWorkflow([$('prompt').value.trim(), ...words].join(', '), fastActive() ? '' : $('neg').value,
@@ -1282,7 +1324,7 @@ async function waitForJobs(ids, t0) {
       }
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
-        const what = mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${$('aspect').value.replace('x', '×')}` +
+        const what = mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${createDims().join('×')}` +
             (activeLoras().length ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') : fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
           ? (aioActive() ? 'Rapid AIO · ' : '') + `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
             (activeLoras().length && !aioActive() ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') + (mode === 'instruct' && hasSecond() ? ' · 2 photos' : '') + (qwenMask() ? ' · selected area' : '')

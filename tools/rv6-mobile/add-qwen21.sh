@@ -73,9 +73,9 @@ def single_file(repo, label, want_gb):
     fl = files(repo)
     if not fl: return None
     show(repo, fl)
+    if any(re.search(r"-\d{5}-of-\d{5}\.safetensors$", f) for f, _ in fl):
+        return [f for f, _ in fl if re.search(r"-\d{5}-of-\d{5}\.safetensors$", f)]  # split checkpoint
     st = [(f, s) for f, s in fl if f.endswith(".safetensors") and s > want_gb * 1e9]
-    if any(re.search(r"-0000\d-of-", f) for f, _ in st):
-        print(f"   {label}: only in split (transformers) form, which ComfyUI can't load; skipped"); return None
     if not st:
         print(f"   {label}: no single ComfyUI file found; skipped"); return None
     ver = lambda f: [int(x) for x in re.findall(r"v(\d+)", f.lower())] or [0]
@@ -84,6 +84,8 @@ def single_file(repo, label, want_gb):
 # 2. Noct Q: uncensored fine-tune of 2.1 (photoreal line), newest version
 print("== Noct Q uncensored")
 f = single_file("Noctaluna/Noct-Q-Uncensored-Qwen-Image-2.1", "Noct Q", 3)
+if isinstance(f, list):
+    print("   Noct Q: only in split form; skipped"); f = None
 if f:
     name = os.path.basename(f)
     fetch("Noctaluna/Noct-Q-Uncensored-Qwen-Image-2.1", f, "diffusion_models",
@@ -91,7 +93,28 @@ if f:
 
 # 3. Heretic text encoder: Qwen3-VL 8B with refusals removed
 print("== Heretic (abliterated) text encoder")
-f = single_file("kkxao/Qwen-Image-2.1-Text-Encoder-Heretic", "Heretic encoder", 5)
+HR = "kkxao/Qwen-Image-2.1-Text-Encoder-Heretic"
+f = single_file(HR, "Heretic encoder", 5)
+dest = "models/text_encoders/qwen3vl_8b_heretic_bf16.safetensors"
+if isinstance(f, list):
+    # Split in the Hugging Face layout (model.language_model.*, model.visual.*),
+    # which is the layout ComfyUI's Qwen3-VL loader reads: join the parts into one file
+    if os.path.exists(dest) and os.path.getsize(dest) > 0:
+        print("   already have", dest)
+    else:
+        from safetensors.torch import load_file, save_file
+        sd = {}
+        for part in sorted(f):
+            print("   downloading", part)
+            sd.update(load_file(hf_hub_download(HR, part, local_dir="models/_hf_tmp")))
+        if "model.visual.deepstack_merger_list.0.norm.weight" not in sd:
+            print("   Heretic encoder: not a full Qwen3-VL (no vision part); skipped")
+        else:
+            print(f"   joining {len(f)} parts ({len(sd)} tensors) into", dest)
+            save_file(sd, dest + ".part", metadata={"format": "pt"})
+            os.replace(dest + ".part", dest)
+        del sd
+    f = None
 if f:
     name = os.path.basename(f)
     fetch("kkxao/Qwen-Image-2.1-Text-Encoder-Heretic", f, "text_encoders",

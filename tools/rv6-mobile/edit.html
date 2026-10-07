@@ -1111,9 +1111,9 @@ $('go').onclick = async () => {
   $('stop').classList.remove('hidden');
   try {
     const ts = Date.now();
-    setStatus('Connecting…');
+    setStatus('Connecting… Stay on this page for now.');
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
-    setStatus('Uploading…');
+    setStatus('Sending to the VM… Stay on this page for now.');
     const imgName = mode === 'create' ? null : await upload(await toBlob(base), `rv6m_${ts}_img.png`);
     const seed = Math.floor(Math.random() * 2 ** 32);
     let p = JSON.parse(JSON.stringify(workflow));
@@ -1160,7 +1160,7 @@ $('go').onclick = async () => {
       p['4'].inputs.text = $('neg').value;
       Object.assign(p['7'].inputs, { seed, steps: +$('steps').value, cfg: +$('cfg').value, denoise: +$('denoise').value });
     }
-    setStatus('Queued…');
+    setStatus('Sending the job… Stay on this page for now.');
     const n = +$('count').value || 1, ids = [];
     for (let i = 0; i < n; i++) {
       const q = JSON.parse(JSON.stringify(p));
@@ -1201,9 +1201,9 @@ async function cloudGo() {
   $('stop').classList.remove('hidden');
   try {
     const ts = Date.now();
-    setStatus('Connecting…');
+    setStatus('Connecting… Stay on this page for now.');
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
-    setStatus('Uploading…');
+    setStatus('Sending to the VM… Stay on this page for now.');
     const images = [await cloudUpload(mainOrig, full, `rv6m_${ts}_cloud1`)];
     for (const [i, c] of usedMore().entries()) {
       setStatus(`Uploading… ${i + 2}/${usedMore().length + 1}`);
@@ -1239,7 +1239,7 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1) {
       const secs = Math.round((Date.now() - t0) / 1000);
       if (secs > 400) throw new Error('Timed out waiting for Atlas Cloud.');
       const count = jobs.length > 1 ? ` (${Object.keys(done).length}/${jobs.length} done)` : '';
-      setStatus('Seedream is working… ' + secs + 's' + count);
+      setStatus('Seedream is working… ' + secs + 's' + count + '\n✓ It\'s on the VM now: safe to leave, it keeps going and shows here (or under Recent edits) when you come back.');
       for (const id of jobs.filter(i => !(i in done))) {
         let j;
         try { j = await (await fetch('/rv6m/cloud/job/' + id, { cache: 'no-store' })).json(); }
@@ -1305,7 +1305,7 @@ async function waitForJobs(ids, t0) {
       const secs = Math.round((Date.now() - t0) / 1000);
       if (secs > 900 * ids.length) throw new Error('Timed out.');
       const count = ids.length > 1 ? ` (${Object.keys(done).length}/${ids.length} done)` : '';
-      setStatus('Generating… ' + secs + 's' + count);
+      setStatus('Generating… ' + secs + 's' + count + '\n✓ It\'s on the VM now: safe to leave, it keeps going and shows here (or under Recent edits) when you come back.');
       for (const id of ids.filter(i => !(i in done))) {
         let h;
         try { h = await (await fetch('/api/history/' + id)).json(); }

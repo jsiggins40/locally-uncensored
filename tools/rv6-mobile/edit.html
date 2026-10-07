@@ -561,6 +561,9 @@ async function info(node) {
   if (saved === 'create' && !create && !q21) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'mask' && !qwen && !fill && !allModels.length) saved = 'instruct';
   setMode(saved);  // (re-)run now that the models are known
+  // Put the last prompt back (setMode clears it; iOS reloads the tab while an image is made)
+  const pr = recall('workPrompt');
+  if (pr) { $('prompt').value = pr; syncChips(); }
   if (qwen && !q21Active()) warmUp();
 })();
 
@@ -1223,6 +1226,7 @@ $('go').onclick = async () => {
   if (mode === 'instruct' && !qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
   $('go').disabled = true; stopRequested = false; currentJobs = [];
   $('stop').classList.remove('hidden');
+  store('workPrompt', $('prompt').value);
   try {
     const ts = Date.now();
     setStatus('Connecting… Stay on this page for now.');
@@ -1319,6 +1323,7 @@ async function cloudGo() {
   if (!cloudCfg.configured) return setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
   $('go').disabled = true; stopRequested = false; currentJobs = [];
   $('stop').classList.remove('hidden');
+  store('workPrompt', $('prompt').value);
   try {
     const ts = Date.now();
     setStatus('Connecting… Stay on this page for now.');
@@ -1599,8 +1604,6 @@ async function restoreWork() {
       try { const c = await readPhoto(b); c.orig = b; more.push(c); } catch (e) {}
     }
     renderMore();
-    const pr = recall('workPrompt');
-    if (pr && !$('prompt').value) $('prompt').value = pr;
     return true;
   } catch (e) { return false; } finally { restoring = false; }
 }

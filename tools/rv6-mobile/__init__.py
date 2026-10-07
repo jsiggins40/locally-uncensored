@@ -311,7 +311,7 @@ def _finished(ok, seconds, error=""):
 
 
 def _is_ours(prompt):
-    return any(isinstance(n, dict) and n.get("class_type") == "SaveImage"
+    return any(isinstance(n, dict) and n.get("class_type") in ("SaveImage", "SaveVideo")
                and str(n.get("inputs", {}).get("filename_prefix", "")).startswith("rv6_edit")
                for n in (prompt or {}).values())
 

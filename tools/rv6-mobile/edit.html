@@ -54,7 +54,7 @@
   #variants img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; opacity:.6; }
   #variants img.on { opacity:1; outline:2px solid var(--accent); }
   #recentList { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; margin-top:8px; }
-  #recentList img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; }
+  #recentList img, #recentList video { width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; display:block; }
   .seg { display:flex; background:#2a2a2c; border-radius:10px; padding:3px; gap:3px; margin-bottom:10px; }
   .seg button { flex:1; padding:10px 6px; background:transparent; }
   .seg button.on { background:var(--accent); }
@@ -117,6 +117,7 @@
     <button id="modeWhole">Restyle</button>
     <button id="modeCloud" class="hidden">☁️ Seedream</button>
     <button id="modeCreate" class="hidden">✍️ Create</button>
+    <button id="modeVideo" class="hidden">🎬 Video</button>
   </div>
   <div id="engineBox" class="hidden">
     <div class="seg"><button id="engChange">✨ Change (Qwen)</button><button id="engFix">🩹 Fix (OneReward)</button></div>
@@ -231,7 +232,19 @@
     <div class="hint">Atlas Cloud model name. Leave empty for Seedream 5.0 Pro Edit.</div>
   </details>
 </div>
-<div class="panel" style="padding:10px 12px">
+<div id="videoBox" class="panel hidden" style="padding:10px 12px">
+  <label for="vidLen" style="margin-top:0">Length</label>
+  <select id="vidLen">
+    <option value="5">5 seconds</option><option value="10" selected>10 seconds</option><option value="15">15 seconds</option>
+    <option value="20">20 seconds</option><option value="30">30 seconds</option><option value="45">45 seconds</option><option value="60">60 seconds</option>
+  </select>
+  <label>Resolution</label>
+  <div class="seg"><button id="vid480">480p (faster)</button><button id="vid720">720p</button></div>
+  <label>Speed</label>
+  <div class="seg"><button id="vidFast">⚡ Fast (4 steps)</button><button id="vidQual">✨ Quality (8 steps)</button></div>
+  <div class="hint" id="vidHint"></div>
+</div>
+<div class="panel" id="countBox" style="padding:10px 12px">
   <label for="count" style="margin-top:0">Variations (different random results to pick from)</label>
   <select id="count"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="6">6</option></select>
 </div>
@@ -244,8 +257,9 @@
 
 <div id="result" class="panel hidden">
   <img id="out" alt="Result">
+  <video id="outVideo" class="hidden" controls playsinline loop style="width:100%;border-radius:10px;display:block"></video>
   <div id="variants"></div>
-  <p class="hint">Long-press the image to save it to Photos.</p>
+  <p class="hint" id="saveHint">Long-press the image to save it to Photos.</p>
   <button id="again" style="width:100%">Keep editing this result</button>
 </div>
 
@@ -368,12 +382,15 @@ let create = null;
 // Qwen-Image 2.1 (Sept 2026, 7B): one model for Create and editing (up to 10
 // photos), much less censored than 2512. Optional Noct Q uncensored fine-tune
 // and Heretic (abliterated) text encoder. Added by add-qwen21.sh.
+let video = null;
 let q21 = null, createModel = recall('createModel') || 'q21', q21Pick = recall('q21Pick') || 'noct';
 const q21Active = () => !!q21 && (mode === 'create' ? (createModel === 'q21' || !create)
   : (mode === 'instruct' || qwenMask()) && (editModel === 'q21' || !qwen));
 const q21Unet = () => (q21Pick === 'noct' && q21.noct) || q21.unet || q21.noct;
 const usesQwen = () => mode === 'instruct' || mode === 'create' || qwenMask();
 const MODE_TEXT = {
+  video: ['Turns the photo into a video. Say what happens and how the camera moves; the person and scene come from the photo. Long videos are made 5 seconds at a time and joined seamlessly.',
+          'What should happen in the video?', 'e.g. she turns to the camera and smiles, slow push-in'],
   cloud: ['Seedream 5.0 Pro on Atlas Cloud: describe the change like in ✨ Describe edit. 2K results, up to 10 photos, paid per image. Photos are sent to Atlas.',
           'What should change?', 'e.g. change the background to a beach at sunset'],
   create: ['Describe a new picture and Qwen-Image 2512 makes it from scratch, no photo needed. Use "Keep editing this result" afterwards to edit it like any photo.',
@@ -391,12 +408,14 @@ const MODE_TEXT = {
 };
 function setMode(m) {
   // Describe edit and Seedream share the instruction text; the tag modes keep their own
-  const written = k => k === 'instruct' || k === 'cloud' || k === 'create' || (k === 'mask' && !!(qwen || fill));
+  const written = k => k === 'instruct' || k === 'cloud' || k === 'create' || k === 'video' || (k === 'mask' && !!(qwen || fill));
   if (written(m) && !written(mode)) maskPrompt = $('prompt').value;
   if (!written(m) && written(mode) && maskPrompt !== null) $('prompt').value = maskPrompt;
   const wasWritten = written(mode);
   mode = m; store('mode', m); setStatus('');
-  for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole'], ['modeCloud', 'cloud'], ['modeCreate', 'create']]) $(id).classList.toggle('on', k === m);
+  for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole'], ['modeCloud', 'cloud'], ['modeCreate', 'create'], ['modeVideo', 'video']]) $(id).classList.toggle('on', k === m);
+  const vid = m === 'video';
+  $('videoBox').classList.toggle('hidden', !vid); $('countBox').classList.toggle('hidden', vid);
   const cr = m === 'create';
   // No photo in Create: hide the photo area (its loaded/empty state is kept for when you switch back)
   $('stage').style.display = $('empty').style.display = cr ? 'none' : '';
@@ -406,12 +425,12 @@ function setMode(m) {
   $('engChange').classList.toggle('on', masked && !fx); $('engFix').classList.toggle('on', fx);
   $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus)));
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
-  for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud || fx);
-  for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr);
-  $('tagBox').classList.toggle('hidden', cloud || q || fx);
-  $('res').previousElementSibling.classList.toggle('hidden', cloud || cr);
-  $('resHint').classList.toggle('hidden', cloud || cr);
-  $('neg').closest('details').classList.toggle('hidden', cloud || fx);
+  for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud || fx || vid);
+  for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr || vid);
+  $('tagBox').classList.toggle('hidden', cloud || q || fx || vid);
+  $('res').previousElementSibling.classList.toggle('hidden', cloud || cr || vid);
+  $('resHint').classList.toggle('hidden', cloud || cr || vid);
+  $('neg').closest('details').classList.toggle('hidden', cloud || fx || vid);
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !speedLora());
   const encOwner = q21Active() ? q21 : cr ? create : qwen;
@@ -429,6 +448,9 @@ function setMode(m) {
   if (cloud) {
     if (!wasWritten) $('prompt').value = '';
     if (!cloudCfg.configured) setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
+  } else if (vid) {
+    if (!wasWritten) $('prompt').value = '';
+    applyVideo();
   } else if (cr) {
     if (!wasWritten) $('prompt').value = '';
     applySpeed();
@@ -447,6 +469,7 @@ $('modeMask').onclick = () => setMode('mask');
 $('modeWhole').onclick = () => setMode('whole');
 $('modeCloud').onclick = () => setMode('cloud');
 $('modeCreate').onclick = () => setMode('create');
+$('modeVideo').onclick = () => setMode('video');
 $('aspect').value = recall('aspect') || '1104x1472';
 $('aspect').addEventListener('change', () => { store('aspect', $('aspect').value); createSizeHint(); });
 $('engChange').onclick = () => { engine = 'change'; store('maskEngine', engine); setMode('mask'); };
@@ -480,9 +503,9 @@ async function info(node) {
   try { const r = await fetch('/api/object_info/' + node); return r.ok ? await r.json() : {}; } catch (e) { return {}; }
 }
 (async () => {
-  const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache] = await Promise.all(
+  const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache, svi] = await Promise.all(
     ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit',
-     'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader', 'TextEncodeQwenImage21', 'QwenImage21Cache'].map(info));
+     'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader', 'TextEncodeQwenImage21', 'QwenImage21Cache', 'WanImageToVideoSVIPro'].map(info));
   const f = {
     unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /fill/i.test(n) && /flux|onereward/i.test(n))
             .sort((a, b) => /onereward/i.test(a) - /onereward/i.test(b) || /fp8/i.test(b) - /fp8/i.test(a)).pop(),
@@ -541,6 +564,20 @@ async function info(node) {
     vae: optionsOf(vae, 'VAELoader', 'vae_name').filter(n => /qwen_image_2\.1_vae/i.test(n)).sort().pop(),
     cache: !!q21cache.QwenImage21Cache,
   };
+  // 🎬 Video: Wan 2.2 image-to-video (high + low noise models), LightX2V 4-step and
+  // SVI 2.0 Pro LoRAs, KJNodes' SVI node (add-video.sh)
+  const loras = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name');
+  const v = {
+    high: units.filter(n => /wan2\.2_i2v_high_noise/i.test(n)).sort(bf16Last).pop(),
+    low: units.filter(n => /wan2\.2_i2v_low_noise/i.test(n)).sort(bf16Last).pop(),
+    clip: clips.filter(n => /umt5/i.test(n)).sort(bf16Last).pop(),
+    vae: optionsOf(vae, 'VAELoader', 'vae_name').filter(n => /wan_2\.1_vae/i.test(n)).sort().pop(),
+    lightH: loras.filter(n => /i2v.*lightx2v.*high|lightx2v.*i2v.*high/i.test(n)).sort().pop(),
+    lightL: loras.filter(n => /i2v.*lightx2v.*low|lightx2v.*i2v.*low/i.test(n)).sort().pop(),
+    sviH: loras.filter(n => /svi.*high.*pro/i.test(n)).sort().pop(),
+    sviL: loras.filter(n => /svi.*low.*pro/i.test(n)).sort().pop(),
+  };
+  if (svi.WanImageToVideoSVIPro && Object.values(v).every(Boolean)) { video = v; $('modeVideo').classList.remove('hidden'); }
   if ((t.unet || t.noct) && t.clip && t.vae && q21enc.TextEncodeQwenImage21) {
     q21 = t;
     $('modeCreate').classList.remove('hidden');
@@ -559,6 +596,7 @@ async function info(node) {
   if (saved === 'cloud' && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'whole' && !allModels.length) saved = 'instruct';
   if (saved === 'create' && !create && !q21) saved = qwen ? 'instruct' : 'mask';
+  if (saved === 'video' && !video) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'mask' && !qwen && !fill && !allModels.length) saved = 'instruct';
   setMode(saved);  // (re-)run now that the models are known
   // Put the last prompt back (setMode clears it; iOS reloads the tab while an image is made)
@@ -894,6 +932,77 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = 
   return aioActive() ? toAio(p) : p;
 }
 
+// ---- 🎬 Video: Wan 2.2 14B image-to-video + SVI 2.0 Pro for any length.
+// Each 5 s clip (81 frames at 16 fps) is conditioned on the photo (the anchor,
+// so the person stays the same) and on the last latent of the clip before it
+// (so motion carries on); clips after the first drop their first frame when
+// joined, as in SVI's own inference script. High-noise model for the first
+// half of the steps, low-noise for the rest; LightX2V makes 4-8 steps enough.
+let vidRes = recall('vidRes') || '480', vidQuality = recall('vidQuality') === '1';
+$('vidLen').value = recall('vidLen') || '10';
+if (!$('vidLen').value) $('vidLen').value = '10';
+function vidDims() {
+  const area = vidRes === '720' ? 1280 * 720 : 832 * 480, r = full.width / full.height || 1;
+  return [Math.round(Math.sqrt(area * r) / 16) * 16, Math.round(Math.sqrt(area / r) / 16) * 16];
+}
+const vidClips = () => Math.max(1, Math.ceil(+$('vidLen').value / 5));
+function applyVideo() {
+  $('vid480').classList.toggle('on', vidRes !== '720'); $('vid720').classList.toggle('on', vidRes === '720');
+  $('vidFast').classList.toggle('on', !vidQuality); $('vidQual').classList.toggle('on', vidQuality);
+  const n = vidClips(), [w, h] = photoIn ? vidDims() : [0, 0];
+  // Rough H200 timings per 5 s clip (first run adds ~3 min to load the models)
+  const per = (vidRes === '720' ? 2.2 : 1) * (vidQuality ? 2 : 1);
+  $('vidHint').textContent = (photoIn ? `${w}×${h}, ` : '') + `${n} clip${n > 1 ? 's' : ''} of 5 s. ` +
+    `Roughly ${Math.max(1, Math.round(n * per))}–${Math.round(n * per * 2) + 1} min on the H200. ` +
+    'Tip: describe one continuous action; 480p and Fast keep motion lively.';
+}
+$('vidLen').addEventListener('change', () => { store('vidLen', $('vidLen').value); applyVideo(); });
+$('vid480').onclick = () => { vidRes = '480'; store('vidRes', vidRes); applyVideo(); };
+$('vid720').onclick = () => { vidRes = '720'; store('vidRes', vidRes); applyVideo(); };
+$('vidFast').onclick = () => { vidQuality = false; store('vidQuality', '0'); applyVideo(); };
+$('vidQual').onclick = () => { vidQuality = true; store('vidQuality', '1'); applyVideo(); };
+const VID_NEG = 'blurry, low quality, worst quality, static, still image, deformed, distorted, extra limbs, extra fingers, watermark, text, subtitles';
+function buildVideoWorkflow(imgName, text, seed) {
+  const [w, h] = vidDims(), n = vidClips(), steps = vidQuality ? 8 : 4, split = steps / 2;
+  const p = {
+    'm1': { class_type: 'UNETLoader', inputs: { unet_name: video.high, weight_dtype: 'default' } },
+    'm2': { class_type: 'UNETLoader', inputs: { unet_name: video.low, weight_dtype: 'default' } },
+    'te': { class_type: 'CLIPLoader', inputs: { clip_name: video.clip, type: 'wan' } },
+    'va': { class_type: 'VAELoader', inputs: { vae_name: video.vae } },
+    'h1': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['m1', 0], lora_name: video.lightH, strength_model: 1 } },
+    'h2': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['h1', 0], lora_name: video.sviH, strength_model: 1 } },
+    'hs': { class_type: 'ModelSamplingSD3', inputs: { model: ['h2', 0], shift: 5 } },
+    'l1': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['m2', 0], lora_name: video.lightL, strength_model: 1 } },
+    'l2': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['l1', 0], lora_name: video.sviL, strength_model: 1 } },
+    'ls': { class_type: 'ModelSamplingSD3', inputs: { model: ['l2', 0], shift: 5 } },
+    'pos': { class_type: 'CLIPTextEncode', inputs: { clip: ['te', 0], text } },
+    'neg': { class_type: 'CLIPTextEncode', inputs: { clip: ['te', 0], text: VID_NEG } },
+    'img': { class_type: 'LoadImage', inputs: { image: imgName } },
+    'fit': { class_type: 'ImageScale', inputs: { image: ['img', 0], upscale_method: 'lanczos', width: w, height: h, crop: 'center' } },
+    'anc': { class_type: 'VAEEncode', inputs: { pixels: ['fit', 0], vae: ['va', 0] } },
+  };
+  let frames = null;
+  for (let i = 0; i < n; i++) {
+    const c = 'c' + i;
+    p[c + 'i'] = { class_type: 'WanImageToVideoSVIPro', inputs: { positive: ['pos', 0], negative: ['neg', 0], length: 81,
+                   anchor_samples: ['anc', 0], motion_latent_count: 1, ...(i ? { prev_samples: ['c' + (i - 1) + 'l', 0] } : {}) } };
+    p[c + 'h'] = { class_type: 'KSamplerAdvanced', inputs: { model: ['hs', 0], add_noise: 'enable', noise_seed: (seed + i * 7919) % 2 ** 32,
+                   steps, cfg: 1, sampler_name: 'euler', scheduler: 'simple', positive: [c + 'i', 0], negative: [c + 'i', 1],
+                   latent_image: [c + 'i', 2], start_at_step: 0, end_at_step: split, return_with_leftover_noise: 'enable' } };
+    p[c + 'l'] = { class_type: 'KSamplerAdvanced', inputs: { model: ['ls', 0], add_noise: 'disable', noise_seed: 0,
+                   steps, cfg: 1, sampler_name: 'euler', scheduler: 'simple', positive: [c + 'i', 0], negative: [c + 'i', 1],
+                   latent_image: [c + 'h', 0], start_at_step: split, end_at_step: 10000, return_with_leftover_noise: 'disable' } };
+    p[c + 'd'] = { class_type: 'VAEDecode', inputs: { samples: [c + 'l', 0], vae: ['va', 0] } };
+    if (i === 0) { frames = [c + 'd', 0]; continue; }
+    p[c + 'x'] = { class_type: 'ImageFromBatch', inputs: { image: [c + 'd', 0], batch_index: 1, length: 4096 } };
+    p[c + 'j'] = { class_type: 'ImageBatch', inputs: { image1: frames, image2: [c + 'x', 0] } };
+    frames = [c + 'j', 0];
+  }
+  p['mv'] = { class_type: 'CreateVideo', inputs: { images: frames, fps: 16 } };
+  p['9'] = { class_type: 'SaveVideo', inputs: { video: ['mv', 0], filename_prefix: 'rv6_edit', format: 'mp4', 'format.codec': 'h264' } };
+  return p;
+}
+
 // Qwen-Image 2.1, as in ComfyUI's own templates: one encoder node takes the
 // prompt and the reference photos (resolution 0 = each photo at its own size)
 // and hands back the latent, so the result has picture 1's size; 25 steps at
@@ -1052,6 +1161,7 @@ function loadIntoCanvas(src) {
       mainOrig = null; photoIn = true;
       fitToRes(false);
       $('empty').classList.add('hidden'); $('stage').classList.remove('hidden');
+      if (mode === 'video') applyVideo();
       resolve();
     };
     img.onerror = () => reject(new Error('Could not read that image'));
@@ -1232,11 +1342,15 @@ $('go').onclick = async () => {
     setStatus('Connecting… Stay on this page for now.');
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
     setStatus('Sending to the VM… Stay on this page for now.');
-    const imgName = mode === 'create' ? null : await upload(await toBlob(base), `rv6m_${ts}_img.png`);
+    const imgName = mode === 'create' ? null : mode === 'video' ? await upload(await toJpeg(full), `rv6m_${ts}_img.jpg`)
+      : await upload(await toBlob(base), `rv6m_${ts}_img.png`);
     const seed = Math.floor(Math.random() * 2 ** 32);
     let p = JSON.parse(JSON.stringify(workflow));
     let model = $('model').value;
-    if (q21Active()) {
+    if (mode === 'video') {
+      if (!photoIn) throw new Error('Choose a photo first: the video starts from it.');
+      p = buildVideoWorkflow(imgName, $('prompt').value.trim(), seed);
+    } else if (q21Active()) {
       const names = [];
       if (mode === 'instruct') for (const [i, c] of usedMore().entries()) names.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
       const maskName = qwenMask() ? await upload(await exportMask(), `rv6m_${ts}_mask.png`) : null;
@@ -1276,7 +1390,7 @@ $('go').onclick = async () => {
     } else {
       p['10'].inputs.image = await upload(await exportMask(), `rv6m_${ts}_mask.png`);
     }
-    if (!usesQwen() && !fixMask()) {
+    if (!usesQwen() && !fixMask() && mode !== 'video') {
       p['1'].inputs.ckpt_name = model;
       if (!isRV(model)) { p['6'].inputs.vae = ['1', 2]; p['8'].inputs.vae = ['1', 2]; delete p['2']; }
       p['5'].inputs.image = imgName;
@@ -1285,10 +1399,10 @@ $('go').onclick = async () => {
       Object.assign(p['7'].inputs, { seed, steps: +$('steps').value, cfg: +$('cfg').value, denoise: +$('denoise').value });
     }
     setStatus('Sending the job… Stay on this page for now.');
-    const n = +$('count').value || 1, ids = [];
+    const n = mode === 'video' ? 1 : +$('count').value || 1, ids = [];
     for (let i = 0; i < n; i++) {
       const q = JSON.parse(JSON.stringify(p));
-      q['7'].inputs.seed = (seed + i * 7919) % 2 ** 32;
+      if (q['7'] && 'seed' in q['7'].inputs) q['7'].inputs.seed = (seed + i * 7919) % 2 ** 32;
       const r = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                              body: JSON.stringify({ prompt: q, client_id: clientId }) });
       if (!r.ok) throw new Error('ComfyUI rejected the job (' + r.status + '): ' + (await r.text()).slice(0, 600));
@@ -1405,7 +1519,14 @@ function addCloudRecent(filename) {
 }
 
 const viewUrl = o => `/api/view?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}&type=${o.type || 'output'}`;
+const isVideo = o => /\.(mp4|webm|mkv|mov)$/i.test(o.filename || '');
 function showResult(o, variants = []) {
+  const v = isVideo(o);
+  $('out').classList.toggle('hidden', v); $('outVideo').classList.toggle('hidden', !v);
+  $('again').classList.toggle('hidden', v);
+  $('saveHint').textContent = v ? 'Tap play. To save it: tap the share button in the player (or ⋯) → Save Video.' : 'Long-press the image to save it to Photos.';
+  if (v) { $('outVideo').src = viewUrl(o); $('variants').innerHTML = ''; $('result').classList.remove('hidden'); return; }
+  $('outVideo').removeAttribute('src');
   $('out').src = viewUrl(o);
   const box = $('variants'); box.innerHTML = '';
   if (variants.length > 1) for (const v of variants) {
@@ -1428,7 +1549,7 @@ async function waitForJobs(ids, t0) {
       await sleep(1000);
       if (stopRequested) { setStatus('Stopped.'); return; }
       const secs = Math.round((Date.now() - t0) / 1000);
-      if (secs > 900 * ids.length) throw new Error('Timed out.');
+      if (secs > 7200 * ids.length) throw new Error('Timed out.');
       const count = ids.length > 1 ? ` (${Object.keys(done).length}/${ids.length} done)` : '';
       setStatus('Generating… ' + secs + 's' + count + '\n✓ It\'s on the VM now: safe to leave, it keeps going and shows here (or under Recent edits) when you come back.');
       for (const id of ids.filter(i => !(i in done))) {
@@ -1452,7 +1573,8 @@ async function waitForJobs(ids, t0) {
       }
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
-        const what = q21Active() ? `Qwen 2.1${q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · ` +
+        const what = mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
+          : q21Active() ? `Qwen 2.1${q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · ` +
             (mode === 'create' ? createDims().join('×') : `${base.width}×${base.height}`) + (ablActive() ? ' · 🔓 encoder' : '') +
             (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')
           : mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${createDims().join('×')}` +
@@ -1486,7 +1608,7 @@ async function resumePending() {
   }
   let pj = null; try { pj = JSON.parse(recall('pendingJob') || 'null'); } catch (e) {}
   const ids = pj && (pj.ids || (pj.id ? [pj.id] : []));
-  if (!ids || !ids.length || Date.now() - pj.t0 > 15 * 60 * 1000 * ids.length) return;
+  if (!ids || !ids.length || Date.now() - pj.t0 > 2 * 3600 * 1000 * ids.length) return;
   $('go').disabled = true; currentJobs = ids.slice(); $('stop').classList.remove('hidden');
   setStatus('Picking up your last edit…');
   try { await waitForJobs(ids, pj.t0); }
@@ -1508,8 +1630,9 @@ async function loadRecent() {
       .sort((a, b) => b.t - a.t).slice(0, 12);
     const box = $('recentList'); box.innerHTML = '';
     for (const x of items) {
-      const im = document.createElement('img');
-      im.src = `/api/view?filename=${encodeURIComponent(x.img.filename)}&subfolder=${encodeURIComponent(x.img.subfolder || '')}&type=output`;
+      const vid = isVideo(x.img), im = document.createElement(vid ? 'video' : 'img');
+      im.src = `/api/view?filename=${encodeURIComponent(x.img.filename)}&subfolder=${encodeURIComponent(x.img.subfolder || '')}&type=output` + (vid ? '#t=0.5' : '');
+      if (vid) { im.muted = true; im.playsInline = true; im.preload = 'metadata'; }
       im.onclick = () => { showResult(x.img); $('result').scrollIntoView({ behavior: 'smooth' }); };
       box.append(im);
     }

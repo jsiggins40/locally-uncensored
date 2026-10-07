@@ -178,9 +178,14 @@
     <div class="hint" id="emHint"></div>
   </div>
   <div id="q21Box" class="hidden">
-    <label>Qwen 2.1 version</label>
-    <div class="seg"><button id="q21Noct">🔓 Noct Q uncensored</button><button id="q21Off">Official</button></div>
-    <div class="hint" id="q21Hint"></div>
+    <div id="q21PickRow">
+      <label>Qwen 2.1 version</label>
+      <div class="seg"><button id="q21Noct">🔓 Noct Q uncensored</button><button id="q21Off">Official</button></div>
+      <div class="hint" id="q21Hint"></div>
+    </div>
+    <div class="lbl"><span>Follow the prompt</span></div>
+    <div class="ctl"><button class="step" data-for="q21cfg" data-dir="-1" aria-label="Less">−</button><input id="q21cfg" type="range" min="1" max="8" step="0.5" value="3" data-nudge="0.5"><button class="step" data-for="q21cfg" data-dir="1" aria-label="More">+</button><span class="val" id="q21cfgVal"></span></div>
+    <div class="hint">Higher = bigger changes (poses, actions) and follows your words harder; too high looks harsh or overcooked. Try 4–6 when it won't change the pose.</div>
   </div>
   <div id="speedBox" class="hidden">
     <div class="seg" style="margin-top:12px"><button id="fastBtn">⚡ Fast</button><button id="qualBtn">✨ Quality</button></div>
@@ -722,11 +727,13 @@ function applyEditModel() {
 function applyQ21() {
   $('cmQ2512').classList.toggle('on', createModel !== 'q21'); $('cmQ21').classList.toggle('on', createModel === 'q21');
   const on = q21Active();
-  $('q21Box').classList.toggle('hidden', !on || !(q21.noct && q21.unet));
+  $('q21Box').classList.toggle('hidden', !on);
   if (!on) return;
+  $('q21PickRow').classList.toggle('hidden', !(q21.noct && q21.unet));
+  showQ21Cfg();
   $('q21Noct').classList.toggle('on', q21Unet() === q21.noct); $('q21Off').classList.toggle('on', q21Unet() !== q21.noct);
   $('q21Hint').textContent = q21Unet() === q21.noct
-    ? 'Noct Q: community fine-tune that renders explicit scenes as asked far more often (CFG 3, as its author recommends). Compare with Official if quality looks off.'
+    ? 'Noct Q: community fine-tune that renders explicit scenes as asked far more often. Its author recommends prompt strength 3. Compare with Official if quality looks off.'
     : 'Official Qwen 2.1: already loose on NSFW; the best general image quality.';
 }
 $('emQ21').onclick = () => { editModel = 'q21'; store('editModel', editModel); setMode(mode); };
@@ -1010,7 +1017,12 @@ function buildVideoWorkflow(imgName, text, seed) {
 // Noct Q is not guidance-distilled like the official 2.1: its author's settings
 // are CFG 3 with a negative prompt (at CFG 1 it barely follows the instruction)
 const Q21_NEG = 'blurry, low quality, distorted, deformed, bad anatomy, extra limbs, extra fingers, watermark, text';
-const q21Cfg = () => q21Unet() === q21.noct ? 3 : 1;
+// "Follow the prompt" slider, remembered per version (defaults: Noct Q 3, Official 1)
+const q21Key = () => 'q21cfg_' + (q21Unet() === q21.noct ? 'noct' : 'official');
+const q21Cfg = () => +$('q21cfg').value || 1;
+function showQ21Cfg() { setVal($('q21cfg'), +(recall(q21Key()) || (q21Unet() === q21.noct ? 3 : 1))); }
+$('q21cfg').addEventListener('input', () => store(q21Key(), $('q21cfg').value));
+for (const b of document.querySelectorAll('button.step[data-for=q21cfg]')) b.addEventListener('pointerup', () => store(q21Key(), $('q21cfg').value));
 function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, maskName = null) {
   const edit = imgNames.length > 0, cfg = q21Cfg();
   const p = {
@@ -1086,7 +1098,7 @@ const ckptReady = fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.j
 
 function setStatus(msg, err) { $('status').textContent = msg; $('status').classList.toggle('err', !!err); }
 
-const FMT = { loraW: v => (+v).toFixed(2), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
+const FMT = { q21cfg: v => (+v).toFixed(1), loraW: v => (+v).toFixed(2), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
 function paint(r) {
   const pct = (r.value - r.min) / (r.max - r.min) * 100;
   r.style.setProperty('--pct', pct + '%');

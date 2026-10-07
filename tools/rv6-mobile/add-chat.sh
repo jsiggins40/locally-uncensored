@@ -26,6 +26,11 @@
 # Everything for Qwen (stops image editing; edit-restart brings it back),
 # best quality Q8_0, 128K context:  CHAT_DEVICE=max bash <(curl ...)
 set -euo pipefail
+# The chat page runs in a tmux session called "chat" (chat-start replaces it):
+# if this installer itself was started in one with that name, rename ours first
+if [ -n "${TMUX:-}" ] && [ "$(tmux display-message -p '#S' 2>/dev/null)" = chat ]; then
+  tmux rename-session chat-install 2>/dev/null || true
+fi
 WANT="${CHAT_MODELS:-qwen}"
 DEVICE="${CHAT_DEVICE:-cpu}"
 GLMBIG=0

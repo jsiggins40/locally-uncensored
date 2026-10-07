@@ -246,6 +246,22 @@
   <div id="recentList"></div>
 </div>
 
+<div class="panel" id="notifyBox">
+  <div class="lbl" style="margin-top:0"><span>🔔 Notify me when done</span></div>
+  <div class="hint">Get a notification on this phone when an edit finishes, so you can leave the page while the VM works. Uses the free ntfy app.</div>
+  <div class="seg" style="margin-top:8px"><button id="ntfOff" class="on">Off</button><button id="ntfOn">On</button></div>
+  <div id="ntfSetup" class="hidden">
+    <ol class="hint" style="padding-left:18px;margin:8px 0">
+      <li>Install <b>ntfy</b> from the App Store (free) and allow its notifications.</li>
+      <li>In ntfy tap <b>+</b>, paste this topic and tap <b>Subscribe</b>:</li>
+    </ol>
+    <div class="row"><input id="ntfTopic" readonly style="flex:3;font:inherit;color:var(--text);background:#2a2a2c;border:1px solid #3a3a3c;border-radius:10px;padding:10px"><button id="ntfCopy">Copy</button></div>
+    <div class="row" style="margin-top:8px"><button id="ntfTest">Send a test</button><button id="ntfNew">New topic</button></div>
+    <div class="hint" id="ntfMsg" style="margin-top:6px"></div>
+    <div class="hint" style="margin-top:6px">Nothing is sent while this page is open on screen. The messages only say an edit is ready or failed, never the image, but anyone who knew the topic name could see them, so keep it to yourself.</div>
+  </div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
@@ -657,6 +673,7 @@ const maxMore = () => mode === 'cloud' ? 9 : 2;
 const hasSecond = () => more.length > 0;
 const usedMore = () => more.slice(0, maxMore());
 function renderMore() {
+  saveMore();
   const box = $('moreList'); box.innerHTML = '';
   more.forEach((c, i) => {
     const d = document.createElement('div'), x = document.createElement('button'), l = document.createElement('span');
@@ -946,7 +963,7 @@ function loadIntoCanvas(src) {
 $('file').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   const url = URL.createObjectURL(f);
-  try { await loadIntoCanvas(url); mainOrig = f; setStatus(mode === 'mask' ? 'Tap the person or object to change, or use Paint.' : 'Now type what to change.'); }
+  try { await loadIntoCanvas(url); mainOrig = f; savePhoto(); setStatus(mode === 'mask' ? 'Tap the person or object to change, or use Paint.' : 'Now type what to change.'); }
   catch (err) { setStatus(err.message, true); }
   finally { URL.revokeObjectURL(url); e.target.value = ''; }
 });
@@ -1010,6 +1027,7 @@ async function runSegment() {
       mctx.globalCompositeOperation = 'source-over';
       mctx.putImageData(selBase, 0, 0);
       mctx.drawImage(img, 0, 0, mask.width, mask.height);
+      saveWorkSoon();
       setStatus('Selected. Tap more to adjust, or type a prompt and Generate.');
     }
   } catch (err) {
@@ -1020,7 +1038,7 @@ async function runSegment() {
   }
 }
 mask.addEventListener('pointermove', e => { if (!drawing) return; e.preventDefault(); const p = pos(e); stroke(last, p); last = p; });
-for (const ev of ['pointerup', 'pointercancel']) mask.addEventListener(ev, () => { drawing = false; });
+for (const ev of ['pointerup', 'pointercancel']) mask.addEventListener(ev, () => { if (drawing) saveWorkSoon(); drawing = false; });
 
 function setTool(t) {
   tool = t; erasing = t === 'erase';
@@ -1041,12 +1059,12 @@ $('selReset').onclick = () => {
 };
 $('undo').onclick = () => {
   const s = undoStack.pop(); if (!s) return;
-  mctx.putImageData(s, 0, 0);
+  mctx.putImageData(s, 0, 0); saveWorkSoon();
   if (tool === 'select' && selPoints.length) { selPoints.pop(); if (!selPoints.length) selBase = null; drawPts(); }
 };
 $('clear').onclick = () => {
   undoStack.push(mctx.getImageData(0, 0, mask.width, mask.height));
-  mctx.clearRect(0, 0, mask.width, mask.height); selPoints = []; selBase = null; drawPts();
+  mctx.clearRect(0, 0, mask.width, mask.height); selPoints = []; selBase = null; drawPts(); saveWorkSoon();
 };
 
 function maskIsEmpty() {
@@ -1411,14 +1429,117 @@ $('stop').onclick = async () => {
 };
 
 $('again').onclick = async () => {
-  await loadIntoCanvas($('out').src);
+  await loadIntoCanvas($('out').src); savePhoto();
   if (mode === 'create') setMode(qwen ? 'instruct' : 'mask');  // a created picture is edited like any photo
   $('result').classList.add('hidden');
   window.scrollTo({ top: 0, behavior: 'smooth' });
   setStatus('Paint the next area to change.');
 };
 
-resumePending();
+// ---- Remember my work: iOS throws away background tabs, so the photo, extra
+// photos, selection and prompt are kept on this phone (IndexedDB) and put back
+// when the page reloads. Nothing leaves the phone for this.
+var IDB = (() => {
+  let dbp = null;
+  const db = () => dbp || (dbp = new Promise((ok, bad) => {
+    const r = indexedDB.open('rv6m', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => ok(r.result); r.onerror = () => bad(r.error);
+  }));
+  const run = (rw, fn) => db().then(d => new Promise((ok, bad) => {
+    const tx = d.transaction('kv', rw), req = fn(tx.objectStore('kv'));
+    tx.oncomplete = () => ok(req && req.result); tx.onerror = () => bad(tx.error);
+  }));
+  return { get: k => run('readonly', s => s.get(k)).catch(() => null),
+           set: (k, v) => run('readwrite', s => s.put(v, k)).catch(() => null) };
+})();
+var restoring = false, workTimer = null, workReady = false;  // var: renderMore runs before this line at start-up
+async function savePhoto() {
+  if (!workReady || restoring) return;
+  const photo = await toBlob(full);
+  await IDB.set('photo', { photo, orig: mainOrig || null, t: Date.now() });
+  await IDB.set('mask', null);
+}
+function saveMore() {
+  if (!workReady || restoring) return;
+  IDB.set('more', more.map(c => c.orig || null).filter(Boolean));
+}
+async function saveWork() {
+  clearTimeout(workTimer); workTimer = null;
+  if (!workReady || restoring || !photoIn) return;
+  await IDB.set('mask', await toBlob(mask));
+}
+function saveWorkSoon() { clearTimeout(workTimer); workTimer = setTimeout(saveWork, 1200); }
+$('prompt').addEventListener('input', () => store('workPrompt', $('prompt').value));
+document.addEventListener('visibilitychange', () => {
+  store('workPrompt', $('prompt').value);
+  if (document.visibilityState === 'hidden' && workTimer) saveWork();
+});
+async function restoreWork() {
+  const ph = await IDB.get('photo');
+  if (!ph || !ph.photo || photoIn) return false;
+  restoring = true;
+  try {
+    const url = URL.createObjectURL(ph.photo);
+    try { await loadIntoCanvas(url); } finally { URL.revokeObjectURL(url); }
+    mainOrig = ph.orig || null;
+    const m = await IDB.get('mask');
+    if (m) {
+      const u = URL.createObjectURL(m);
+      const im = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = u; }).catch(() => null);
+      URL.revokeObjectURL(u);
+      if (im) mctx.drawImage(im, 0, 0, mask.width, mask.height);
+    }
+    for (const b of (await IDB.get('more')) || []) {
+      try { const c = await readPhoto(b); c.orig = b; more.push(c); } catch (e) {}
+    }
+    renderMore();
+    const pr = recall('workPrompt');
+    if (pr && !$('prompt').value) $('prompt').value = pr;
+    return true;
+  } catch (e) { return false; } finally { restoring = false; }
+}
+
+// ---- Notify me when done (the VM sends it through ntfy; see __init__.py).
+// The page tells the VM while it is on screen, so no notification is sent then.
+function seen(visible) {
+  fetch('/rv6m/seen', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ visible }) }).catch(() => {});
+}
+setInterval(() => { if (document.visibilityState === 'visible') seen(true); }, 3000);
+document.addEventListener('visibilitychange', () => seen(document.visibilityState === 'visible'));
+window.addEventListener('pagehide', () => seen(false));
+seen(true);
+function showNotify(c) {
+  if (!c) return;
+  $('ntfOn').classList.toggle('on', c.enabled); $('ntfOff').classList.toggle('on', !c.enabled);
+  $('ntfSetup').classList.toggle('hidden', !c.enabled);
+  $('ntfTopic').value = c.topic || '';
+}
+async function notifyCall(action) {
+  const r = await fetch('/rv6m/notify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, click: location.origin + location.pathname }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'The VM said ' + r.status);
+  return j;
+}
+fetch('/rv6m/notify').then(r => r.ok ? r.json() : null).then(showNotify).catch(() => {});
+$('ntfOn').onclick = () => notifyCall('on').then(c => { showNotify(c); $('ntfMsg').textContent = 'On. Subscribe in ntfy, then tap Send a test.'; })
+  .catch(e => { $('ntfMsg').textContent = e.message; });
+$('ntfOff').onclick = () => notifyCall('off').then(showNotify).catch(e => { $('ntfMsg').textContent = e.message; });
+$('ntfNew').onclick = () => notifyCall('new').then(c => { showNotify(c); $('ntfMsg').textContent = 'New topic. Subscribe to it in ntfy (you can delete the old one there).'; })
+  .catch(e => { $('ntfMsg').textContent = e.message; });
+$('ntfTest').onclick = () => { $('ntfMsg').textContent = 'Sending…';
+  notifyCall('test').then(() => { $('ntfMsg').textContent = 'Sent. It should pop up on this phone in a few seconds.'; })
+    .catch(e => { $('ntfMsg').textContent = e.message; }); };
+$('ntfCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('ntfTopic').value); $('ntfMsg').textContent = 'Copied.'; }
+  catch (e) { $('ntfTopic').select(); $('ntfMsg').textContent = 'Press and hold the topic to copy it.'; }
+};
+
+workReady = true;
+restoreWork().then(ok => { if (ok && !$('status').textContent) setStatus('Picked up where you left off.'); })
+  .finally(resumePending);
 </script>
 </body>
 </html>

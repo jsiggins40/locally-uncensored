@@ -233,6 +233,7 @@ async def _run_cloud(jid, names, prompt, size, model):
         logging.exception("[rv6_mobile] cloud edit failed")
         _jobs[jid].update(status="error", error=str(e))
     _jobs[jid]["seconds"] = round(loop.time() - t, 1)
+    _finished(_jobs[jid]["status"] == "done", _jobs[jid]["seconds"], _jobs[jid].get("error", ""))
 
 
 @PromptServer.instance.routes.get("/rv6m/cloud/status")
@@ -264,3 +265,146 @@ async def rv6m_cloud_job(request):
     if job is None:
         return web.json_response({"status": "error", "error": "unknown job (ComfyUI was restarted?)"}, status=404)
     return web.json_response(job)
+
+
+# ---- "Notify me when done": a push to the ntfy app on the phone when the
+# page's edits finish, so you can leave the page while the VM works. Safari
+# can't run in the background on iOS, so the VM sends it. The page says when it
+# is open and visible; nothing is sent then. Messages only say done/failed.
+import json
+import secrets
+import time
+import urllib.request
+
+NOTIFY_FILE = os.path.expanduser("~/.rv6m_notify.json")
+_note = {"seen": 0.0, "pending": [], "known": set()}
+
+
+def _notify_cfg():
+    try:
+        with open(NOTIFY_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _notify_save(cfg):
+    with open(NOTIFY_FILE, "w") as f:
+        json.dump(cfg, f)
+    os.chmod(NOTIFY_FILE, 0o600)
+
+
+def _push(title, body, tags):
+    cfg = _notify_cfg()
+    if not cfg.get("topic"):
+        raise RuntimeError("notifications are not set up")
+    headers = {"Title": title, "Tags": tags, "User-Agent": "rv6-mobile"}
+    if cfg.get("click"):
+        headers["Click"] = cfg["click"]
+    req = urllib.request.Request(cfg.get("server", "https://ntfy.sh").rstrip("/") + "/" + cfg["topic"],
+                                 data=body.encode(), headers=headers, method="POST")
+    urllib.request.urlopen(req, timeout=15).read()
+
+
+def _finished(ok, seconds, error=""):
+    _note["pending"].append((ok, seconds, str(error)[:200], time.time()))
+
+
+def _is_ours(prompt):
+    return any(isinstance(n, dict) and n.get("class_type") == "SaveImage"
+               and str(n.get("inputs", {}).get("filename_prefix", "")).startswith("rv6_edit")
+               for n in (prompt or {}).values())
+
+
+def _watch():
+    first = True
+    while True:
+        time.sleep(2)
+        try:
+            q = getattr(PromptServer.instance, "prompt_queue", None)
+            if q is None:
+                continue
+            hist = q.get_history(max_items=40)
+            for pid, h in hist.items():
+                if pid in _note["known"]:
+                    continue
+                _note["known"].add(pid)
+                if first:
+                    continue  # finished before this ComfyUI started watching
+                pr = h.get("prompt") or ()
+                if len(pr) < 3 or not _is_ours(pr[2]):
+                    continue
+                st = h.get("status") or {}
+                msgs = {m[0]: (m[1] if len(m) > 1 else {}) for m in st.get("messages", [])}
+                if "execution_interrupted" in msgs:
+                    continue  # Stop was pressed
+                ok = st.get("status_str") == "success"
+                t0, t1 = msgs.get("execution_start", {}).get("timestamp"), \
+                    (msgs.get("execution_success") or msgs.get("execution_error") or {}).get("timestamp")
+                secs = (t1 - t0) / 1000 if t0 and t1 else 0
+                _finished(ok, secs, "" if ok else msgs.get("execution_error", {}).get("exception_message", ""))
+            first = False
+            if len(_note["known"]) > 2000:
+                _note["known"] = set(hist)
+            p = _note["pending"]
+            # One message per batch: wait until nothing else is queued (or 2 min)
+            if p and (q.get_tasks_remaining() == 0 or time.time() - p[0][3] > 120):
+                _note["pending"] = []
+                cfg = _notify_cfg()
+                if not cfg.get("enabled") or not cfg.get("topic") or time.time() - _note["seen"] < 8:
+                    continue  # off, or the page is open and showing it
+                good = [x for x in p if x[0]]
+                bad = [x for x in p if not x[0]]
+                if good:
+                    n = len(good)
+                    _push("Photo edit ready", (f"{n} images are" if n > 1 else "Your image is") +
+                          " ready. Tap to open.", "white_check_mark")
+                if bad:
+                    _push("Photo edit failed", "An edit failed: " + (bad[0][2] or "see the page") , "x")
+        except Exception:
+            logging.exception("[rv6_mobile] notify watcher")
+            time.sleep(10)
+
+
+threading.Thread(target=_watch, daemon=True, name="rv6m-notify").start()
+
+
+@PromptServer.instance.routes.post("/rv6m/seen")
+async def rv6m_seen(request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    _note["seen"] = time.time() if body.get("visible", True) else 0.0
+    return web.json_response({"ok": True})
+
+
+@PromptServer.instance.routes.get("/rv6m/notify")
+async def rv6m_notify_status(request):
+    cfg = _notify_cfg()
+    return web.json_response({"enabled": bool(cfg.get("enabled")), "topic": cfg.get("topic", ""),
+                              "server": cfg.get("server", "https://ntfy.sh")})
+
+
+@PromptServer.instance.routes.post("/rv6m/notify")
+async def rv6m_notify(request):
+    body = await request.json()
+    cfg, action = _notify_cfg(), body.get("action")
+    if action in ("on", "off", "new"):
+        if action == "new" or not cfg.get("topic"):
+            cfg["topic"] = "photoedit-" + secrets.token_hex(10)  # hard to guess = private
+        cfg.setdefault("server", "https://ntfy.sh")
+        cfg["enabled"] = action != "off"
+        if body.get("click"):
+            cfg["click"] = str(body["click"])[:300]
+        _notify_save(cfg)
+    elif action == "test":
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, _push, "Photo edit test", "Notifications work. You'll get one when an edit is ready.", "bell")
+        except Exception as e:
+            return web.json_response({"error": f"Could not send: {e}"}, status=502)
+    else:
+        return web.json_response({"error": "unknown action"}, status=400)
+    return web.json_response({"enabled": bool(cfg.get("enabled")), "topic": cfg.get("topic", ""),
+                              "server": cfg.get("server", "https://ntfy.sh")})

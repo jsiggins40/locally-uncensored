@@ -86,6 +86,10 @@
       <option value="1472x1104">Landscape 4:3</option>
       <option value="1664x928">Landscape 16:9</option>
     </select>
+    <div id="createModelBox" class="hidden">
+      <label>Create model</label>
+      <div class="seg"><button id="cmQ2512">Qwen 2512</button><button id="cmQ21">🆕 Qwen 2.1</button></div>
+    </div>
     <label for="createSize">Size</label>
     <select id="createSize">
       <option value="0.75">Small (faster)</option>
@@ -169,8 +173,13 @@
   </div>
   <div id="editModelBox" class="hidden">
     <label>Edit model</label>
-    <div class="seg"><button id="emQwen">Qwen 2511 + LoRA</button><button id="emAio">⚡ Rapid AIO NSFW</button></div>
+    <div class="seg"><button id="emQwen">Qwen 2511 + LoRA</button><button id="emAio">⚡ Rapid AIO NSFW</button><button id="emQ21" class="hidden">🆕 Qwen 2.1</button></div>
     <div class="hint" id="emHint"></div>
+  </div>
+  <div id="q21Box" class="hidden">
+    <label>Qwen 2.1 version</label>
+    <div class="seg"><button id="q21Noct">🔓 Noct Q uncensored</button><button id="q21Off">Official</button></div>
+    <div class="hint" id="q21Hint"></div>
   </div>
   <div id="speedBox" class="hidden">
     <div class="seg" style="margin-top:12px"><button id="fastBtn">⚡ Fast</button><button id="qualBtn">✨ Quality</button></div>
@@ -356,6 +365,13 @@ const fixMask = () => mode === 'mask' && !!fill && (engine === 'fix' || !qwen);
 const qwenMask = () => mode === 'mask' && !!qwen && !fixMask();
 // ✍️ Create = Qwen-Image 2512: a new picture from text, no photo involved
 let create = null;
+// Qwen-Image 2.1 (Sept 2026, 7B): one model for Create and editing (up to 10
+// photos), much less censored than 2512. Optional Noct Q uncensored fine-tune
+// and Heretic (abliterated) text encoder. Added by add-qwen21.sh.
+let q21 = null, createModel = recall('createModel') || 'q21', q21Pick = recall('q21Pick') || 'noct';
+const q21Active = () => !!q21 && (mode === 'create' ? (createModel === 'q21' || !create)
+  : (mode === 'instruct' || qwenMask()) && (editModel === 'q21' || !qwen));
+const q21Unet = () => (q21Pick === 'noct' && q21.noct) || q21.unet || q21.noct;
 const usesQwen = () => mode === 'instruct' || mode === 'create' || qwenMask();
 const MODE_TEXT = {
   cloud: ['Seedream 5.0 Pro on Atlas Cloud: describe the change like in ✨ Describe edit. 2K results, up to 10 photos, paid per image. Photos are sent to Atlas.',
@@ -398,12 +414,12 @@ function setMode(m) {
   $('neg').closest('details').classList.toggle('hidden', cloud || fx);
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !speedLora());
-  const encOwner = cr ? create : qwen;
+  const encOwner = q21Active() ? q21 : cr ? create : qwen;
   $('encBox').classList.toggle('hidden', !inst || !(encOwner && encOwner.clipAbl));
   applyEncoder();
-  $('editModelBox').classList.toggle('hidden', !(aioCkpt && qwen && (m === 'instruct' || (masked && !fx))));
-  applyEditModel();
-  $('loraBox').classList.toggle('hidden', !inst || aioActive() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
+  $('editModelBox').classList.toggle('hidden', !((aioCkpt || q21) && qwen && (m === 'instruct' || (masked && !fx))));
+  applyEditModel(); applyQ21();
+  $('loraBox').classList.toggle('hidden', !inst || aioActive() || q21Active() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
   $('fluxLoraBox').classList.toggle('hidden', !fx || !fill.loras.length);
   const [hint, label, ph] = MODE_TEXT[fx ? 'fmask' : m === 'mask' && q ? 'qmask' : m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label;
@@ -464,9 +480,9 @@ async function info(node) {
   try { const r = await fetch('/api/object_info/' + node); return r.ok ? await r.json() : {}; } catch (e) { return {}; }
 }
 (async () => {
-  const [unet, clip, vae, lora, plus, single, refm, dual] = await Promise.all(
+  const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache] = await Promise.all(
     ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit',
-     'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader'].map(info));
+     'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader', 'TextEncodeQwenImage21', 'QwenImage21Cache'].map(info));
   const f = {
     unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /fill/i.test(n) && /flux|onereward/i.test(n))
             .sort((a, b) => /onereward/i.test(a) - /onereward/i.test(b) || /fp8/i.test(b) - /fp8/i.test(a)).pop(),
@@ -514,6 +530,23 @@ async function info(node) {
     $('modeCreate').classList.remove('hidden');
   }
   if (q.unet && q.clip && q.vae && (q.plus || single.TextEncodeQwenImageEdit)) { qwen = q; renderLoras(); }
+  // Qwen-Image 2.1: bf16 over int8 (the H200 has the memory); its own encoder (Qwen3-VL 8B) and VAE
+  const bf16Last = (a, b) => /bf16/i.test(a) - /bf16/i.test(b) || a.localeCompare(b);
+  const units = optionsOf(unet, 'UNETLoader', 'unet_name'), clips = optionsOf(clip, 'CLIPLoader', 'clip_name');
+  const t = {
+    unet: units.filter(n => /qwen_image_2\.1/i.test(n) && !/noct|uncensor/i.test(n)).sort(bf16Last).pop() || null,
+    noct: units.filter(n => /noct/i.test(n)).sort().pop() || null,
+    clip: clips.filter(n => /qwen3vl_8b/i.test(n) && !/heretic|abliterat|uncensor/i.test(n)).sort(bf16Last).pop(),
+    clipAbl: clips.filter(n => /heretic|abliterat|uncensor/i.test(n) && /qwen3vl|qwen_image_2\.1|2\.1/i.test(n)).sort().pop() || null,
+    vae: optionsOf(vae, 'VAELoader', 'vae_name').filter(n => /qwen_image_2\.1_vae/i.test(n)).sort().pop(),
+    cache: !!q21cache.QwenImage21Cache,
+  };
+  if ((t.unet || t.noct) && t.clip && t.vae && q21enc.TextEncodeQwenImage21) {
+    q21 = t;
+    $('modeCreate').classList.remove('hidden');
+    $('emQ21').classList.remove('hidden');
+    $('createModelBox').classList.toggle('hidden', !create);
+  }
   if (fill) {
     fill.loras = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name')
       .filter(n => /flux/i.test((meta[n] || {}).baseModel || '') || (!meta[n] && /flux/i.test(n) && !/fill|lightning/i.test(n)))
@@ -525,10 +558,10 @@ async function info(node) {
   let saved = recall('mode') || mode;
   if (saved === 'cloud' && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'whole' && !allModels.length) saved = 'instruct';
-  if (saved === 'create' && !create) saved = qwen ? 'instruct' : 'mask';
+  if (saved === 'create' && !create && !q21) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'mask' && !qwen && !fill && !allModels.length) saved = 'instruct';
   setMode(saved);  // (re-)run now that the models are known
-  if (qwen) warmUp();
+  if (qwen && !q21Active()) warmUp();
 })();
 
 // One extra LoRA at a time, chosen from a dropdown; strength remembered per LoRA.
@@ -620,7 +653,7 @@ let quality = recall('quality') === '1';
 // on unsoftened. Same choice for Describe edit, Change and Create.
 let encoder = recall('encoder') || 'abl';
 const activeClip = m => encoder === 'abl' && m.clipAbl ? m.clipAbl : m.clip;
-const ablActive = () => { const m = mode === 'create' ? create : qwen; return !!(m && m.clipAbl && encoder === 'abl'); };
+const ablActive = () => { const m = q21Active() ? q21 : mode === 'create' ? create : qwen; return !!(m && m.clipAbl && encoder === 'abl'); };
 function applyEncoder() {
   $('encStd').classList.toggle('on', encoder !== 'abl'); $('encAbl').classList.toggle('on', encoder === 'abl');
   $('encHint').textContent = encoder === 'abl'
@@ -636,17 +669,37 @@ $('encAbl').onclick = () => { encoder = 'abl'; store('encoder', encoder); applyE
 let editModel = recall('editModel') || 'aio';
 const aioActive = () => !!(aioCkpt && qwen) && editModel === 'aio' && (mode === 'instruct' || qwenMask());
 function applyEditModel() {
-  $('emQwen').classList.toggle('on', editModel !== 'aio'); $('emAio').classList.toggle('on', editModel === 'aio');
+  if (editModel === 'q21' && !q21) editModel = aioCkpt ? 'aio' : 'qwen';
+  if (editModel === 'aio' && !aioCkpt) editModel = 'qwen';
+  $('emQwen').classList.toggle('on', editModel === 'qwen'); $('emAio').classList.toggle('on', editModel === 'aio');
+  $('emQ21').classList.toggle('on', editModel === 'q21'); $('emAio').classList.toggle('hidden', !aioCkpt);
   $('emHint').textContent = editModel === 'aio'
     ? 'Rapid AIO: NSFW and speed-up built in, so no LoRA menu. Fast = 4 steps, Quality = 8.'
+    : editModel === 'q21' ? 'Qwen 2.1: newest Qwen, far less censored. Up to 10 photos. 25 steps; the 2511 LoRAs don\'t apply.'
     : 'Qwen 2511 with your LoRA menu (Scottzilla NSFW etc.).';
 }
+function applyQ21() {
+  $('cmQ2512').classList.toggle('on', createModel !== 'q21'); $('cmQ21').classList.toggle('on', createModel === 'q21');
+  const on = q21Active();
+  $('q21Box').classList.toggle('hidden', !on || !(q21.noct && q21.unet));
+  if (!on) return;
+  $('q21Noct').classList.toggle('on', q21Unet() === q21.noct); $('q21Off').classList.toggle('on', q21Unet() !== q21.noct);
+  $('q21Hint').textContent = q21Unet() === q21.noct
+    ? 'Noct Q: community fine-tune that renders explicit scenes as asked far more often. Compare with Official if quality looks off.'
+    : 'Official Qwen 2.1: already loose on NSFW; the best general image quality.';
+}
+$('emQ21').onclick = () => { editModel = 'q21'; store('editModel', editModel); setMode(mode); };
+$('cmQ2512').onclick = () => { createModel = '2512'; store('createModel', createModel); setMode(mode); };
+$('cmQ21').onclick = () => { createModel = 'q21'; store('createModel', createModel); setMode(mode); };
+$('q21Noct').onclick = () => { q21Pick = 'noct'; store('q21Pick', q21Pick); applyQ21(); };
+$('q21Off').onclick = () => { q21Pick = 'official'; store('q21Pick', q21Pick); applyQ21(); };
 $('emQwen').onclick = () => { editModel = 'qwen'; store('editModel', editModel); setMode(mode); };
 $('emAio').onclick = () => { editModel = 'aio'; store('editModel', editModel); setMode(mode); };
-const speedLora = () => aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
+const speedLora = () => q21Active() ? false : aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
 function fastActive() { return !!speedLora() && !quality; }
 function applySpeed() {
   const cr = mode === 'create';
+  if (q21Active()) { setVal($('steps'), 25); setVal($('cfg'), 1); return; }  // Qwen's own 2.1 settings
   if (!(cr ? create : qwen)) return;
   $('fastBtn').classList.toggle('on', fastActive()); $('qualBtn').classList.toggle('on', !fastActive());
   if (aioActive()) {
@@ -669,7 +722,7 @@ $('qualBtn').onclick = () => { quality = true; store('quality', '1'); applySpeed
 // ---- Extra photos: Seedream takes up to 10 in total (picture 1 + 9 more);
 // Describe edit (Qwen-Image-Edit Plus) takes pictures 2 and 3
 const more = [];  // canvases, picture 2 onwards
-const maxMore = () => mode === 'cloud' ? 9 : 2;
+const maxMore = () => mode === 'cloud' || (mode === 'instruct' && q21Active()) ? 9 : 2;
 const hasSecond = () => more.length > 0;
 const usedMore = () => more.slice(0, maxMore());
 function renderMore() {
@@ -684,12 +737,12 @@ function renderMore() {
   });
   const left = maxMore() - more.length;
   $('addMore').classList.toggle('hidden', left <= 0);
-  $('addMoreText').textContent = mode === 'cloud'
+  $('addMoreText').textContent = maxMore() > 2
     ? (more.length ? `➕ Add more photos (up to ${left} more)` : '➕ Add more photos (up to 9, optional)')
     : more.length ? '➕ Add a 3rd photo (optional)' : '➕ Add a 2nd or 3rd photo (optional)';
   $('moreHint').textContent = more.length > maxMore()
-    ? 'Describe edit uses pictures 2 and 3 only. Switch to ☁️ Seedream to use all of them.'
-    : mode === 'cloud'
+    ? 'This edit model uses pictures 2 and 3 only. Qwen 2.1 or ☁️ Seedream use all of them.'
+    : maxMore() > 2
       ? 'Combine people or things from several photos. Call them picture 1 (the main photo above), picture 2, picture 3…'
       : 'Combine people or things from up to three photos. Call them picture 1 (the main photo above), picture 2 and picture 3. Each extra photo makes it a little slower.';
   if (mode === 'instruct' || mode === 'cloud')
@@ -838,6 +891,49 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = 
   return aioActive() ? toAio(p) : p;
 }
 
+// Qwen-Image 2.1, as in ComfyUI's own templates: one encoder node takes the
+// prompt and the reference photos (resolution 0 = each photo at its own size)
+// and hands back the latent, so the result has picture 1's size; 25 steps at
+// CFG 1, euler/simple. Create: no photos, an empty latent of the chosen size.
+function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, maskName = null) {
+  const edit = imgNames.length > 0;
+  const p = {
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: q21Unet(), weight_dtype: 'default' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: activeClip(q21), type: 'qwen_image' } },
+    '13': { class_type: 'VAELoader', inputs: { vae_name: q21.vae } },
+    '3': { class_type: 'TextEncodeQwenImage21', inputs: { clip: ['2', 0], prompt: text, negative_prompt: '', vae: ['13', 0], resolution: edit ? 0 : 1024 } },
+    '7': { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['3', 0], negative: ['3', 1], latent_image: edit ? ['3', 2] : ['6', 0],
+                                              seed, steps, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
+  };
+  if (!edit) p['6'] = { class_type: 'EmptyLatentImage', inputs: { width: w, height: h, batch_size: 1 } };
+  imgNames.forEach((n, i) => {
+    const id = i === 0 ? '5' : String(40 + i);
+    p[id] = { class_type: 'LoadImage', inputs: { image: n } };
+    p['3'].inputs['images.image_' + (i + 1)] = [id, 0];
+  });
+  if (q21.cache) {
+    p['19'] = { class_type: 'QwenImage21Cache', inputs: { model: ['1', 0], device: 'auto', dtype: 'default' } };
+    p['7'].inputs.model = ['19', 0];
+  }
+  if (maskName) {
+    // Selected area: the whole picture is re-generated, then only the (soft-edged)
+    // selection is pasted over the original, so nothing else changes
+    Object.assign(p, {
+      '30': { class_type: 'LoadImageMask', inputs: { image: maskName, channel: 'red' } },
+      '31': { class_type: 'GrowMask', inputs: { mask: ['30', 0], expand: 6, tapered_corners: true } },
+      '33': { class_type: 'MaskToImage', inputs: { mask: ['31', 0] } },
+      '34': { class_type: 'ImageBlur', inputs: { image: ['33', 0], blur_radius: 8, sigma: 4 } },
+      '35': { class_type: 'ImageToMask', inputs: { image: ['34', 0], channel: 'red' } },
+      '36': { class_type: 'ImageCompositeMasked', inputs: { destination: ['5', 0], source: ['8', 0], x: 0, y: 0,
+                                                            resize_source: true, mask: ['35', 0] } },
+    });
+    p['9'].inputs.images = ['36', 0];
+  }
+  return p;
+}
+
 // Same graph on the Rapid AIO checkpoint: its model/encoder/VAE replace the
 // separate loaders (the 🔓 abliterated encoder still swaps in when chosen); the
 // speed-up and NSFW LoRAs are baked in, so no LoRA nodes; Phr00t's sampler.
@@ -910,9 +1006,9 @@ let photoIn = false;  // canvases start at 300x150 before any photo
 function fitToRes(keepMask) {
   const max = +$('res').value;
   const scale = Math.min(1, max / Math.max(full.width, full.height));
-  // Multiples of 16 suit SD (8) and Qwen-Image (16) alike
-  const w = Math.max(16, Math.floor(full.width * scale / 16) * 16);
-  const h = Math.max(16, Math.floor(full.height * scale / 16) * 16);
+  // Multiples of 32 suit SD (8), Qwen-Image (16) and Qwen 2.1 (32) alike
+  const w = Math.max(32, Math.floor(full.width * scale / 32) * 32);
+  const h = Math.max(32, Math.floor(full.height * scale / 32) * 32);
   let old = null;
   if (keepMask && mask.width) { old = document.createElement('canvas'); old.width = mask.width; old.height = mask.height; old.getContext('2d').drawImage(mask, 0, 0); }
   base.width = mask.width = pts.width = w; base.height = mask.height = pts.height = h;
@@ -935,7 +1031,7 @@ if (!$('res').value) $('res').value = '1024';
 $('res').addEventListener('change', () => { store('res', $('res').value); if (photoIn) fitToRes(true); else resHint(); });
 function createDims() {
   const k = +$('createSize').value || 1, [w, h] = $('aspect').value.split('x').map(Number);
-  return [Math.round(w * k / 16) * 16, Math.round(h * k / 16) * 16];
+  return [Math.round(w * k / 32) * 32, Math.round(h * k / 32) * 32];
 }
 function createSizeHint() { const [w, h] = createDims(); $('createSizeHint').textContent = `${w}×${h} (${(w * h / 1e6).toFixed(1)} MP)`; }
 $('createSize').value = recall('createSize') || '1';
@@ -1136,7 +1232,13 @@ $('go').onclick = async () => {
     const seed = Math.floor(Math.random() * 2 ** 32);
     let p = JSON.parse(JSON.stringify(workflow));
     let model = $('model').value;
-    if (mode === 'create') {
+    if (q21Active()) {
+      const names = [];
+      if (mode === 'instruct') for (const [i, c] of usedMore().entries()) names.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
+      const maskName = qwenMask() ? await upload(await exportMask(), `rv6m_${ts}_mask.png`) : null;
+      const [w, h] = createDims();
+      p = buildQ21Workflow($('prompt').value.trim(), seed, +$('steps').value, mode === 'create' ? [] : [imgName, ...names], w, h, maskName);
+    } else if (mode === 'create') {
       const [w, h] = createDims();
       const extras = activeLoras();
       const words = extras.flatMap(l => l.words).filter(w => !$('prompt').value.toLowerCase().includes(w.toLowerCase()));
@@ -1345,7 +1447,10 @@ async function waitForJobs(ids, t0) {
       }
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
-        const what = mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${createDims().join('×')}` +
+        const what = q21Active() ? `Qwen 2.1${q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · ` +
+            (mode === 'create' ? createDims().join('×') : `${base.width}×${base.height}`) + (ablActive() ? ' · 🔓 encoder' : '') +
+            (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')
+          : mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${createDims().join('×')}` +
             (activeLoras().length ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') : fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
           ? (aioActive() ? 'Rapid AIO · ' : '') + `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
             (activeLoras().length && !aioActive() ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') + (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')

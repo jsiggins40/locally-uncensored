@@ -726,7 +726,7 @@ function applyQ21() {
   if (!on) return;
   $('q21Noct').classList.toggle('on', q21Unet() === q21.noct); $('q21Off').classList.toggle('on', q21Unet() !== q21.noct);
   $('q21Hint').textContent = q21Unet() === q21.noct
-    ? 'Noct Q: community fine-tune that renders explicit scenes as asked far more often. Compare with Official if quality looks off.'
+    ? 'Noct Q: community fine-tune that renders explicit scenes as asked far more often (CFG 3, as its author recommends). Compare with Official if quality looks off.'
     : 'Official Qwen 2.1: already loose on NSFW; the best general image quality.';
 }
 $('emQ21').onclick = () => { editModel = 'q21'; store('editModel', editModel); setMode(mode); };
@@ -1007,15 +1007,19 @@ function buildVideoWorkflow(imgName, text, seed) {
 // prompt and the reference photos (resolution 0 = each photo at its own size)
 // and hands back the latent, so the result has picture 1's size; 25 steps at
 // CFG 1, euler/simple. Create: no photos, an empty latent of the chosen size.
+// Noct Q is not guidance-distilled like the official 2.1: its author's settings
+// are CFG 3 with a negative prompt (at CFG 1 it barely follows the instruction)
+const Q21_NEG = 'blurry, low quality, distorted, deformed, bad anatomy, extra limbs, extra fingers, watermark, text';
+const q21Cfg = () => q21Unet() === q21.noct ? 3 : 1;
 function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, maskName = null) {
-  const edit = imgNames.length > 0;
+  const edit = imgNames.length > 0, cfg = q21Cfg();
   const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: q21Unet(), weight_dtype: 'default' } },
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: activeClip(q21), type: 'qwen_image' } },
     '13': { class_type: 'VAELoader', inputs: { vae_name: q21.vae } },
-    '3': { class_type: 'TextEncodeQwenImage21', inputs: { clip: ['2', 0], prompt: text, negative_prompt: '', vae: ['13', 0], resolution: edit ? 0 : 1024 } },
+    '3': { class_type: 'TextEncodeQwenImage21', inputs: { clip: ['2', 0], prompt: text, negative_prompt: cfg > 1 ? Q21_NEG : '', vae: ['13', 0], resolution: edit ? 0 : 1024 } },
     '7': { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['3', 0], negative: ['3', 1], latent_image: edit ? ['3', 2] : ['6', 0],
-                                              seed, steps, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+                                              seed, steps, cfg, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
     '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
   };
@@ -1574,7 +1578,7 @@ async function waitForJobs(ids, t0) {
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
         const what = mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
-          : q21Active() ? `Qwen 2.1${q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · ` +
+          : q21Active() ? `Qwen 2.1${q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
             (mode === 'create' ? createDims().join('×') : `${base.width}×${base.height}`) + (ablActive() ? ' · 🔓 encoder' : '') +
             (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')
           : mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${createDims().join('×')}` +

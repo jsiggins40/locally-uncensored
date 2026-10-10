@@ -251,7 +251,7 @@
   <div class="seg"><button id="vid480">480p (faster)</button><button id="vid720">720p</button></div>
   <div id="vidSpeedBox">
   <label>Speed</label>
-  <div class="seg"><button id="vidFast">⚡ Fast (4 steps)</button><button id="vidQual">✨ Quality (8 steps)</button></div>
+  <div class="seg"><button id="vidFast">⚡ Fast (4 steps)</button><button id="vidQual">✨ Quality (follows the prompt)</button></div>
   </div>
   <div id="vidSoundBox" class="hidden">
   <label>Sound</label>
@@ -956,7 +956,7 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = 
 // (so motion carries on); clips after the first drop their first frame when
 // joined, as in SVI's own inference script. High-noise model for the first
 // half of the steps, low-noise for the rest; LightX2V makes 4-8 steps enough.
-let vidRes = recall('vidRes') || '480', vidQuality = recall('vidQuality') === '1';
+let vidRes = recall('vidRes') || '480', vidQuality = recall('vidQuality') !== '0';  // Quality by default
 $('vidLen').value = recall('vidLen') || '10';
 if (!$('vidLen').value) $('vidLen').value = '10';
 function vidDims() {
@@ -984,7 +984,8 @@ function applyVideo() {
   const per = (vidRes === '720' ? 2.2 : 1) * (vidQuality ? 2 : 1);
   $('vidHint').textContent = (photoIn ? `${w}×${h}, ` : '') + `${n} clip${n > 1 ? 's' : ''} of 5 s. ` +
     `Roughly ${Math.max(1, Math.round(n * per))}–${Math.round(n * per * 2) + 1} min on the H200. ` +
-    'Tip: describe one continuous action; 480p and Fast keep motion lively.';
+    (vidQuality ? 'Quality: the prompt drives the motion (about 2x slower). ' : 'Fast: quick, but motion is timid and the prompt is followed loosely; use Quality for actions. ') +
+    'Tip: describe one continuous action, who does what and how the camera moves.';
 }
 $('vidLen').addEventListener('change', () => { store('vidLen', $('vidLen').value); applyVideo(); });
 $('vid480').onclick = () => { vidRes = '480'; store('vidRes', vidRes); applyVideo(); };
@@ -995,9 +996,14 @@ $('vidCloud').onclick = () => { vidEngine = 'cloud'; store('vidEngine', vidEngin
 $('vidSoundOn').onclick = () => { vidSound = true; store('vidSound', '1'); applyVideo(); };
 $('vidSoundOff').onclick = () => { vidSound = false; store('vidSound', '0'); applyVideo(); };
 $('vidQual').onclick = () => { vidQuality = true; store('vidQuality', '1'); applyVideo(); };
-const VID_NEG = 'blurry, low quality, worst quality, static, still image, deformed, distorted, extra limbs, extra fingers, watermark, text, subtitles';
+// Wan's own negative prompt (it was trained with the Chinese one); only matters when CFG > 1
+const VID_NEG = '色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, blurry, static, deformed';
+// Fast: LightX2V for all 4 steps at CFG 1 (quick, but timid motion and loose prompt
+// following). Quality: 3 stages over 8 steps: the first 2 on the plain high-noise
+// model at CFG 3.5, so the prompt decides the motion, then LightX2V high (2-4)
+// and low (4-8) at CFG 1 for the detail. About 2x the time of Fast.
 function buildVideoWorkflow(imgName, text, seed) {
-  const [w, h] = vidDims(), n = vidClips(), steps = vidQuality ? 8 : 4, split = steps / 2;
+  const [w, h] = vidDims(), n = vidClips(), steps = vidQuality ? 8 : 4, split = steps / 2, q = vidQuality;
   const p = {
     'm1': { class_type: 'UNETLoader', inputs: { unet_name: video.high, weight_dtype: 'default' } },
     'm2': { class_type: 'UNETLoader', inputs: { unet_name: video.low, weight_dtype: 'default' } },
@@ -1009,6 +1015,8 @@ function buildVideoWorkflow(imgName, text, seed) {
     'l1': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['m2', 0], lora_name: video.lightL, strength_model: 1 } },
     'l2': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['l1', 0], lora_name: video.sviL, strength_model: 1 } },
     'ls': { class_type: 'ModelSamplingSD3', inputs: { model: ['l2', 0], shift: 5 } },
+    ...(q ? { 'g1': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['m1', 0], lora_name: video.sviH, strength_model: 1 } },
+              'gs': { class_type: 'ModelSamplingSD3', inputs: { model: ['g1', 0], shift: 5 } } } : {}),
     'pos': { class_type: 'CLIPTextEncode', inputs: { clip: ['te', 0], text } },
     'neg': { class_type: 'CLIPTextEncode', inputs: { clip: ['te', 0], text: VID_NEG } },
     'img': { class_type: 'LoadImage', inputs: { image: imgName } },
@@ -1020,9 +1028,13 @@ function buildVideoWorkflow(imgName, text, seed) {
     const c = 'c' + i;
     p[c + 'i'] = { class_type: 'WanImageToVideoSVIPro', inputs: { positive: ['pos', 0], negative: ['neg', 0], length: 81,
                    anchor_samples: ['anc', 0], motion_latent_count: 1, ...(i ? { prev_samples: ['c' + (i - 1) + 'l', 0] } : {}) } };
-    p[c + 'h'] = { class_type: 'KSamplerAdvanced', inputs: { model: ['hs', 0], add_noise: 'enable', noise_seed: (seed + i * 7919) % 2 ** 32,
-                   steps, cfg: 1, sampler_name: 'euler', scheduler: 'simple', positive: [c + 'i', 0], negative: [c + 'i', 1],
-                   latent_image: [c + 'i', 2], start_at_step: 0, end_at_step: split, return_with_leftover_noise: 'enable' } };
+    const noise_seed = (seed + i * 7919) % 2 ** 32, cond = { positive: [c + 'i', 0], negative: [c + 'i', 1] };
+    if (q) p[c + 'g'] = { class_type: 'KSamplerAdvanced', inputs: { model: ['gs', 0], add_noise: 'enable', noise_seed,
+                   steps, cfg: 3.5, sampler_name: 'euler', scheduler: 'simple', ...cond,
+                   latent_image: [c + 'i', 2], start_at_step: 0, end_at_step: 2, return_with_leftover_noise: 'enable' } };
+    p[c + 'h'] = { class_type: 'KSamplerAdvanced', inputs: { model: ['hs', 0], add_noise: q ? 'disable' : 'enable', noise_seed,
+                   steps, cfg: 1, sampler_name: 'euler', scheduler: 'simple', ...cond,
+                   latent_image: q ? [c + 'g', 0] : [c + 'i', 2], start_at_step: q ? 2 : 0, end_at_step: split, return_with_leftover_noise: 'enable' } };
     p[c + 'l'] = { class_type: 'KSamplerAdvanced', inputs: { model: ['ls', 0], add_noise: 'disable', noise_seed: 0,
                    steps, cfg: 1, sampler_name: 'euler', scheduler: 'simple', positive: [c + 'i', 0], negative: [c + 'i', 1],
                    latent_image: [c + 'h', 0], start_at_step: split, end_at_step: 10000, return_with_leftover_noise: 'disable' } };

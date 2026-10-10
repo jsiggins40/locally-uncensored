@@ -70,6 +70,19 @@ fetch(S, pick(fs, "svi_wan2.2-i2v-a14b_low_noise", "pro", prefer=()), "loras")
 shutil.rmtree("models/_hf_tmp", ignore_errors=True)
 PY
 
+echo "== Making the SVI LoRAs loadable (their keys lack ComfyUI's diffusion_model. prefix)"
+venv/bin/python - <<'PY'
+import glob, os
+from safetensors.torch import load_file, save_file
+for f in glob.glob("models/loras/SVI_*.safetensors"):
+    sd = load_file(f)
+    if not any(k.startswith("blocks.") for k in sd):
+        print("   already converted:", os.path.basename(f)); continue
+    out = {(k if k.startswith("diffusion_model.") else "diffusion_model." + k).replace(".default.", "."): v for k, v in sd.items()}
+    save_file(out, f + ".tmp"); os.replace(f + ".tmp", f)
+    print(f"   converted {os.path.basename(f)} ({len(out)} tensors)")
+PY
+
 echo "== Restarting ComfyUI so it loads KJNodes, and updating the page"
 restart
 

@@ -56,6 +56,6 @@ echo
 echo "=============================================================="
 echo " DONE. On your phone (Tailscale app connected) open:"
 echo "   https://${HOST:-<your-vm>.ts.net}/extensions/rv6_mobile/edit.html"
-echo " Reload the page, then tap ☁️ Seedream."
+echo " Reload the page: ☁️ Seedream edits photos; 🎬 Video gets a ☁️ Seedance 2.5 engine."
 echo " Top up Atlas credit first: atlascloud.ai -> Billing (min \$25)."
 echo "=============================================================="

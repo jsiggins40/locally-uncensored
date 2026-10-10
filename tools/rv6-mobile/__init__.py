@@ -176,9 +176,22 @@ def _cloud(names, prompt, size, model):
         body["size"] = size
     sent = {k: v for k, v in body.items() if k != "images"}
     sent["images"] = [f"{n} ({len(i) * 3 // 4 // 1024} KB)" for n, i in zip(names, images)]
+    data = _atlas_job("/generateImage", key, body, sent, 300)
+    ext = ".jpg" if data[:3] == b"\xff\xd8\xff" else ".webp" if data[8:12] == b"WEBP" else ".png"
+    name = f"rv6_cloud_{int(time.time() * 1000)}{ext}"
+    with open(os.path.join(folder_paths.get_output_directory(), name), "wb") as f:
+        f.write(data)
+    return {"filename": name, "sent": sent}
+
+
+def _atlas_job(endpoint, key, body, sent, limit):
+    """Submit to Atlas, poll until done (up to limit seconds) and return the result file's bytes."""
+    import base64
+    import time
+    import urllib.request
     log = {"sent": sent}
     try:
-        sub = _atlas("POST", ATLAS + "/generateImage", key, body)
+        sub = _atlas("POST", ATLAS + endpoint, key, body)
         log["submit_reply"] = sub
     except Exception as e:
         log["error"] = str(e)
@@ -198,36 +211,57 @@ def _cloud(names, prompt, size, model):
         if status in ("failed", "error", "canceled", "cancelled"):
             _save_log(log)
             raise RuntimeError("Atlas job failed: " + str(_find(res, ["error", "message"]) or res)[:600])
-        if time.time() - t > 300:
-            raise RuntimeError("Atlas took over 5 minutes; last reply: " + str(res)[:300])
+        if time.time() - t > limit:
+            raise RuntimeError(f"Atlas took over {limit // 60} minutes; last reply: " + str(res)[:300])
         time.sleep(1.5)
     _save_log(log)
-    out = _find(res, ["outputs", "output", "images", "url"])
+    out = _find(res, ["outputs", "output", "images", "videos", "video", "url"])
     url = out[0] if isinstance(out, list) else out
     if isinstance(url, dict):
         url = _find(url, ["url"])
     if not isinstance(url, str):
-        raise RuntimeError("Atlas reply had no image: " + str(res)[:600])
+        raise RuntimeError("Atlas reply had no result file: " + str(res)[:600])
     if url.startswith("http"):
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=120) as r:
-            data = r.read()
-    else:
-        data = base64.b64decode(url.split(",", 1)[-1])
-    ext = ".jpg" if data[:3] == b"\xff\xd8\xff" else ".webp" if data[8:12] == b"WEBP" else ".png"
-    name = f"rv6_cloud_{int(time.time() * 1000)}{ext}"
-    with open(os.path.join(folder_paths.get_output_directory(), name), "wb") as f:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=300) as r:
+            return r.read()
+    return base64.b64decode(url.split(",", 1)[-1])
+
+
+# ☁️ Seedance image-to-video on Atlas (the page's 🎬 Video, "Seedance" engine):
+# picture 1 is the first frame; 4-30 s, optional sound. Model id can be changed
+# with RV6M_CLOUD_VIDEO_MODEL.
+CLOUD_VIDEO_MODEL = os.environ.get("RV6M_CLOUD_VIDEO_MODEL", "bytedance/seedance-2.5/image-to-video")
+
+
+def _cloud_video(name, prompt, model, duration, resolution, audio):
+    import base64
+    import time
+    key = _cloud_key()
+    if not key:
+        raise RuntimeError("No Atlas API key on the VM (~/.atlascloud_key)")
+    path = folder_paths.get_annotated_filepath(name)
+    mime = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+    image = f"data:{mime};base64," + base64.b64encode(open(path, "rb").read()).decode()
+    body = {"model": model, "prompt": prompt, "image": image, "duration": int(duration), "resolution": resolution,
+            "ratio": "adaptive", "generate_audio": bool(audio), "watermark": False}
+    sent = {k: v for k, v in body.items() if k != "image"}
+    sent["images"] = [f"{name} ({len(image) * 3 // 4 // 1024} KB)"]
+    data = _atlas_job("/generateVideo", key, body, sent, 1200)
+    ext = ".mov" if data[4:12] == b"ftypqt  " else ".mp4"
+    out = f"rv6_cloud_{int(time.time() * 1000)}{ext}"
+    with open(os.path.join(folder_paths.get_output_directory(), out), "wb") as f:
         f.write(data)
-    return {"filename": name, "sent": sent}
+    return {"filename": out, "sent": sent}
 
 
 _jobs = {}  # job id -> {"status": "running"|"done"|"error", "filename", "error", "seconds"}
 
 
-async def _run_cloud(jid, names, prompt, size, model):
+async def _run_cloud(jid, fn, *args):
     loop = asyncio.get_running_loop()
     t = loop.time()
     try:
-        out = await loop.run_in_executor(None, _cloud, names, prompt, size, model)
+        out = await loop.run_in_executor(None, fn, *args)
         _jobs[jid].update(status="done", **out)
     except Exception as e:
         logging.exception("[rv6_mobile] cloud edit failed")
@@ -238,7 +272,7 @@ async def _run_cloud(jid, names, prompt, size, model):
 
 @PromptServer.instance.routes.get("/rv6m/cloud/status")
 async def rv6m_cloud_status(request):
-    return web.json_response({"configured": bool(_cloud_key()), "model": CLOUD_MODEL})
+    return web.json_response({"configured": bool(_cloud_key()), "model": CLOUD_MODEL, "video_model": CLOUD_VIDEO_MODEL})
 
 
 # Starts the edit in the background and returns a job id right away, so the
@@ -254,8 +288,24 @@ async def rv6m_cloud(request):
         return web.json_response({"error": "No Atlas API key on the VM (~/.atlascloud_key)"}, status=400)
     jid = uuid.uuid4().hex
     _jobs[jid] = {"status": "running"}
-    asyncio.ensure_future(_run_cloud(jid, names, body["prompt"], str(body.get("size") or "2048*2048"),
+    asyncio.ensure_future(_run_cloud(jid, _cloud, names, body["prompt"], str(body.get("size") or "2048*2048"),
                                      body.get("model") or CLOUD_MODEL))
+    return web.json_response({"job": jid})
+
+
+@PromptServer.instance.routes.post("/rv6m/cloud/video")
+async def rv6m_cloud_video(request):
+    import uuid
+    body = await request.json()
+    if not body.get("image") or not str(body.get("prompt", "")).strip():
+        return web.json_response({"error": "need a photo and a prompt"}, status=400)
+    if not _cloud_key():
+        return web.json_response({"error": "No Atlas API key on the VM (~/.atlascloud_key)"}, status=400)
+    jid = uuid.uuid4().hex
+    _jobs[jid] = {"status": "running"}
+    asyncio.ensure_future(_run_cloud(jid, _cloud_video, body["image"], body["prompt"], body.get("model") or CLOUD_VIDEO_MODEL,
+                                     min(30, max(4, int(body.get("duration") or 5))), str(body.get("resolution") or "720p"),
+                                     body.get("audio", True)))
     return web.json_response({"job": jid})
 
 

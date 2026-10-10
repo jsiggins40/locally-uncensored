@@ -238,15 +238,25 @@
   </details>
 </div>
 <div id="videoBox" class="panel hidden" style="padding:10px 12px">
-  <label for="vidLen" style="margin-top:0">Length</label>
+  <div id="vidEngineBox" class="hidden">
+    <label style="margin-top:0">Engine</label>
+    <div class="seg"><button id="vidLocal">🖥️ Local (Wan 2.2)</button><button id="vidCloud">☁️ Seedance 2.5</button></div>
+  </div>
+  <label for="vidLen">Length</label>
   <select id="vidLen">
     <option value="5">5 seconds</option><option value="10" selected>10 seconds</option><option value="15">15 seconds</option>
     <option value="20">20 seconds</option><option value="30">30 seconds</option><option value="45">45 seconds</option><option value="60">60 seconds</option>
   </select>
   <label>Resolution</label>
   <div class="seg"><button id="vid480">480p (faster)</button><button id="vid720">720p</button></div>
+  <div id="vidSpeedBox">
   <label>Speed</label>
   <div class="seg"><button id="vidFast">⚡ Fast (4 steps)</button><button id="vidQual">✨ Quality (8 steps)</button></div>
+  </div>
+  <div id="vidSoundBox" class="hidden">
+  <label>Sound</label>
+  <div class="seg"><button id="vidSoundOn">🔊 With sound</button><button id="vidSoundOff">Silent</button></div>
+  </div>
   <div class="hint" id="vidHint"></div>
 </div>
 <div class="panel" id="countBox" style="padding:10px 12px">
@@ -489,6 +499,7 @@ const cloudReady = fetch('/rv6m/cloud/status').then(r => r.ok ? r.json() : null)
   if (!c) return;
   cloudCfg = c;
   $('modeCloud').classList.toggle('hidden', !c.configured);
+  if (c.configured) $('modeVideo').classList.remove('hidden');
   $('cloudModel').placeholder = c.model;
   $('cloudHint').textContent = 'Runs on Atlas Cloud (' + c.model.replace(/^bytedance\//, '') + '), not on your GPU. Each variation is a separate paid image.';
 }).catch(() => {});
@@ -601,7 +612,7 @@ async function info(node) {
   if (saved === 'cloud' && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'whole' && !allModels.length) saved = 'instruct';
   if (saved === 'create' && !create && !q21) saved = qwen ? 'instruct' : 'mask';
-  if (saved === 'video' && !video) saved = qwen ? 'instruct' : 'mask';
+  if (saved === 'video' && !video && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'mask' && !qwen && !fill && !allModels.length) saved = 'instruct';
   setMode(saved);  // (re-)run now that the models are known
   // Put the last prompt back (setMode clears it; iOS reloads the tab while an image is made)
@@ -953,9 +964,21 @@ function vidDims() {
   return [Math.round(Math.sqrt(area * r) / 16) * 16, Math.round(Math.sqrt(area / r) / 16) * 16];
 }
 const vidClips = () => Math.max(1, Math.ceil(+$('vidLen').value / 5));
+// ☁️ Seedance 2.5 on Atlas: same photo and prompt, 4-30 s, with sound; runs in the cloud
+let vidEngine = recall('vidEngine') || 'local', vidSound = recall('vidSound') !== '0';
+const cloudVid = () => cloudCfg.configured && (vidEngine === 'cloud' || !video);
 function applyVideo() {
+  const cv = cloudVid();
+  $('vidEngineBox').classList.toggle('hidden', !(cloudCfg.configured && video));
+  $('vidLocal').classList.toggle('on', !cv); $('vidCloud').classList.toggle('on', cv);
+  $('vidSpeedBox').classList.toggle('hidden', cv); $('vidSoundBox').classList.toggle('hidden', !cv);
+  $('vidSoundOn').classList.toggle('on', vidSound); $('vidSoundOff').classList.toggle('on', !vidSound);
+  for (const o of $('vidLen').options) o.disabled = cv && +o.value > 30;
+  if (cv && +$('vidLen').value > 30) $('vidLen').value = '30';
   $('vid480').classList.toggle('on', vidRes !== '720'); $('vid720').classList.toggle('on', vidRes === '720');
   $('vidFast').classList.toggle('on', !vidQuality); $('vidQual').classList.toggle('on', vidQuality);
+  if (cv) return void ($('vidHint').textContent = `${$('vidLen').value} s at ${vidRes}p${vidSound ? ' with sound' : ''}, made by ByteDance's Seedance 2.5 on Atlas Cloud ` +
+    '(paid per video, usually a few minutes; ByteDance\'s content rules apply). Strong motion and physics; keeps the person from the photo.');
   const n = vidClips(), [w, h] = photoIn ? vidDims() : [0, 0];
   // Rough H200 timings per 5 s clip (first run adds ~3 min to load the models)
   const per = (vidRes === '720' ? 2.2 : 1) * (vidQuality ? 2 : 1);
@@ -967,6 +990,10 @@ $('vidLen').addEventListener('change', () => { store('vidLen', $('vidLen').value
 $('vid480').onclick = () => { vidRes = '480'; store('vidRes', vidRes); applyVideo(); };
 $('vid720').onclick = () => { vidRes = '720'; store('vidRes', vidRes); applyVideo(); };
 $('vidFast').onclick = () => { vidQuality = false; store('vidQuality', '0'); applyVideo(); };
+$('vidLocal').onclick = () => { vidEngine = 'local'; store('vidEngine', vidEngine); applyVideo(); };
+$('vidCloud').onclick = () => { vidEngine = 'cloud'; store('vidEngine', vidEngine); applyVideo(); };
+$('vidSoundOn').onclick = () => { vidSound = true; store('vidSound', '1'); applyVideo(); };
+$('vidSoundOff').onclick = () => { vidSound = false; store('vidSound', '0'); applyVideo(); };
 $('vidQual').onclick = () => { vidQuality = true; store('vidQuality', '1'); applyVideo(); };
 const VID_NEG = 'blurry, low quality, worst quality, static, still image, deformed, distorted, extra limbs, extra fingers, watermark, text, subtitles';
 function buildVideoWorkflow(imgName, text, seed) {
@@ -1345,6 +1372,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 $('go').onclick = async () => {
   if (mode === 'cloud') return cloudGo();
+  if (mode === 'video' && cloudVid()) return cloudVideoGo();
   if (!workflow) return setStatus('Workflow not loaded yet, reload the page.', true);
   if (mode !== 'create' && $('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
   if (mode === 'mask' && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
@@ -1482,6 +1510,32 @@ async function cloudGo() {
     $('go').disabled = false; $('stop').classList.add('hidden');
   }
 }
+async function cloudVideoGo() {
+  if (!photoIn) return setStatus('Choose a photo first: the video starts from it.', true);
+  if (!$('prompt').value.trim()) return setStatus('Describe what should happen first.', true);
+  $('go').disabled = true; stopRequested = false; currentJobs = [];
+  $('stop').classList.remove('hidden');
+  store('workPrompt', $('prompt').value);
+  try {
+    setStatus('Connecting… Stay on this page for now.');
+    if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
+    setStatus('Sending to the VM… Stay on this page for now.');
+    const image = await upload(await toJpeg(full), `rv6m_${Date.now()}_img.jpg`);
+    const r = await fetch('/rv6m/cloud/video', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image, prompt: $('prompt').value.trim(), duration: +$('vidLen').value,
+                             resolution: vidRes === '720' ? '720p' : '480p', audio: vidSound }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'The VM refused the cloud video (' + r.status + ')');
+    const t0 = Date.now();
+    store('pendingCloud', JSON.stringify({ jobs: [j.job], t0, size: 'video', nPhotos: 1 }));
+    await waitForCloud([j.job], t0, 'video', 1);
+  } catch (err) {
+    setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
+      ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.' : err.message, true);
+  } finally {
+    $('go').disabled = false; $('stop').classList.add('hidden');
+  }
+}
 // Cloud jobs run on the VM even while Safari is in the background; this
 // only asks the VM how they are doing, so switching apps loses nothing.
 async function waitForCloud(jobs, t0, size, nPhotos = 1) {
@@ -1492,9 +1546,9 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1) {
       // Atlas jobs can't be cancelled (and are charged anyway); Stop just stops waiting
       if (stopRequested) { setStatus('Stopped waiting. A finished image still shows up under Recent edits.'); return; }
       const secs = Math.round((Date.now() - t0) / 1000);
-      if (secs > 400) throw new Error('Timed out waiting for Atlas Cloud.');
+      if (secs > (size === 'video' ? 1500 : 400)) throw new Error('Timed out waiting for Atlas Cloud.');
       const count = jobs.length > 1 ? ` (${Object.keys(done).length}/${jobs.length} done)` : '';
-      setStatus('Seedream is working… ' + secs + 's' + count + '\n✓ It\'s on the VM now: safe to leave, it keeps going and shows here (or under Recent edits) when you come back.');
+      setStatus((size === 'video' ? 'Seedance is making your video… ' : 'Seedream is working… ') + secs + 's' + count + '\n✓ It\'s on the VM now: safe to leave, it keeps going and shows here (or under Recent edits) when you come back.');
       for (const id of jobs.filter(i => !(i in done))) {
         let j;
         try { j = await (await fetch('/rv6m/cloud/job/' + id, { cache: 'no-store' })).json(); }
@@ -1523,7 +1577,7 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1) {
 function sentSummary(sent, size) {
   if (!sent) return 'Seedream · ' + size.replace('*', '×');
   const kb = (sent.images || []).map(x => +(x.match(/\((\d+) KB\)/) || [0, 0])[1]);
-  return `${String(sent.model).replace(/^bytedance\//, '')} · ${sent.resolution || String(sent.size || '').replace('*', '×')}` +
+  return `${String(sent.model).replace(/^bytedance\//, '')} · ${sent.duration ? sent.duration + ' s · ' + (sent.generate_audio ? 'sound · ' : '') : ''}${sent.resolution || String(sent.size || '').replace('*', '×')}` +
          ` · sent ${kb.length} photo${kb.length > 1 ? 's' : ''} (${kb.map(k => k >= 1024 ? (k / 1024).toFixed(1) + ' MB' : k + ' KB').join(', ')})`;
 }
 // Cloud results aren't in ComfyUI's history, so Recent remembers them here
@@ -1614,9 +1668,9 @@ async function waitForJobs(ids, t0) {
 // (called at the end of the script, once every variable it uses exists)
 async function resumePending() {
   let pc = null; try { pc = JSON.parse(recall('pendingCloud') || 'null'); } catch (e) {}
-  if (pc && pc.jobs && pc.jobs.length && Date.now() - pc.t0 < 400 * 1000) {
+  if (pc && pc.jobs && pc.jobs.length && Date.now() - pc.t0 < (pc.size === 'video' ? 1500 : 400) * 1000) {
     $('go').disabled = true; $('stop').classList.remove('hidden'); stopRequested = false;
-    setStatus('Picking up your Seedream edit…');
+    setStatus(pc.size === 'video' ? 'Picking up your Seedance video…' : 'Picking up your Seedream edit…');
     try { await waitForCloud(pc.jobs, pc.t0, pc.size || '', pc.nPhotos || 1); }
     catch (err) { setStatus(err.message, true); }
     finally { $('go').disabled = false; $('stop').classList.add('hidden'); }

@@ -155,6 +155,20 @@ def _save_log(log):
         pass
 
 
+PRO_SIZES = ["2048*2048", "2368*1776", "1776*2368", "2816*1584", "1584*2816", "2496*1664", "1664*2496", "3136*1344"]
+
+
+def _pro_size(size):
+    """The Seedream 5.0 Pro 2K preset whose shape is closest to size ('W*H')."""
+    import math
+    try:
+        w, h = (int(x) for x in str(size).lower().replace("x", "*").split("*"))
+        r = math.log(w / h)
+    except Exception:
+        return "2048*2048"
+    return min(PRO_SIZES, key=lambda p: abs(math.log(int(p.split("*")[0]) / int(p.split("*")[1])) - r))
+
+
 def _cloud(names, prompt, size, model):
     import base64
     import time
@@ -170,8 +184,11 @@ def _cloud(names, prompt, size, model):
         images.append(f"data:{mime};base64," + base64.b64encode(open(path, "rb").read()).decode())
     body = {"model": model, "prompt": prompt, "images": images, "enable_base64_output": False}
     if "pro" in model.lower():
-        # No aspect_ratio: like Atlas's playground, let the model keep picture 1's shape
-        body["resolution"] = "2k"
+        # Seedream 5.0 Pro (Atlas's API reference): size must be one of its presets
+        # (there is no "resolution" field; anything else falls back to a square
+        # 2048*2048). Pick the 2K preset closest to picture 1's shape, and ask for
+        # the same prompt optimisation the playground uses.
+        body.update(size=_pro_size(size), output_format="jpeg", thinking="enabled", prompt_optimization_mode="standard")
     else:
         body["size"] = size
     sent = {k: v for k, v in body.items() if k != "images"}

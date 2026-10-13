@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Adds ⬆️ Upscale to the edit page: SeedVR2 7B (ByteDance's one-step restorer,
 # built into ComfyUI) makes any result 2× or 4K-8K with real added detail.
-# About 9 GB. Tests a 2× and a 4K upscale on the GPU at the end.
+# Gets the full-precision (fp16) 7B and 7B "sharp" models: the H200 has the
+# memory, so none of the int8/fp8/nvfp4 low-memory versions. About 34 GB.
+# Tests both on the GPU at the end.
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-upscaler.sh)
 set -euo pipefail
 cd "$HOME/ComfyUI"
@@ -22,26 +24,29 @@ fi
 grep -q "SeedVR2Conditioning" comfy_extras/nodes_seedvr.py || { echo "ComfyUI still has no SeedVR2 nodes; stopping."; exit 1; }
 
 venv/bin/python - <<'PY'
-import os, shutil, sys
+import os, re, shutil, sys
 from huggingface_hub import HfApi, hf_hub_download
 free = shutil.disk_usage(os.path.realpath("models")).free / 1e9
 print(f"== Free disk: {free:.0f} GB")
-if free < 25:
-    sys.exit("Need about 25 GB free. Delete something first.")
+if free < 45:
+    sys.exit("Need about 45 GB free. Delete something first.")
 R = "Comfy-Org/SeedVR2"
 try:
     fl = [f for f in HfApi().list_repo_files(R) if f.endswith(".safetensors")]
 except Exception as e:
     sys.exit(f"Can't list {R}: {type(e).__name__}: {str(e)[:200]}")
 for f in fl: print("    ", f)
-# The 7B model (better than the 3B); full precision when the repo has it, else int8
-dm = sorted([f for f in fl if f.startswith("diffusion_models/") and "7b" in f.lower()],
-            key=lambda f: ("int8" in f.lower() or "fp8" in f.lower(), "sharp" in f.lower(), f))
-va = [f for f in fl if f.startswith("vae/") and "seedvr2" in f.lower()]
-if not (dm and va):
+# The 7B (better than the 3B), normal and sharp. Precision, best first: fp16,
+# then the 8-bit files; nvfp4 last (made for Blackwell GPUs, not the H200)
+rank = lambda f: (0 if re.search("fp16|bf16", f, re.I) else 1 if re.search("int8|fp8", f, re.I) else 3 if "nvfp4" in f.lower() else 2, f)
+seven = [f for f in fl if f.startswith("diffusion_models/") and "7b" in f.lower()]
+normal = sorted([f for f in seven if "sharp" not in f.lower()], key=rank)
+sharp = sorted([f for f in seven if "sharp" in f.lower()], key=rank)
+va = sorted([f for f in fl if f.startswith("vae/") and "seedvr2" in f.lower()])
+if not (normal and va):
     sys.exit("Could not find the SeedVR2 7B model and VAE in " + R)
-print("== SeedVR2 7B + VAE")
-for path, sub in ((dm[0], "diffusion_models"), (va[0], "vae")):
+print("== SeedVR2 7B (normal + sharp) + VAE")
+for path, sub in [(normal[0], "diffusion_models")] + [(sharp[0], "diffusion_models")] * bool(sharp) + [(va[0], "vae")]:
     dest = os.path.join("models", sub, os.path.basename(path))
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
         print("   already have", dest); continue
@@ -56,7 +61,7 @@ restart
 
 echo "== Tests on the GPU (the first load takes a minute or two)"
 venv/bin/python - <<'PY'
-import json, re, time, urllib.request, urllib.error
+import json, os, re, shutil, time, urllib.request, urllib.error
 from PIL import Image, ImageDraw
 # A test picture with edges and text, so a broken upscale is easy to spot
 im = Image.new("RGB", (1024, 768), (90, 120, 150))
@@ -71,16 +76,19 @@ def opts(node, inp):
     return (v[0] if isinstance(v[0], list) else v[1].get("options", [])) if v else []
 if "SeedVR2Conditioning" not in get("/api/object_info/SeedVR2Conditioning"):
     raise SystemExit("UPSCALE TEST: ComfyUI didn't load the SeedVR2 nodes. See: tmux attach -t comfy")
-unet = sorted((n for n in opts("UNETLoader", "unet_name") if re.search("seedvr2", n, re.I)),
-              key=lambda n: ("7b" in n.lower(), not re.search("int8|fp8", n, re.I)))
-vae = [n for n in opts("VAELoader", "vae_name") if re.search("seedvr2", n, re.I)]
-print("ComfyUI sees:", unet[-1:] , vae[-1:])
-if not (unet and vae): raise SystemExit("UPSCALE TEST: files not visible to ComfyUI")
+# Same choice as the page: 7B, fp16 first, normal and sharp
+rank = lambda n: ("7b" in n.lower(), bool(re.search("fp16|bf16", n, re.I)), bool(re.search("int8|fp8", n, re.I)), n)
+svr = [n for n in opts("UNETLoader", "unet_name") if re.search("seedvr2", n, re.I)]
+normal = sorted((n for n in svr if "sharp" not in n.lower()), key=rank)
+sharp = sorted((n for n in svr if "sharp" in n.lower()), key=rank)
+vae = sorted(n for n in opts("VAELoader", "vae_name") if re.search("seedvr2", n, re.I))
+print("ComfyUI sees:", normal[-1:], sharp[-1:], vae[-1:])
+if not (normal and vae): raise SystemExit("UPSCALE TEST: files not visible to ComfyUI")
 tiles = {"tile_size": 512, "overlap": 128, "temporal_size": 4096, "temporal_overlap": 8}
 
-def run(label, w, h):
+def run(label, model, w, h):
     # Same graph the page builds
-    p = {"u1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet[-1], "weight_dtype": "default"}},
+    p = {"u1": {"class_type": "UNETLoader", "inputs": {"unet_name": model, "weight_dtype": "default"}},
          "u2": {"class_type": "VAELoader", "inputs": {"vae_name": vae[-1]}},
          "5": {"class_type": "LoadImage", "inputs": {"image": "rv6m_up_test.png [output]"}},
          "u3": {"class_type": "ImageScale", "inputs": {"image": ["5", 0], "upscale_method": "lanczos", "width": w, "height": h, "crop": "disabled"}},
@@ -110,9 +118,13 @@ def run(label, w, h):
         time.sleep(2)
     print(label, "TIMED OUT"); return False
 
-ok = run("UPSCALE TEST 2x", 2048, 1536)
-ok = run("UPSCALE TEST 4K", 3840, 2880) and ok
+ok = run("UPSCALE TEST 2x", normal[-1], 2048, 1536)
+ok = run("UPSCALE TEST 4K", normal[-1], 3840, 2880) and ok
+if sharp and not run("UPSCALE TEST 4K SHARP", sharp[-1], 3840, 2880):
+    os.makedirs("models/_disabled", exist_ok=True)  # so the page doesn't offer a model that fails
+    shutil.move(os.path.join("models/diffusion_models", sharp[-1]), os.path.join("models/_disabled", os.path.basename(sharp[-1])))
+    print("   moved", sharp[-1], "to models/_disabled; the page will offer Natural only")
 if not ok: raise SystemExit("The upscaler failed its test; see above.")
 PY
 echo
-echo "Done. Reload the edit page: results now have a ⬆️ Upscale button (2×, 4K, 6K, 8K)."
+echo "Done. Reload the edit page: results now have a ⬆️ Upscale button (2×, 4K, 6K, 8K; Natural or Sharp)."

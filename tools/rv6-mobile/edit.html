@@ -309,6 +309,10 @@
       </select>
       <button id="upGo" style="flex:1">⬆️ Upscale</button>
     </div>
+    <div class="row hidden" id="upLookRow" style="margin-top:8px">
+      <button id="upNatural" class="on">Natural</button>
+      <button id="upSharp">Sharp (more detail)</button>
+    </div>
     <div class="hint" id="upHint" style="margin-top:6px"></div>
   </div>
 </div>
@@ -631,12 +635,16 @@ async function info(node) {
     sviL: loras.filter(n => /svi.*low.*pro/i.test(n)).sort().pop(),
   };
   if (svi.WanImageToVideoSVIPro && Object.values(v).every(Boolean)) { video = v; $('modeVideo').classList.remove('hidden'); }
-  // ⬆️ Upscale: SeedVR2 (add-upscaler.sh), built into ComfyUI; the 7B over the 3B, full precision over int8
+  // ⬆️ Upscale: SeedVR2 (add-upscaler.sh), built into ComfyUI. The 7B over the 3B; fp16 first, then
+  // 8-bit, nvfp4 last (made for Blackwell GPUs). "Sharp" is its more-detail version.
+  const svPrec = n => /fp16|bf16/i.test(n) ? 3 : /int8|fp8/i.test(n) ? 2 : /nvfp4/i.test(n) ? 0 : 1;
+  const svBest = list => list.sort((a, b) => /7b/i.test(a) - /7b/i.test(b) || svPrec(a) - svPrec(b) || a.localeCompare(b)).pop() || null;
+  const svr2 = units.filter(n => /seedvr2/i.test(n));
   const u = {
-    unet: units.filter(n => /seedvr2/i.test(n)).sort((a, b) => /7b/i.test(a) - /7b/i.test(b) || /int8|fp8/i.test(b) - /int8|fp8/i.test(a)).pop(),
+    unet: svBest(svr2.filter(n => !/sharp/i.test(n))), sharp: svBest(svr2.filter(n => /sharp/i.test(n))),
     vae: optionsOf(vae, 'VAELoader', 'vae_name').filter(n => /seedvr2/i.test(n)).sort().pop(),
   };
-  if (svr.SeedVR2Conditioning && u.unet && u.vae) { upscaler = u; showUpBox(); }
+  if (svr.SeedVR2Conditioning && u.unet && u.vae) { upscaler = u; $('upLookRow').classList.toggle('hidden', !u.sharp); showUpBox(); }
   if ((t.unet || t.noct) && t.clip && t.vae && q21enc.TextEncodeQwenImage21) {
     q21 = t;
     $('modeCreate').classList.remove('hidden');
@@ -1854,10 +1862,19 @@ function upHint() {
 $('out').addEventListener('load', upHint);
 $('upSize').onchange = () => { store('upSize', $('upSize').value); upHint(); };
 if (recall('upSize')) $('upSize').value = recall('upSize');
+let upSharp = recall('upSharp') === '1';
+function setUpLook(sharp) {
+  upSharp = sharp; store('upSharp', sharp ? '1' : '0');
+  $('upNatural').classList.toggle('on', !sharp); $('upSharp').classList.toggle('on', sharp);
+}
+setUpLook(upSharp);
+$('upNatural').onclick = () => setUpLook(false);
+$('upSharp').onclick = () => setUpLook(true);
+const upModel = () => upSharp && upscaler.sharp ? upscaler.sharp : upscaler.unet;
 function buildUpscaleWorkflow(src, w, h, seed) {
   const tiles = { tile_size: 512, overlap: 128, temporal_size: 4096, temporal_overlap: 8 };  // as in ComfyUI's SeedVR2 template
   return {
-    u1: { class_type: 'UNETLoader', inputs: { unet_name: upscaler.unet, weight_dtype: 'default' } },
+    u1: { class_type: 'UNETLoader', inputs: { unet_name: upModel(), weight_dtype: 'default' } },
     u2: { class_type: 'VAELoader', inputs: { vae_name: upscaler.vae } },
     '5': { class_type: 'LoadImage', inputs: { image: (src.subfolder ? src.subfolder + '/' : '') + src.filename + ' [output]' } },
     u3: { class_type: 'ImageScale', inputs: { image: ['5', 0], upscale_method: 'lanczos', width: w, height: h, crop: 'disabled' } },
@@ -1887,7 +1904,7 @@ $('upGo').onclick = async () => {
     if (!r.ok) throw new Error('ComfyUI rejected the upscale (' + r.status + '): ' + (await r.text()).slice(0, 600));
     const ids = [(await r.json()).prompt_id], t0 = Date.now();
     currentJobs = ids.slice();
-    jobNote = `Upscaled with SeedVR2 · ${d[3]}×${d[4]} → ${d[0]}×${d[1]}`;
+    jobNote = `Upscaled with SeedVR2${upModel() === upscaler.sharp ? ' Sharp' : ''} · ${d[3]}×${d[4]} → ${d[0]}×${d[1]}`;
     store('pendingJob', JSON.stringify({ ids, t0, note: jobNote }));
     if (stopRequested) await cancelJob(ids[0]);
     await waitForJobs(ids, t0);

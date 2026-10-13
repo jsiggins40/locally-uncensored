@@ -43,6 +43,12 @@
   #result img { width:100%; border-radius:10px; display:block; }
   .hint { color:var(--muted); font-size:13px; }
   .hidden { display:none !important; }
+  #batchList { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-bottom:8px; }
+  #batchList:empty { display:none; }
+  #batchList div { position:relative; }
+  #batchList canvas { width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; display:block; }
+  #batchList span { position:absolute; left:4px; bottom:4px; background:#000a; border-radius:6px; padding:1px 6px; font-size:12px; }
+  #batchList button { position:absolute; right:4px; top:4px; padding:2px 8px; background:#000a; border-radius:12px; }
   #moreList { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-bottom:8px; }
   #moreList:empty { display:none; }
   #moreList div { position:relative; }
@@ -136,6 +142,15 @@
       <input id="file2" type="file" accept="image/*" multiple class="hidden">
     </label>
     <div class="hint" id="moreHint" style="margin-top:6px"></div>
+  </div>
+  <div id="batchBox" class="hidden" style="margin-top:10px">
+    <div id="batchList"></div>
+    <label class="btn" id="addBatch" style="display:block;text-align:center;margin:0;color:var(--text)">
+      <span id="addBatchText">📚 Batch: run the same prompt on more photos</span>
+      <input id="fileBatch" type="file" accept="image/*" multiple class="hidden">
+    </label>
+    <div class="row hidden" id="batchClearRow" style="margin-top:6px"><button id="batchClear">Clear batch</button></div>
+    <div class="hint" id="batchHint" style="margin-top:6px"></div>
   </div>
   <div id="paintTools">
   <div class="row" style="margin-top:10px">
@@ -519,6 +534,7 @@ function setMode(m) {
   $('engineBox').classList.toggle('hidden', !(masked && fill && qwen));
   $('engChange').classList.toggle('on', masked && !fx); $('engFix').classList.toggle('on', fx);
   $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus) || refVid() || startVid()));
+  $('batchBox').classList.toggle('hidden', !cloud); renderBatch();
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud || fx || vid);
   for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr || vid);
@@ -907,6 +923,41 @@ function renderMore() {
     renderRefChips();
   }
 }
+// ---- 📚 Batch (☁️ Seedream): the same prompt and settings on many photos, one
+// Atlas job per photo (each photo is picture 1; extra photos stay pictures 2, 3…)
+const batch = [];  // canvases (c.orig = the original file)
+const BATCH_MAX = 30;
+const batchPhotos = () => [full, ...batch];  // the main photo first
+function renderBatch() {
+  if (typeof saveBatch === 'function') saveBatch();
+  const box = $('batchList'); box.innerHTML = '';
+  batch.forEach((c, i) => {
+    const d = document.createElement('div'), x = document.createElement('button'), l = document.createElement('span');
+    l.textContent = '#' + (i + 2); x.textContent = '✕'; x.setAttribute('aria-label', 'Remove batch photo ' + (i + 2));
+    x.onclick = () => { batch.splice(i, 1); renderBatch(); };
+    d.append(c, l, x); box.append(d);
+  });
+  $('batchClearRow').classList.toggle('hidden', !batch.length);
+  $('addBatch').classList.toggle('hidden', batch.length >= BATCH_MAX);
+  $('addBatchText').textContent = batch.length ? `📚 Add more batch photos (${batch.length + 1} so far)` : '📚 Batch: run the same prompt on more photos';
+  const n = +$('count').value || 1, total = (batch.length + 1) * n;
+  $('batchHint').textContent = !batch.length
+    ? 'Pick several photos and one Generate edits each of them (plus the main photo above) with the same prompt and settings.'
+    : `${batch.length + 1} photos (the main one + ${batch.length})` + (n > 1 ? ` × ${n} variations` : '') + ` = ${total} paid Seedream edits. ` +
+      'Each photo is picture 1 of its own edit' + (usedMore().length ? '; your extra photos are pictures 2+ in every one.' : '.');
+}
+$('fileBatch').addEventListener('change', async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  const room = BATCH_MAX - batch.length;
+  if (files.length > room) setStatus(`A batch holds up to ${BATCH_MAX + 1} photos; added the first ${room}.`, true);
+  for (const f of files.slice(0, Math.max(0, room))) {
+    try { const c = await readPhoto(f); c.orig = f; batch.push(c); } catch (err) { setStatus(err.message, true); }
+  }
+  renderBatch();
+});
+$('batchClear').onclick = () => { batch.length = 0; renderBatch(); };
+$('count').addEventListener('change', () => renderBatch());
+
 function readPhoto(f) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(f), img = new Image();
@@ -1642,8 +1693,8 @@ $('go').onclick = async () => {
 // Seedream wants about 4 megapixels or more; keep the photo's shape, sides in multiples of 16
 // Seedream 5.0 Pro only makes these sizes (Atlas API reference); Auto = the 2K one closest to the photo
 const PRO_2K = ['2048*2048', '2368*1776', '1776*2368', '2816*1584', '1584*2816', '2496*1664', '1664*2496', '3136*1344'];
-function autoProSize() {
-  const r = Math.log((full.width / full.height) || 1), ratio = p => { const [w, h] = p.split('*').map(Number); return Math.log(w / h); };
+function autoProSize(c = full) {
+  const r = Math.log((c.width / c.height) || 1), ratio = p => { const [w, h] = p.split('*').map(Number); return Math.log(w / h); };
   return PRO_2K.reduce((a, b) => Math.abs(ratio(b) - r) < Math.abs(ratio(a) - r) ? b : a);
 }
 function cloudSizeHint() {
@@ -1656,9 +1707,9 @@ function cloudSizeHint() {
 $('cloudSizeSel').value = recall('cloudSize') || '';
 if ($('cloudSizeSel').selectedIndex < 0) $('cloudSizeSel').value = '';
 $('cloudSizeSel').addEventListener('change', () => { store('cloudSize', $('cloudSizeSel').value); cloudSizeHint(); });
-function cloudSize() {
-  if (/pro/i.test(cloudModel())) return $('cloudSizeSel').value || autoProSize();
-  const r = full.width / full.height, area = 2048 * 2048;
+function cloudSize(c = full) {
+  if (/pro/i.test(cloudModel())) return $('cloudSizeSel').value || autoProSize(c);
+  const r = c.width / c.height, area = 2048 * 2048;
   const clamp = v => Math.min(4096, Math.max(1024, Math.round(v / 16) * 16));
   return clamp(Math.sqrt(area * r)) + '*' + clamp(Math.sqrt(area / r));
 }
@@ -1667,6 +1718,8 @@ async function cloudGo() {
   if ($('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
   if (!$('prompt').value.trim()) return setStatus('Type what you want changed first.', true);
   if (!cloudCfg.configured) return setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
+  const total = batchPhotos().length * (+$('count').value || 1);
+  if (total > 4 && !confirm(`Send ${total} Seedream edits? Each one is billed by Atlas.`)) return;
   $('go').disabled = true; stopRequested = false; currentJobs = [];
   $('stop').classList.remove('hidden');
   store('workPrompt', $('prompt').value);
@@ -1675,22 +1728,30 @@ async function cloudGo() {
     setStatus('Connecting… Stay on this page for now.');
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
     setStatus('Sending to the VM… Stay on this page for now.');
-    const images = [await cloudUpload(mainOrig, full, `rv6m_${ts}_cloud1`)];
-    for (const [i, c] of usedMore().entries()) {
-      setStatus(`Uploading… ${i + 2}/${usedMore().length + 1}`);
-      images.push(await cloudUpload(c.orig, c, `rv6m_${ts}_cloud${i + 2}`));
+    const firsts = batchPhotos(), extras = usedMore(), nUp = firsts.length + extras.length;
+    const shared = [];
+    for (const [i, c] of extras.entries()) {
+      setStatus(`Uploading… ${firsts.length + i + 1}/${nUp}`);
+      shared.push(await cloudUpload(c.orig, c, `rv6m_${ts}_cloud${i + 2}`));
     }
-    const n = +$('count').value || 1, jobs = [], size = cloudSize();
-    for (let i = 0; i < n; i++) {
-      const r = await fetch('/rv6m/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images, prompt: $('prompt').value.trim(), size, model: cloudModel() }) });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error || 'The VM refused the cloud edit (' + r.status + ')');
-      jobs.push(j.job);
+    const n = +$('count').value || 1, jobs = [];
+    let size = cloudSize();
+    for (const [b, c] of firsts.entries()) {
+      if (stopRequested) break;
+      setStatus(firsts.length > 1 ? `Uploading and sending… photo ${b + 1}/${firsts.length}` : 'Sending to the VM… Stay on this page for now.');
+      const images = [await cloudUpload(b ? c.orig : mainOrig, c, `rv6m_${ts}_${b ? 'b' + b + '_' : ''}cloud1`), ...shared];
+      size = cloudSize(c);  // Auto: each photo's own shape
+      for (let i = 0; i < n; i++) {
+        const r = await fetch('/rv6m/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ images, prompt: $('prompt').value.trim(), size, model: cloudModel() }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || 'The VM refused the cloud edit (' + r.status + ')');
+        jobs.push(j.job);
+      }
     }
-    const t0 = Date.now();
-    store('pendingCloud', JSON.stringify({ jobs, t0, size, nPhotos: images.length }));
-    await waitForCloud(jobs, t0, size, images.length);
+    const t0 = Date.now(), note = firsts.length > 1 ? `Batch: ${firsts.length} photos` + (n > 1 ? ` × ${n}` : '') : '';
+    store('pendingCloud', JSON.stringify({ jobs, t0, size, nPhotos: 1 + shared.length, note }));
+    await waitForCloud(jobs, t0, size, 1 + shared.length, note);
   } catch (err) {
     setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
       ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.' : err.message, true);
@@ -1731,22 +1792,26 @@ async function cloudVideoGo() {
 }
 // Cloud jobs run on the VM even while Safari is in the background; this
 // only asks the VM how they are doing, so switching apps loses nothing.
-async function waitForCloud(jobs, t0, size, nPhotos = 1) {
-  const done = {};
+async function waitForCloud(jobs, t0, size, nPhotos = 1, note = '') {
+  const done = {}, failed = {};
+  const limit = size === 'video' ? 2700 : 400 + 20 * jobs.length;
   try {
     for (;;) {
       await sleep(1500);
       // Atlas jobs can't be cancelled (and are charged anyway); Stop just stops waiting
       if (stopRequested) { setStatus('Stopped waiting. A finished image still shows up under Recent edits.'); return; }
       const secs = Math.round((Date.now() - t0) / 1000);
-      if (secs > (size === 'video' ? 2700 : 400)) throw new Error('Timed out waiting for Atlas Cloud.');
-      const count = jobs.length > 1 ? ` (${Object.keys(done).length}/${jobs.length} done)` : '';
+      if (secs > limit) throw new Error('Timed out waiting for Atlas Cloud.' + (Object.keys(done).length ? ` ${Object.keys(done).length} finished (under Recent edits).` : ''));
+      const count = jobs.length > 1 ? ` (${Object.keys(done).length}/${jobs.length} done${Object.keys(failed).length ? ', ' + Object.keys(failed).length + ' failed' : ''})` : '';
       setStatus((size === 'video' ? 'Seedance is making your video… ' : 'Seedream is working… ') + secs + 's' + count + '\n✓ It\'s on the VM now: safe to leave, it keeps going and shows here (or under Recent edits) when you come back.');
-      for (const id of jobs.filter(i => !(i in done))) {
+      for (const id of jobs.filter(i => !(i in done) && !(i in failed))) {
         let j;
         try { j = await (await fetch('/rv6m/cloud/job/' + id, { cache: 'no-store' })).json(); }
         catch (e) { setStatus((size === 'video' ? 'Seedance is making your video… ' : 'Seedream is working… ') + secs + 's (reconnecting to the VM…)'); break; }
-        if (j.status === 'error') throw new Error((size === 'video' ? 'Seedance failed: ' : 'Seedream failed: ') + j.error);
+        if (j.status === 'error') {
+          if (jobs.length === 1) throw new Error((size === 'video' ? 'Seedance failed: ' : 'Seedream failed: ') + j.error);
+          failed[id] = j.error; continue;  // in a batch, the others carry on
+        }
         if (j.status !== 'done') continue;
         done[id] = { filename: j.filename, subfolder: '', type: 'output', seconds: j.seconds, sent: j.sent };
         addCloudRecent(j.filename);
@@ -1754,10 +1819,13 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1) {
         showResult(got[0], got);
         if (got.length === 1) $('result').scrollIntoView({ behavior: 'smooth' });
       }
-      if (Object.keys(done).length === jobs.length) {
+      if (Object.keys(done).length + Object.keys(failed).length === jobs.length) {
+        const nf = Object.keys(failed).length;
+        if (!Object.keys(done).length) throw new Error(`All ${jobs.length} Seedream edits failed: ` + Object.values(failed)[0]);
         const cloud = Math.max(...Object.values(done).map(d => d.seconds || 0));
-        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\n${sentSummary(Object.values(done)[0].sent, size)}` +
-                  (jobs.length > 1 ? '\nTap a thumbnail to compare.' : ''));
+        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\n` + (note ? note + ' · ' : '') + sentSummary(Object.values(done)[0].sent, size) +
+                  (nf ? `\n${nf} of ${jobs.length} failed: ${Object.values(failed)[0]}` : '') +
+                  (Object.keys(done).length > 1 ? '\nTap a thumbnail to compare.' : ''), nf > 0);
         loadRecent();
         return;
       }
@@ -1874,10 +1942,10 @@ async function waitForJobs(ids, t0) {
 // (called at the end of the script, once every variable it uses exists)
 async function resumePending() {
   let pc = null; try { pc = JSON.parse(recall('pendingCloud') || 'null'); } catch (e) {}
-  if (pc && pc.jobs && pc.jobs.length && Date.now() - pc.t0 < (pc.size === 'video' ? 2700 : 400) * 1000) {
+  if (pc && pc.jobs && pc.jobs.length && Date.now() - pc.t0 < (pc.size === 'video' ? 2700 : 400 + 20 * pc.jobs.length) * 1000) {
     $('go').disabled = true; $('stop').classList.remove('hidden'); stopRequested = false;
     setStatus(pc.size === 'video' ? 'Picking up your Seedance video…' : 'Picking up your Seedream edit…');
-    try { await waitForCloud(pc.jobs, pc.t0, pc.size || '', pc.nPhotos || 1); }
+    try { await waitForCloud(pc.jobs, pc.t0, pc.size || '', pc.nPhotos || 1, pc.note || ''); }
     catch (err) { setStatus(err.message, true); }
     finally { $('go').disabled = false; $('stop').classList.add('hidden'); }
     return;
@@ -2175,6 +2243,10 @@ function saveMore() {
   if (!workReady || restoring) return;
   IDB.set('more', more.map(c => c.orig || null).filter(Boolean));
 }
+function saveBatch() {
+  if (!workReady || restoring) return;
+  IDB.set('batch', batch.map(c => c.orig || null).filter(Boolean));
+}
 async function saveWork() {
   clearTimeout(workTimer); workTimer = null;
   if (!workReady || restoring || !photoIn) return;
@@ -2207,6 +2279,10 @@ async function restoreWork() {
       try { const c = await readPhoto(b); c.orig = b; more.push(c); } catch (e) {}
     }
     renderMore();
+    for (const b of (await IDB.get('batch')) || []) {
+      try { const c = await readPhoto(b); c.orig = b; batch.push(c); } catch (e) {}
+    }
+    renderBatch();
     return true;
   } catch (e) { return false; } finally { restoring = false; }
 }

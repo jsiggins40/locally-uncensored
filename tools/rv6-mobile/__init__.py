@@ -127,7 +127,7 @@ async def rv6m_jpeg(request):
 # /rv6m/work?key=..., GET /rv6m/work/blob?key=...&name=b0. Only these keys, in
 # ~/.rv6m_work/<key>/; a new save replaces the old one.
 WORK_DIR = os.path.expanduser("~/.rv6m_work")
-WORK_KEYS = {"photo", "mask", "more"}
+WORK_KEYS = {"photo", "mask", "more", "batch"}
 
 
 @PromptServer.instance.routes.post("/rv6m/work")

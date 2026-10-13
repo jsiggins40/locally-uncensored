@@ -158,9 +158,14 @@ def _save_log(log):
 PRO_SIZES = ["2048*2048", "2368*1776", "1776*2368", "2816*1584", "1584*2816", "2496*1664", "1664*2496", "3136*1344"]
 
 
+PRO_ALL = PRO_SIZES + ["1024*1024", "1536*1536", "1776*1328", "1328*1776", "2048*1152", "1152*2048"]
+
+
 def _pro_size(size):
-    """The Seedream 5.0 Pro 2K preset whose shape is closest to size ('W*H')."""
+    """size as is when it is one of Seedream 5.0 Pro's presets, else the 2K preset closest in shape."""
     import math
+    if str(size) in PRO_ALL:
+        return str(size)
     try:
         w, h = (int(x) for x in str(size).lower().replace("x", "*").split("*"))
         r = math.log(w / h)

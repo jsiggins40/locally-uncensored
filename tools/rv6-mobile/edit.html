@@ -231,6 +231,29 @@
 
 <div id="cloudBox" class="panel hidden" style="padding:10px 12px">
   <div class="hint" id="cloudHint"></div>
+  <label for="cloudSizeSel">Output size</label>
+  <select id="cloudSizeSel">
+    <option value="">Auto (match my photo's shape)</option>
+    <optgroup label="2K">
+      <option value="2048*2048">Square · 2048×2048</option>
+      <option value="1776*2368">Portrait 3:4 · 1776×2368</option>
+      <option value="2368*1776">Landscape 4:3 · 2368×1776</option>
+      <option value="1664*2496">Portrait 2:3 · 1664×2496</option>
+      <option value="2496*1664">Landscape 3:2 · 2496×1664</option>
+      <option value="1584*2816">Portrait 9:16 (phone) · 1584×2816</option>
+      <option value="2816*1584">Landscape 16:9 · 2816×1584</option>
+      <option value="3136*1344">Ultra-wide 21:9 · 3136×1344</option>
+    </optgroup>
+    <optgroup label="1.5K (cheaper)">
+      <option value="1536*1536">Square · 1536×1536</option>
+      <option value="1328*1776">Portrait 3:4 · 1328×1776</option>
+      <option value="1776*1328">Landscape 4:3 · 1776×1328</option>
+      <option value="1152*2048">Portrait 9:16 · 1152×2048</option>
+      <option value="2048*1152">Landscape 16:9 · 2048×1152</option>
+      <option value="1024*1024">Small square · 1024×1024</option>
+    </optgroup>
+  </select>
+  <div class="hint" id="cloudSizeHint"></div>
   <details style="margin-top:6px">
     <summary class="hint">Cloud model</summary>
     <input id="cloudModel" style="width:100%;margin-top:6px" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -463,6 +486,7 @@ function setMode(m) {
   if (cloud) {
     if (!wasWritten) $('prompt').value = '';
     if (!cloudCfg.configured) setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
+    cloudSizeHint();
   } else if (vid) {
     if (!wasWritten) $('prompt').value = '';
     applyVideo();
@@ -1217,6 +1241,7 @@ function loadIntoCanvas(src) {
       fitToRes(false);
       $('empty').classList.add('hidden'); $('stage').classList.remove('hidden');
       if (mode === 'video') applyVideo();
+      cloudSizeHint();
       resolve();
     };
     img.onerror = () => reject(new Error('Could not read that image'));
@@ -1481,7 +1506,24 @@ $('go').onclick = async () => {
 };
 
 // Seedream wants about 4 megapixels or more; keep the photo's shape, sides in multiples of 16
+// Seedream 5.0 Pro only makes these sizes (Atlas API reference); Auto = the 2K one closest to the photo
+const PRO_2K = ['2048*2048', '2368*1776', '1776*2368', '2816*1584', '1584*2816', '2496*1664', '1664*2496', '3136*1344'];
+function autoProSize() {
+  const r = Math.log((full.width / full.height) || 1), ratio = p => { const [w, h] = p.split('*').map(Number); return Math.log(w / h); };
+  return PRO_2K.reduce((a, b) => Math.abs(ratio(b) - r) < Math.abs(ratio(a) - r) ? b : a);
+}
+function cloudSizeHint() {
+  const v = $('cloudSizeSel').value, sz = v || (photoIn ? autoProSize() : '');
+  $('cloudSizeHint').textContent = (v ? '' : photoIn ? 'Auto: ' : 'Auto picks the size closest to your photo once you choose one. ') +
+    (sz ? sz.replace('*', '×') + (/^(1024|1152|1328|1536|1776\*1328|2048\*1152)/.test(sz) && +sz.split('*')[0] * +sz.split('*')[1] <= 2.61e6 ? ' (1.5K price tier)' : ' (2K price tier)') : '') +
+    (v && photoIn && Math.abs(Math.log(+v.split('*')[0] / +v.split('*')[1]) - Math.log(full.width / full.height)) > 0.06
+      ? '. A different shape from your photo: the edit may crop or extend it.' : '');
+}
+$('cloudSizeSel').value = recall('cloudSize') || '';
+if ($('cloudSizeSel').selectedIndex < 0) $('cloudSizeSel').value = '';
+$('cloudSizeSel').addEventListener('change', () => { store('cloudSize', $('cloudSizeSel').value); cloudSizeHint(); });
 function cloudSize() {
+  if (/pro/i.test(cloudModel())) return $('cloudSizeSel').value || autoProSize();
   const r = full.width / full.height, area = 2048 * 2048;
   const clamp = v => Math.min(4096, Math.max(1024, Math.round(v / 16) * 16));
   return clamp(Math.sqrt(area * r)) + '*' + clamp(Math.sqrt(area / r));

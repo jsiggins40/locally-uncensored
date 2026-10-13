@@ -119,6 +119,71 @@ async def rv6m_jpeg(request):
     return web.FileResponse(out, headers={"Content-Type": "image/jpeg", "Cache-Control": "max-age=86400"})
 
 
+# --- Remember my work, kept on the VM ----------------------------------------
+# The page keeps the chosen photos, extra photos and selection in the phone's
+# IndexedDB so they survive Safari reloading the tab. iPhone Lockdown Mode
+# turns IndexedDB off (iOS 17+), so then the page stores the same things here:
+# POST /rv6m/work (multipart: key, meta JSON, files b0, b1...), GET
+# /rv6m/work?key=..., GET /rv6m/work/blob?key=...&name=b0. Only these keys, in
+# ~/.rv6m_work/<key>/; a new save replaces the old one.
+WORK_DIR = os.path.expanduser("~/.rv6m_work")
+WORK_KEYS = {"photo", "mask", "more"}
+
+
+@PromptServer.instance.routes.post("/rv6m/work")
+async def rv6m_work_set(request):
+    import json
+    import re
+    import shutil
+    import uuid
+    form = await request.post()
+    key = str(form.get("key", ""))
+    if key not in WORK_KEYS:
+        return web.json_response({"error": "unknown key"}, status=400)
+    meta = json.loads(str(form.get("meta", "null")))
+    final = os.path.join(WORK_DIR, key)
+    tmp = os.path.join(WORK_DIR, f".{key}.{uuid.uuid4().hex}")
+    os.makedirs(tmp)
+    types = {}
+    for name, field in form.items():
+        if re.fullmatch(r"b\d{1,3}", name) and hasattr(field, "file"):
+            with open(os.path.join(tmp, name), "wb") as f:
+                shutil.copyfileobj(field.file, f)
+            types[name] = field.content_type or "application/octet-stream"
+    with open(os.path.join(tmp, "meta.json"), "w") as f:
+        json.dump({"meta": meta, "types": types}, f)
+    old = final + ".old"
+    shutil.rmtree(old, ignore_errors=True)
+    if os.path.exists(final):
+        os.replace(final, old)
+    os.replace(tmp, final)
+    shutil.rmtree(old, ignore_errors=True)
+    return web.json_response({"ok": True})
+
+
+@PromptServer.instance.routes.get("/rv6m/work")
+async def rv6m_work_get(request):
+    import json
+    key = request.query.get("key", "")
+    path = os.path.join(WORK_DIR, key, "meta.json")
+    if key not in WORK_KEYS or not os.path.exists(path):
+        return web.json_response({"meta": None})
+    with open(path) as f:
+        return web.json_response({"meta": json.load(f)["meta"]})
+
+
+@PromptServer.instance.routes.get("/rv6m/work/blob")
+async def rv6m_work_blob(request):
+    import json
+    import re
+    key, name = request.query.get("key", ""), request.query.get("name", "")
+    if key not in WORK_KEYS or not re.fullmatch(r"b\d{1,3}", name) or not os.path.exists(os.path.join(WORK_DIR, key, name)):
+        return web.json_response({"error": "not found"}, status=404)
+    with open(os.path.join(WORK_DIR, key, "meta.json")) as f:
+        ctype = json.load(f)["types"].get(name, "application/octet-stream")
+    return web.FileResponse(os.path.join(WORK_DIR, key, name), headers={"Content-Type": ctype, "Cache-Control": "no-store"})
+
+
 # --- Seedream (Atlas Cloud) -------------------------------------------------
 # POST /rv6m/cloud sends the photos in ComfyUI's input folder plus the prompt
 # to Atlas Cloud, waits for the result and saves it in the output folder so it

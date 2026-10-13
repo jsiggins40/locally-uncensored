@@ -247,8 +247,9 @@ def _cloud(names, prompt, size, model):
     return {"filename": name, "sent": sent}
 
 
-def _atlas_job(endpoint, key, body, sent, limit):
-    """Submit to Atlas, poll until done (up to limit seconds) and return the result file's bytes."""
+def _atlas_job(endpoint, key, body, sent, limit, meta=None):
+    """Submit to Atlas, poll until done (up to limit seconds) and return the result file's bytes.
+    meta (a dict), if given, gets the prediction id and any draft_id from Atlas's reply."""
     import base64
     import time
     import urllib.request
@@ -278,6 +279,8 @@ def _atlas_job(endpoint, key, body, sent, limit):
             raise RuntimeError(f"Atlas took over {limit // 60} minutes; last reply: " + str(res)[:300])
         time.sleep(1.5)
     _save_log(log)
+    if meta is not None:
+        meta.update(id=pid, draft_id=_find(res, ["draft_id"]) or _find(_data(sub), ["draft_id"]))
     out = _find(res, ["outputs", "output", "images", "videos", "video", "url"])
     url = out[0] if isinstance(out, list) else out
     if isinstance(url, dict):
@@ -329,8 +332,60 @@ def _data_uri(path):
     return f"data:{mime};base64," + base64.b64encode(open(path, "rb").read()).decode()
 
 
-def _cloud_video(names, prompt, model, duration, resolution, audio, ratio="adaptive"):
+# 📝 Drafts: a Seedance video made with draft=true is a 480p preview (billed as
+# 480p). Atlas's bytedance/seedance-2.5/draft-complete renders the same video at
+# 1080p from just its draft_id, within 7 days. The VM remembers which saved
+# video came from which draft: ~/.rv6m_drafts.json
+CLOUD_FINISH_MODEL = os.environ.get("RV6M_CLOUD_FINISH_MODEL", "bytedance/seedance-2.5/draft-complete")
+DRAFTS_FILE = os.path.expanduser("~/.rv6m_drafts.json")
+DRAFT_DAYS = 7
+_drafts_lock = threading.Lock()
+
+
+def _drafts():
+    import json
     import time
+    try:
+        with open(DRAFTS_FILE) as f:
+            d = json.load(f)
+    except Exception:
+        return {}
+    return {k: v for k, v in d.items() if time.time() - v.get("t", 0) < DRAFT_DAYS * 86400}
+
+
+def _draft_add(filename, draft_id):
+    import json
+    import time
+    with _drafts_lock:
+        d = _drafts()
+        d[filename] = {"draft_id": str(draft_id), "t": time.time()}
+        with open(DRAFTS_FILE + ".tmp", "w") as f:
+            json.dump(d, f)
+        os.replace(DRAFTS_FILE + ".tmp", DRAFTS_FILE)
+
+
+def _save_video(data):
+    import time
+    ext = ".mov" if data[4:12] == b"ftypqt  " else ".mp4"
+    out = f"rv6_cloud_{int(time.time() * 1000)}{ext}"
+    with open(os.path.join(folder_paths.get_output_directory(), out), "wb") as f:
+        f.write(data)
+    return out
+
+
+def _cloud_finish(filename):
+    key = _cloud_key()
+    if not key:
+        raise RuntimeError("No Atlas API key on the VM (~/.atlascloud_key)")
+    d = _drafts().get(filename)
+    if not d:
+        raise RuntimeError("That video isn't a draft from the last 7 days")
+    body = {"model": CLOUD_FINISH_MODEL, "draft_id": d["draft_id"], "output_format": "mp4", "watermark": False}
+    out = _save_video(_atlas_job("/generateVideo", key, body, {**body, "draft_of": filename}, 2400))
+    return {"filename": out, "sent": {"model": CLOUD_FINISH_MODEL, "resolution": "1080p", "finished": filename}}
+
+
+def _cloud_video(names, prompt, model, duration, resolution, audio, ratio="adaptive", draft=False):
     key = _cloud_key()
     if not key:
         raise RuntimeError("No Atlas API key on the VM (~/.atlascloud_key)")
@@ -346,15 +401,19 @@ def _cloud_video(names, prompt, model, duration, resolution, audio, ratio="adapt
         body.update(image=images[0], ratio="adaptive", output_format="mp4")
         if len(images) > 1:
             body["last_image"] = images[1]
+    if draft:
+        body["draft"] = True  # 480p preview; Atlas ignores resolution
     sent = {k: v for k, v in body.items() if k not in ("image", "last_image", "reference_images")}
     sent["images"] = [f"{n} ({len(i) * 3 // 4 // 1024} KB)" for n, i in zip(names, images)]
+    if draft:
+        sent["resolution"] = "480p draft"
+    meta = {}
     # Upscaled (-sr/-esr) and long videos can take a while
-    data = _atlas_job("/generateVideo", key, body, sent, 2400)
-    ext = ".mov" if data[4:12] == b"ftypqt  " else ".mp4"
-    out = f"rv6_cloud_{int(time.time() * 1000)}{ext}"
-    with open(os.path.join(folder_paths.get_output_directory(), out), "wb") as f:
-        f.write(data)
-    return {"filename": out, "sent": sent}
+    out = _save_video(_atlas_job("/generateVideo", key, body, sent, 2400, meta))
+    if draft:
+        # Atlas: the draft_id is the draft's prediction id (also returned as draft_id)
+        _draft_add(out, meta.get("draft_id") or meta["id"])
+    return {"filename": out, "sent": sent, "draft": bool(draft)}
 
 
 _jobs = {}  # job id -> {"status": "running"|"done"|"error", "filename", "error", "seconds"}
@@ -419,7 +478,28 @@ async def rv6m_cloud_video(request):
     _jobs[jid] = {"status": "running"}
     asyncio.ensure_future(_run_cloud(jid, _cloud_video, names, body["prompt"],
                                      body.get("model") or (CLOUD_REF_MODEL if ref else CLOUD_VIDEO_MODEL),
-                                     duration, res, body.get("audio", True), ratio))
+                                     duration, res, body.get("audio", True), ratio, bool(body.get("draft"))))
+    return web.json_response({"job": jid})
+
+
+@PromptServer.instance.routes.get("/rv6m/drafts")
+async def rv6m_drafts(request):
+    import time
+    return web.json_response({k: {"days_left": round(DRAFT_DAYS - (time.time() - v["t"]) / 86400, 1)} for k, v in _drafts().items()})
+
+
+@PromptServer.instance.routes.post("/rv6m/cloud/finish")
+async def rv6m_cloud_finish(request):
+    import uuid
+    body = await request.json()
+    name = os.path.basename(str(body.get("filename") or ""))
+    if name not in _drafts():
+        return web.json_response({"error": "That video isn't a draft from the last 7 days"}, status=400)
+    if not _cloud_key():
+        return web.json_response({"error": "No Atlas API key on the VM (~/.atlascloud_key)"}, status=400)
+    jid = uuid.uuid4().hex
+    _jobs[jid] = {"status": "running"}
+    asyncio.ensure_future(_run_cloud(jid, _cloud_finish, name))
     return web.json_response({"job": jid})
 
 

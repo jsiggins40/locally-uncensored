@@ -279,6 +279,8 @@
   <div class="seg"><button id="vid480">480p (faster)</button><button id="vid720">720p</button></div>
   </div>
   <div id="vidRefBox" class="hidden">
+    <label>Draft first?</label>
+    <div class="seg"><button id="vidDraftOn">📝 Draft (480p, finish later)</button><button id="vidDraftOff">Final video</button></div>
     <label for="vidResRef">Resolution</label>
     <select id="vidResRef">
       <option value="480p">480p · native, cheapest</option>
@@ -331,6 +333,8 @@
   <div id="variants"></div>
   <p class="hint" id="saveHint">Long-press the image to save it to Photos.</p>
   <button id="again" style="width:100%">Keep editing this result</button>
+  <button id="finishBtn" class="hidden primary" style="width:100%;margin-top:8px">✨ Finish this draft at 1080p</button>
+  <div class="hint hidden" id="finishHint" style="margin-top:4px"></div>
   <div id="upBox" class="hidden" style="margin-top:10px">
     <div class="row" style="margin-top:0">
       <select id="upSize" style="flex:1">
@@ -1065,7 +1069,7 @@ let vidEngine = recall('vidEngine') || 'local', vidSound = recall('vidSound') !=
 const cloudVid = () => cloudCfg.configured && (vidEngine === 'cloud' || !video);
 // Seedance reference-to-video: all photos (main + extras) are references, called
 // @Image1, @Image2… in the prompt; a new shot in any shape, up to 4K (-sr/-esr upscale)
-let vidKind = recall('vidKind') || 'ref';
+let vidKind = recall('vidKind') || 'ref', vidDraft = recall('vidDraft') === '1';
 const refVid = () => mode === 'video' && cloudVid() && vidKind === 'ref';
 if (recall('vidResRef')) $('vidResRef').value = recall('vidResRef');
 if (recall('vidRatio')) $('vidRatio').value = recall('vidRatio');
@@ -1092,6 +1096,8 @@ function applyVideo() {
   $('vidKindRef').classList.toggle('on', ref); $('vidKindStart').classList.toggle('on', cv && !ref);
   // Both Seedance kinds take the full resolution list; shape and @Image only apply to reference
   $('vidResBox').classList.toggle('hidden', cv); $('vidRefBox').classList.toggle('hidden', !cv); $('vidRefOnly').classList.toggle('hidden', !ref);
+  $('vidDraftOn').classList.toggle('on', vidDraft); $('vidDraftOff').classList.toggle('on', !vidDraft);
+  $('vidResRef').disabled = cv && vidDraft;  // a draft is always 480p
   if (mode === 'video') { $('secondBox').classList.toggle('hidden', !cv); renderMore(); }
   if (ref) renderRefChips();
   $('vidEngineBox').classList.toggle('hidden', !(cloudCfg.configured && video));
@@ -1102,12 +1108,13 @@ function applyVideo() {
   if (cv && +$('vidLen').value > 30) $('vidLen').value = '30';
   $('vid480').classList.toggle('on', vidRes !== '720'); $('vid720').classList.toggle('on', vidRes === '720');
   $('vidFast').classList.toggle('on', !vidQuality); $('vidQual').classList.toggle('on', vidQuality);
-  if (ref) return void ($('vidHint').textContent = `${$('vidLen').value} s · ${$('vidResRef').value} · ` +
+  const draftNote = vidDraft ? '📝 Draft: a 480p preview, billed as 480p. If you like it, tap "Finish at 1080p" on the result (within 7 days) for the same video at 1080p. ' : '';
+  if (ref) return void ($('vidHint').textContent = draftNote + `${$('vidLen').value} s · ${vidDraft ? '480p draft' : $('vidResRef').value} · ` +
     `${$('vidRatio').value === 'adaptive' ? 'shape of the main photo' : $('vidRatio').value}${vidSound ? ' · with sound' : ''}. ` +
     'Seedance 2.5 makes a new scene with the people and things in your photos (up to 10 here). Say who does what with @Image1 (the main photo), @Image2…, ' +
     'e.g. "@Image1 walks into the café from @Image2 and sits down". Native 1080p has the most real detail; -sr/-esr make a smaller video and upscale it. ' +
     'Higher resolutions and longer videos cost more (prices on Atlas\'s model page). Paid per video, ByteDance\'s content rules apply; only use photos of people who agreed.');
-  if (cv) return void ($('vidHint').textContent = `${$('vidLen').value} s · ${$('vidResRef').value}${vidSound ? ' · with sound' : ''}, ` +
+  if (cv) return void ($('vidHint').textContent = draftNote + `${$('vidLen').value} s · ${vidDraft ? '480p draft' : $('vidResRef').value}${vidSound ? ' · with sound' : ''}, ` +
     'starting from your photo (same shape)' + (usedMore().length ? ' and ending on picture 2' : '') + '. Made by ByteDance\'s Seedance 2.5 on Atlas Cloud ' +
     '(paid per video, usually a few minutes; higher resolutions cost more; ByteDance\'s content rules apply). Strong motion and physics; keeps the person from the photo.');
   const n = vidClips(), [w, h] = photoIn ? vidDims() : [0, 0];
@@ -1126,6 +1133,8 @@ $('vidLocal').onclick = () => { vidEngine = 'local'; store('vidEngine', vidEngin
 $('vidCloud').onclick = () => { vidEngine = 'cloud'; store('vidEngine', vidEngine); applyVideo(); };
 $('vidSoundOn').onclick = () => { vidSound = true; store('vidSound', '1'); applyVideo(); };
 $('vidSoundOff').onclick = () => { vidSound = false; store('vidSound', '0'); applyVideo(); };
+$('vidDraftOn').onclick = () => { vidDraft = true; store('vidDraft', '1'); applyVideo(); };
+$('vidDraftOff').onclick = () => { vidDraft = false; store('vidDraft', '0'); applyVideo(); };
 $('vidKindRef').onclick = () => { vidKind = 'ref'; store('vidKind', vidKind); applyVideo(); };
 $('vidKindStart').onclick = () => { vidKind = 'start'; store('vidKind', vidKind); applyVideo(); };
 $('vidResRef').onchange = () => { store('vidResRef', $('vidResRef').value); applyVideo(); };
@@ -1691,9 +1700,9 @@ async function cloudVideoGo() {
     const r = await fetch('/rv6m/cloud/video', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(ref
         ? { kind: 'reference', images, prompt: $('prompt').value.trim(), duration: +$('vidLen').value,
-            resolution: $('vidResRef').value, ratio: $('vidRatio').value, audio: vidSound }
+            resolution: $('vidResRef').value, ratio: $('vidRatio').value, audio: vidSound, draft: vidDraft }
         : { kind: 'start', images, prompt: $('prompt').value.trim(), duration: +$('vidLen').value,
-            resolution: $('vidResRef').value, audio: vidSound }) });
+            resolution: $('vidResRef').value, audio: vidSound, draft: vidDraft }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'The VM refused the cloud video (' + r.status + ')');
     const t0 = Date.now();
@@ -1747,6 +1756,7 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1) {
 function sentSummary(sent, size) {
   if (!sent) return 'Seedream · ' + size.replace('*', '×');
   const kb = (sent.images || []).map(x => +(x.match(/\((\d+) KB\)/) || [0, 0])[1]);
+  if (sent.finished) return `Seedance draft finished at 1080p (from ${sent.finished})`;
   return `${String(sent.model).replace(/^bytedance\//, '')} · ${sent.duration ? sent.duration + ' s · ' + (sent.generate_audio ? 'sound · ' : '') : ''}${sent.resolution || String(sent.size || '').replace('*', '×')}` +
          (sent.ratio && sent.ratio !== 'adaptive' ? ' · ' + sent.ratio : '') +
          ` · sent ${kb.length} photo${kb.length > 1 ? 's' : ''} (${kb.map(k => k >= 1024 ? (k / 1024).toFixed(1) + ' MB' : k + ' KB').join(', ')})`;
@@ -1776,6 +1786,7 @@ function showResult(o, variants = []) {
     $('saveHint').append(a);
   }
   showUpBox(v);
+  showFinish(o);
   if (v) { $('outVideo').src = viewUrl(o); $('variants').innerHTML = ''; $('result').classList.remove('hidden'); return; }
   $('outVideo').removeAttribute('src');
   $('out').src = viewUrl(o);
@@ -1920,6 +1931,44 @@ $('again').onclick = async () => {
   window.scrollTo({ top: 0, behavior: 'smooth' });
   setStatus('Paint the next area to change.');
 };
+
+// ---- 📝 Seedance drafts: the VM remembers which videos are drafts (7 days);
+// "Finish at 1080p" has Atlas render the same video at 1080p from its draft_id
+let drafts = {};
+async function loadDrafts() {
+  try { const r = await fetch('/rv6m/drafts', { cache: 'no-store' }); drafts = r.ok ? await r.json() : {}; } catch (e) {}
+}
+function showFinish(o) {
+  const d = o && isVideo(o) && drafts[o.filename];
+  $('finishBtn').classList.toggle('hidden', !d); $('finishHint').classList.toggle('hidden', !d);
+  $('finishBtn').dataset.file = d ? o.filename : '';
+  if (d) $('finishHint').textContent = `This is a 480p draft. Finishing renders the same video at 1080p (paid as a 1080p video; ` +
+    `${d.days_left >= 1 ? Math.floor(d.days_left) + ' days' : 'less than a day'} left to do it).`;
+  if (o && isVideo(o) && !d) loadDrafts().then(() => { if (drafts[o.filename] && $('outVideo').src.includes(encodeURIComponent(o.filename))) showFinish(o); });
+}
+$('finishBtn').onclick = async () => {
+  const filename = $('finishBtn').dataset.file;
+  if (!filename) return;
+  if ($('go').disabled) return setStatus('Wait for the current job to finish first.', true);
+  $('go').disabled = $('finishBtn').disabled = true; stopRequested = false;
+  $('stop').classList.remove('hidden');
+  try {
+    setStatus('Connecting… Stay on this page for now.');
+    if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Finish again.');
+    const r = await fetch('/rv6m/cloud/finish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'The VM refused (' + r.status + ')');
+    const t0 = Date.now();
+    store('pendingCloud', JSON.stringify({ jobs: [j.job], t0, size: 'video', nPhotos: 0 }));
+    await waitForCloud([j.job], t0, 'video', 0);
+  } catch (err) {
+    setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
+      ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Finish again.' : err.message, true);
+  } finally {
+    $('go').disabled = $('finishBtn').disabled = false; $('stop').classList.add('hidden');
+  }
+};
+loadDrafts();
 
 // ---- ⬆️ Upscale (SeedVR2): makes the picture on screen 2× or 4K-8K with real
 // added detail. One step of the SeedVR2 7B model; the picture is read straight

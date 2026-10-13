@@ -1491,21 +1491,35 @@ async function exportMask() {
 // iOS pauses Safari and the Tailscale tunnel when you switch apps; for a
 // few seconds after coming back, requests fail. Wait for the VM instead of
 // failing: ping until it answers (up to 60s) before doing anything.
-async function serverUp() {
-  try { const r = await fetch('/api/system_stats', { cache: 'no-store' }); return r.ok; } catch (e) { return false; }
+// 'ok', 'down' (the VM answered but ComfyUI didn't: Tailscale gives 502 while it is
+// stopped or restarting) or 'net' (no answer at all: phone network, Tailscale or the VM)
+let lastDown = '';
+async function serverState() {
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), 12000);
+  try { const r = await fetch('/api/system_stats', { cache: 'no-store', signal: ac.signal }); return r.ok ? 'ok' : 'down'; }
+  catch (e) { return 'net'; } finally { clearTimeout(t); }
 }
+async function serverUp() { lastDown = await serverState(); return lastDown === 'ok'; }
 let waitingForServer = null;
 function ensureServer() {
   if (!waitingForServer) waitingForServer = (async () => {
-    if (await serverUp()) return true;
+    // Coming back to Safari, iOS and the Tailscale app need a moment to bring the
+    // network back: try quietly for ~3 s before showing anything
+    for (let i = 0; i < 3; i++) {
+      if (await serverUp()) return true;
+      await sleep(1000);
+    }
     $('offline').classList.remove('hidden');
+    const why = () => $('offlineWhy').textContent = lastDown === 'down'
+      ? 'The VM answers but ComfyUI doesn\'t: it is restarting, or it stopped. If this lasts, run edit-restart in Blink.'
+      : 'No answer from the VM. Check the Tailscale app says Connected, and that the VM is running (it is preemptible: Nebius can stop it).';
     $('offlineWhy').textContent = '';
     for (let i = 0; i < 30; i++) {
       await sleep(2000);
       if (await serverUp()) { $('offline').classList.add('hidden'); return true; }
-      if (i === 5) $('offlineWhy').textContent = 'Check the Tailscale app says Connected.';
+      if (i >= 3) why();
     }
-    $('offlineWhy').textContent = 'Still can\'t reach it. Open the Tailscale app, then come back.';
+    why();
     return false;
   })().finally(() => { waitingForServer = null; });
   return waitingForServer;

@@ -339,6 +339,11 @@
         <option value="5760">6K (5760 px)</option>
         <option value="7680">8K (7680 px)</option>
       </select>
+      <select id="upVidSize" style="flex:1" class="hidden">
+        <option value="2x">2× size</option>
+        <option value="1080" selected>1080p</option>
+        <option value="1440">1440p</option>
+      </select>
       <button id="upGo" style="flex:1">⬆️ Upscale</button>
     </div>
     <div class="row hidden" id="upLookRow" style="margin-top:8px">
@@ -1754,7 +1759,7 @@ function addCloudRecent(filename) {
   store('cloudRecent', JSON.stringify(list.slice(0, 24)));
 }
 
-const isUp = o => /^rv6_edit_up_/.test(o.filename || '') && (o.type || 'output') === 'output';
+const isUp = o => /^rv6_edit_up_/.test(o.filename || '') && (o.type || 'output') === 'output' && !isVideo(o);  // pictures only
 const pngUrl = o => `/api/view?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}&type=${o.type || 'output'}`;
 // Upscaled pictures are 30-100 MB PNGs: the page shows them as a JPEG the VM makes (a few MB)
 const viewUrl = (o, max) => isUp(o) ? `/rv6m/jpeg?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}` +
@@ -1921,29 +1926,55 @@ $('again').onclick = async () => {
 // from the VM's output folder, so nothing is uploaded.
 function showUpBox(isVid) {
   if (isVid === undefined) isVid = !$('outVideo').classList.contains('hidden');
-  $('upBox').classList.toggle('hidden', !upscaler || isVid);
+  $('upBox').classList.toggle('hidden', !upscaler);
+  $('upSize').classList.toggle('hidden', isVid); $('upVidSize').classList.toggle('hidden', !isVid);
   upHint();
 }
+const upIsVid = () => !$('outVideo').classList.contains('hidden');
 function outRef() {
   try {
-    const u = new URL($('out').src, location.href);
+    const u = new URL(upIsVid() ? $('outVideo').src : $('out').src, location.href);
     if (!/\/api\/view$|\/rv6m\/jpeg$/.test(u.pathname) || (u.searchParams.get('type') || 'output') !== 'output') return null;
     return { filename: u.searchParams.get('filename'), subfolder: u.searchParams.get('subfolder') || '' };
   } catch (e) { return null; }
 }
+// Pictures: 2× or a long side of 4K-8K. Videos: 2× or a short side of 1080/1440
+// (every frame is held in the VM's memory several times over, so no 4K video).
 function upDims() {
-  const w = $('out').naturalWidth, h = $('out').naturalHeight, v = $('upSize').value;
+  const vid = upIsVid(), el = vid ? $('outVideo') : $('out');
+  const w = vid ? el.videoWidth : el.naturalWidth, h = vid ? el.videoHeight : el.naturalHeight;
   if (!w || !h) return null;
-  const s = Math.min(8, v === '2x' ? 2 : +v / Math.max(w, h));  // the resize node stops at 8×
+  const v = vid ? $('upVidSize').value : $('upSize').value;
+  const s = Math.min(8, v === '2x' ? 2 : vid ? +v / Math.min(w, h) : +v / Math.max(w, h));  // the resize node stops at 8×
   return [Math.round(w * s / 2) * 2, Math.round(h * s / 2) * 2, s, w, h];
 }
+// Rough frame count: Seedance videos are 24 fps, local Wan ones 16
+function upFrames() {
+  const r = outRef(), d = $('outVideo').duration;
+  return d && isFinite(d) ? Math.round(d * (/^rv6_cloud_/.test(r && r.filename || '') ? 24 : 16)) : 0;
+}
+// Million pixels × frames. ComfyUI keeps ~4 full-size float copies of the frames in RAM
+// (resized, padded, decoded, colour-matched): 1600 ≈ 4 × 19 GB, which allows a 30 s
+// 24 fps video at 1080p (~75 GB) but not at 1440p
+const UP_VID_LIMIT = 1600;
 function upHint() {
-  const d = upDims();
+  const d = upDims(), vid = upIsVid();
+  if (vid) {
+    const f = upFrames(), load = d ? d[0] * d[1] * f / 1e6 : 0;
+    $('upHint').textContent = !d ? 'Adds real detail to every frame (SeedVR2) and keeps the sound.'
+      : d[2] < 1.05 ? `This video is already ${d[3]}×${d[4]}: pick a bigger size.`
+      : `${d[3]}×${d[4]} → ${d[0]}×${d[1]}, about ${f} frames. Adds real detail to every frame and keeps the sound; ` +
+        `takes a few minutes on the H200.` + (load > UP_VID_LIMIT ? ' Too long for this size (the VM would run out of memory): pick a smaller size or a shorter video.' : '');
+    return;
+  }
   $('upHint').textContent = !d ? 'Adds real detail (SeedVR2) and keeps the picture the same.'
     : d[2] < 1.05 ? `This picture is already ${d[3]}×${d[4]}: pick a bigger size.`
     : `${d[3]}×${d[4]} → ${d[0]}×${d[1]} (${(d[0] * d[1] / 1e6).toFixed(0)} MP). Adds real detail and keeps the picture the same.` +
       (d[2] > 4.05 ? ' More than 4× invents a lot of the detail; 2-4× looks most natural.' : '');
 }
+$('outVideo').addEventListener('loadedmetadata', upHint);
+$('upVidSize').onchange = () => { store('upVidSize', $('upVidSize').value); upHint(); };
+if (recall('upVidSize')) $('upVidSize').value = recall('upVidSize');
 $('out').addEventListener('load', upHint);
 $('upSize').onchange = () => { store('upSize', $('upSize').value); upHint(); };
 if (recall('upSize')) $('upSize').value = recall('upSize');
@@ -1956,12 +1987,34 @@ setUpLook(upSharp);
 $('upNatural').onclick = () => setUpLook(false);
 $('upSharp').onclick = () => setUpLook(true);
 const upModel = () => upSharp && upscaler.sharp ? upscaler.sharp : upscaler.unet;
-function buildUpscaleWorkflow(src, w, h, seed) {
-  const tiles = { tile_size: 512, overlap: 128, temporal_size: 4096, temporal_overlap: 8 };  // as in ComfyUI's SeedVR2 template
+function buildUpscaleWorkflow(src, w, h, seed, vid) {
+  const name = (src.subfolder ? src.subfolder + '/' : '') + src.filename + ' [output]';
+  // Tiles as in ComfyUI's SeedVR2 templates (the video one encodes 64 frames at a time)
+  const tiles = { tile_size: 512, overlap: 128, temporal_size: vid ? 64 : 4096, temporal_overlap: 8 };
+  if (vid) return {
+    u1: { class_type: 'UNETLoader', inputs: { unet_name: upModel(), weight_dtype: 'default' } },
+    u2: { class_type: 'VAELoader', inputs: { vae_name: upscaler.vae } },
+    '5': { class_type: 'LoadVideo', inputs: { file: name } },
+    gc: { class_type: 'GetVideoComponents', inputs: { video: ['5', 0] } },
+    u3: { class_type: 'ImageScale', inputs: { image: ['gc', 0], upscale_method: 'lanczos', width: w, height: h, crop: 'disabled' } },
+    u4: { class_type: 'SeedVR2Preprocess', inputs: { resized_images: ['u3', 0] } },
+    u5: { class_type: 'VAEEncodeTiled', inputs: { pixels: ['u4', 0], vae: ['u2', 0], ...tiles } },
+    // Long videos go through in pieces that fit the GPU ("auto" measures free memory),
+    // 2 latent frames shared between pieces and crossfaded so there's no jump
+    ch: { class_type: 'SeedVR2TemporalChunk', inputs: { latent: ['u5', 0], temporal_overlap: 2, chunking_mode: 'auto' } },
+    u6: { class_type: 'SeedVR2Conditioning', inputs: { model: ['u1', 0], vae_conditioning: ['ch', 0] } },
+    '7': { class_type: 'KSampler', inputs: { model: ['u1', 0], positive: ['u6', 0], negative: ['u6', 1], latent_image: ['ch', 0],
+           seed, steps: 1, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+    mg: { class_type: 'SeedVR2TemporalMerge', inputs: { latents: ['7', 0], temporal_overlap: ['ch', 1] } },
+    u8: { class_type: 'VAEDecodeTiled', inputs: { samples: ['mg', 0], vae: ['u2', 0], ...tiles } },
+    u9: { class_type: 'SeedVR2PostProcessing', inputs: { images: ['u8', 0], original_resized_images: ['u3', 0], color_correction_method: 'lab' } },
+    mv: { class_type: 'CreateVideo', inputs: { images: ['u9', 0], fps: ['gc', 2], audio: ['gc', 1] } },
+    '9': { class_type: 'SaveVideo', inputs: { video: ['mv', 0], filename_prefix: 'rv6_edit_up', format: 'mp4', 'format.codec': 'h264' } },
+  };
   return {
     u1: { class_type: 'UNETLoader', inputs: { unet_name: upModel(), weight_dtype: 'default' } },
     u2: { class_type: 'VAELoader', inputs: { vae_name: upscaler.vae } },
-    '5': { class_type: 'LoadImage', inputs: { image: (src.subfolder ? src.subfolder + '/' : '') + src.filename + ' [output]' } },
+    '5': { class_type: 'LoadImage', inputs: { image: name } },
     u3: { class_type: 'ImageScale', inputs: { image: ['5', 0], upscale_method: 'lanczos', width: w, height: h, crop: 'disabled' } },
     u4: { class_type: 'SeedVR2Preprocess', inputs: { resized_images: ['u3', 0] } },
     u5: { class_type: 'VAEEncodeTiled', inputs: { pixels: ['u4', 0], vae: ['u2', 0], ...tiles } },
@@ -1975,9 +2028,11 @@ function buildUpscaleWorkflow(src, w, h, seed) {
   };
 }
 $('upGo').onclick = async () => {
-  const src = outRef(), d = upDims();
-  if (!upscaler || !src || !d) return setStatus('Open a picture first (a result or one under Recent edits).', true);
-  if (d[2] < 1.05) return setStatus(`This picture is already ${d[3]}×${d[4]}: pick a bigger size.`, true);
+  const src = outRef(), d = upDims(), vid = upIsVid(), what = vid ? 'video' : 'picture';
+  if (!upscaler || !src || !d) return setStatus('Open a picture or video first (a result or one under Recent edits).', true);
+  if (d[2] < 1.05) return setStatus(`This ${what} is already ${d[3]}×${d[4]}: pick a bigger size.`, true);
+  if (vid && d[0] * d[1] * upFrames() / 1e6 > UP_VID_LIMIT)
+    return setStatus('This video is too long for that size: the VM would run out of memory. Pick a smaller size.', true);
   if ($('go').disabled) return setStatus('Wait for the current job to finish first.', true);
   $('go').disabled = $('upGo').disabled = true; stopRequested = false; currentJobs = [];
   $('stop').classList.remove('hidden');
@@ -1985,11 +2040,11 @@ $('upGo').onclick = async () => {
     setStatus('Connecting… Stay on this page for now.');
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Upscale again.');
     const r = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: buildUpscaleWorkflow(src, d[0], d[1], Math.floor(Math.random() * 2 ** 32)), client_id: clientId }) });
+      body: JSON.stringify({ prompt: buildUpscaleWorkflow(src, d[0], d[1], Math.floor(Math.random() * 2 ** 32), vid), client_id: clientId }) });
     if (!r.ok) throw new Error('ComfyUI rejected the upscale (' + r.status + '): ' + (await r.text()).slice(0, 600));
     const ids = [(await r.json()).prompt_id], t0 = Date.now();
     currentJobs = ids.slice();
-    jobNote = `Upscaled with SeedVR2${upModel() === upscaler.sharp ? ' Sharp' : ''} · ${d[3]}×${d[4]} → ${d[0]}×${d[1]}`;
+    jobNote = `Upscaled ${vid ? 'video ' : ''}with SeedVR2${upModel() === upscaler.sharp ? ' Sharp' : ''} · ${d[3]}×${d[4]} → ${d[0]}×${d[1]}`;
     store('pendingJob', JSON.stringify({ ids, t0, note: jobNote }));
     if (stopRequested) await cancelJob(ids[0]);
     await waitForJobs(ids, t0);

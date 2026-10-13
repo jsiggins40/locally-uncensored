@@ -293,6 +293,7 @@
       <option value="1440p-esr">1440p-esr · 1080p enhanced</option>
       <option value="4k-esr">4K-esr · 1080p enhanced to 4K</option>
     </select>
+    <div id="vidRefOnly">
     <label for="vidRatio">Shape</label>
     <select id="vidRatio">
       <option value="adaptive">Auto (like the main photo)</option>
@@ -301,6 +302,7 @@
     </select>
     <label>Tap to put a photo in the prompt</label>
     <div id="refChips" class="row" style="margin-top:4px"></div>
+    </div>
   </div>
   <div id="vidSpeedBox">
   <label>Speed</label>
@@ -507,7 +509,7 @@ function setMode(m) {
   const masked = m === 'mask', cloud = m === 'cloud', q = usesQwen(), inst = q, fx = fixMask();
   $('engineBox').classList.toggle('hidden', !(masked && fill && qwen));
   $('engChange').classList.toggle('on', masked && !fx); $('engFix').classList.toggle('on', fx);
-  $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus) || refVid()));
+  $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus) || refVid() || startVid()));
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud || fx || vid);
   for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr || vid);
@@ -862,7 +864,8 @@ $('qualBtn').onclick = () => { quality = true; store('quality', '1'); applySpeed
 // ---- Extra photos: Seedream takes up to 10 in total (picture 1 + 9 more);
 // Describe edit (Qwen-Image-Edit Plus) takes pictures 2 and 3
 const more = [];  // canvases, picture 2 onwards
-const maxMore = () => mode === 'cloud' || (mode === 'instruct' && q21Active()) || refVid() ? 9 : 2;
+const startVid = () => mode === 'video' && cloudVid() && vidKind !== 'ref';  // Seedance first frame: picture 2 = last frame
+const maxMore = () => mode === 'cloud' || (mode === 'instruct' && q21Active()) || refVid() ? 9 : startVid() ? 1 : 2;
 const hasSecond = () => more.length > 0;
 const usedMore = () => more.slice(0, maxMore());
 function renderMore() {
@@ -877,10 +880,12 @@ function renderMore() {
   });
   const left = maxMore() - more.length;
   $('addMore').classList.toggle('hidden', left <= 0);
-  $('addMoreText').textContent = maxMore() > 2
+  $('addMoreText').textContent = maxMore() === 1 ? '➕ Add a last frame (optional)' : maxMore() > 2
     ? (more.length ? `➕ Add more photos (up to ${left} more)` : '➕ Add more photos (up to 9, optional)')
     : more.length ? '➕ Add a 3rd photo (optional)' : '➕ Add a 2nd or 3rd photo (optional)';
-  $('moreHint').textContent = more.length > maxMore()
+  $('moreHint').textContent = startVid()
+    ? 'Optional: the video moves from your photo to picture 2 (the last frame)' + (more.length > 1 ? '; the others are only used in 👥 reference mode.' : '. Leave it out to let Seedance decide the ending.')
+    : more.length > maxMore()
     ? 'This edit model uses pictures 2 and 3 only. Qwen 2.1 or ☁️ Seedream use all of them.'
     : refVid() ? 'People, clothes, places or objects for the video. In the prompt the main photo is @Image1, these are @Image2, @Image3… (tap the buttons below).'
     : maxMore() > 2
@@ -1080,8 +1085,9 @@ function applyVideo() {
   const cv = cloudVid(), ref = cv && vidKind === 'ref';
   $('vidKindBox').classList.toggle('hidden', !cv);
   $('vidKindRef').classList.toggle('on', ref); $('vidKindStart').classList.toggle('on', cv && !ref);
-  $('vidResBox').classList.toggle('hidden', ref); $('vidRefBox').classList.toggle('hidden', !ref);
-  if (mode === 'video') { $('secondBox').classList.toggle('hidden', !ref); renderMore(); }
+  // Both Seedance kinds take the full resolution list; shape and @Image only apply to reference
+  $('vidResBox').classList.toggle('hidden', cv); $('vidRefBox').classList.toggle('hidden', !cv); $('vidRefOnly').classList.toggle('hidden', !ref);
+  if (mode === 'video') { $('secondBox').classList.toggle('hidden', !cv); renderMore(); }
   if (ref) renderRefChips();
   $('vidEngineBox').classList.toggle('hidden', !(cloudCfg.configured && video));
   $('vidLocal').classList.toggle('on', !cv); $('vidCloud').classList.toggle('on', cv);
@@ -1096,8 +1102,9 @@ function applyVideo() {
     'Seedance 2.5 makes a new scene with the people and things in your photos (up to 10 here). Say who does what with @Image1 (the main photo), @Image2…, ' +
     'e.g. "@Image1 walks into the café from @Image2 and sits down". Native 1080p has the most real detail; -sr/-esr make a smaller video and upscale it. ' +
     'Higher resolutions and longer videos cost more (prices on Atlas\'s model page). Paid per video, ByteDance\'s content rules apply; only use photos of people who agreed.');
-  if (cv) return void ($('vidHint').textContent = `${$('vidLen').value} s at ${vidRes}p${vidSound ? ' with sound' : ''}, made by ByteDance's Seedance 2.5 on Atlas Cloud ` +
-    '(paid per video, usually a few minutes; ByteDance\'s content rules apply). Strong motion and physics; keeps the person from the photo.');
+  if (cv) return void ($('vidHint').textContent = `${$('vidLen').value} s · ${$('vidResRef').value}${vidSound ? ' · with sound' : ''}, ` +
+    'starting from your photo (same shape)' + (usedMore().length ? ' and ending on picture 2' : '') + '. Made by ByteDance\'s Seedance 2.5 on Atlas Cloud ' +
+    '(paid per video, usually a few minutes; higher resolutions cost more; ByteDance\'s content rules apply). Strong motion and physics; keeps the person from the photo.');
   const n = vidClips(), [w, h] = photoIn ? vidDims() : [0, 0];
   // Rough H200 timings per 5 s clip (first run adds ~3 min to load the models)
   const per = (vidRes === '720' ? 2.2 : 1) * (vidQuality ? 2 : 1);
@@ -1675,13 +1682,13 @@ async function cloudVideoGo() {
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
     setStatus('Sending to the VM… Stay on this page for now.');
     const ts = Date.now(), image = await upload(await toJpeg(full), `rv6m_${ts}_img.jpg`), images = [image];
-    if (ref) for (const [i, c] of usedMore().entries()) images.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
+    for (const [i, c] of usedMore().entries()) images.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
     const r = await fetch('/rv6m/cloud/video', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(ref
         ? { kind: 'reference', images, prompt: $('prompt').value.trim(), duration: +$('vidLen').value,
             resolution: $('vidResRef').value, ratio: $('vidRatio').value, audio: vidSound }
-        : { image, prompt: $('prompt').value.trim(), duration: +$('vidLen').value,
-            resolution: vidRes === '720' ? '720p' : '480p', audio: vidSound }) });
+        : { kind: 'start', images, prompt: $('prompt').value.trim(), duration: +$('vidLen').value,
+            resolution: $('vidResRef').value, audio: vidSound }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'The VM refused the cloud video (' + r.status + ')');
     const t0 = Date.now();
@@ -2035,10 +2042,12 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden' && workTimer) saveWork();
 });
 async function restoreWork() {
-  const ph = await IDB.get('photo');
-  if (!ph || !ph.photo || photoIn) return false;
+  // Set before the first await: the start-up model check can switch modes (which saves the
+  // extra-photo list) while IndexedDB is still being read, and must not save the empty list
   restoring = true;
   try {
+    const ph = await IDB.get('photo');
+    if (!ph || !ph.photo || photoIn) return false;
     const url = URL.createObjectURL(ph.photo);
     try { await loadIntoCanvas(url); } finally { URL.revokeObjectURL(url); }
     mainOrig = ph.orig || null;

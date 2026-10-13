@@ -285,14 +285,15 @@ def _atlas_job(endpoint, key, body, sent, limit):
 
 
 # ☁️ Seedance on Atlas (the page's 🎬 Video, "Seedance" engine), two kinds:
-#   image-to-video: picture 1 is the first frame
+#   image-to-video: picture 1 is the first frame, picture 2 (optional) the last;
+#     the video keeps the photo's shape
 #   reference-to-video: up to 30 photos as references (people, clothes, places),
 #     cited in the prompt as @Image1, @Image2...; a new shot, any shape
 # 4-30 s, optional sound. Model ids can be changed with RV6M_CLOUD_VIDEO_MODEL
 # and RV6M_CLOUD_REF_MODEL.
 CLOUD_VIDEO_MODEL = os.environ.get("RV6M_CLOUD_VIDEO_MODEL", "bytedance/seedance-2.5/image-to-video")
 CLOUD_REF_MODEL = os.environ.get("RV6M_CLOUD_REF_MODEL", "bytedance/seedance-2.5/reference-to-video")
-# From Atlas's reference-to-video API reference. 480p/720p/1080p are made
+# From Atlas's Seedance 2.5 API references (the same for both kinds). 480p/720p/1080p are made
 # natively; -sr (FlashVSR) and -esr (Atlas Video Enhance) make the nearest
 # native size and then upscale it (4k-esr: from 1080p to 3840x2160 at 16:9).
 REF_RESOLUTIONS = ["480p", "720p", "720p-sr", "720p-esr", "1080p", "1080p-sr", "1080p-esr", "1080p-esr & 60fps",
@@ -301,7 +302,7 @@ REF_RATIOS = ["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]
 
 
 def _ref_image(path):
-    """A photo as Atlas takes it: sides 300-6000 px, shape (W/H) 0.4-2.5, under 30 MB."""
+    """A photo as Seedance takes it (both kinds): sides 300-6000 px, shape (W/H) 0.4-2.5, under 30 MB."""
     import base64
     from PIL import Image
     with Image.open(path) as im:
@@ -328,16 +329,18 @@ def _cloud_video(names, prompt, model, duration, resolution, audio, ratio="adapt
     if not key:
         raise RuntimeError("No Atlas API key on the VM (~/.atlascloud_key)")
     ref = "reference" in model
-    # The size/shape limits are from the reference-to-video docs; image-to-video gets the photo as before
-    images = [_ref_image(folder_paths.get_annotated_filepath(n)) if ref else _data_uri(folder_paths.get_annotated_filepath(n)) for n in names]
+    images = [_ref_image(folder_paths.get_annotated_filepath(n)) for n in names]
     body = {"model": model, "prompt": prompt, "duration": int(duration), "resolution": resolution,
             "generate_audio": bool(audio), "watermark": False}
     if ref:
         # omni_reference_task_type left unset (= auto), as Atlas recommends
         body.update(reference_images=images, ratio=ratio, output_format="mp4")
     else:
-        body.update(image=images[0], ratio="adaptive")
-    sent = {k: v for k, v in body.items() if k not in ("image", "reference_images")}
+        # image-to-video only takes "adaptive": the video keeps the photo's shape
+        body.update(image=images[0], ratio="adaptive", output_format="mp4")
+        if len(images) > 1:
+            body["last_image"] = images[1]
+    sent = {k: v for k, v in body.items() if k not in ("image", "last_image", "reference_images")}
     sent["images"] = [f"{n} ({len(i) * 3 // 4 // 1024} KB)" for n, i in zip(names, images)]
     # Upscaled (-sr/-esr) and long videos can take a while
     data = _atlas_job("/generateVideo", key, body, sent, 2400)
@@ -393,19 +396,19 @@ async def rv6m_cloud_video(request):
     import uuid
     body = await request.json()
     ref = body.get("kind") == "reference"
-    names = [n for n in (body.get("images") or [body.get("image")]) if n][:30 if ref else 1]
+    names = [n for n in (body.get("images") or [body.get("image")]) if n][:30 if ref else 2]  # first (+ last) frame
     if not names or not str(body.get("prompt", "")).strip():
         return web.json_response({"error": "need a photo and a prompt"}, status=400)
     if not _cloud_key():
         return web.json_response({"error": "No Atlas API key on the VM (~/.atlascloud_key)"}, status=400)
     res = str(body.get("resolution") or "720p")
-    if ref and res not in REF_RESOLUTIONS:
+    if res not in REF_RESOLUTIONS:
         return web.json_response({"error": f"Seedance doesn't make {res} videos"}, status=400)
     ratio = str(body.get("ratio") or "adaptive")
     if ratio not in REF_RATIOS:
         ratio = "adaptive"
     duration = int(body.get("duration") or 5)
-    duration = -1 if ref and duration == -1 else min(30, max(4, duration))
+    duration = -1 if duration == -1 else min(30, max(4, duration))
     jid = uuid.uuid4().hex
     _jobs[jid] = {"status": "running"}
     asyncio.ensure_future(_run_cloud(jid, _cloud_video, names, body["prompt"],

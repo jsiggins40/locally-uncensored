@@ -299,6 +299,18 @@
   <div id="variants"></div>
   <p class="hint" id="saveHint">Long-press the image to save it to Photos.</p>
   <button id="again" style="width:100%">Keep editing this result</button>
+  <div id="upBox" class="hidden" style="margin-top:10px">
+    <div class="row" style="margin-top:0">
+      <select id="upSize" style="flex:1">
+        <option value="2x">2× size</option>
+        <option value="3840" selected>4K (3840 px long side)</option>
+        <option value="5760">6K (5760 px)</option>
+        <option value="7680">8K (7680 px)</option>
+      </select>
+      <button id="upGo" style="flex:1">⬆️ Upscale</button>
+    </div>
+    <div class="hint" id="upHint" style="margin-top:6px"></div>
+  </div>
 </div>
 
 <div id="recent" class="panel hidden">
@@ -420,7 +432,7 @@ let create = null;
 // Qwen-Image 2.1 (Sept 2026, 7B): one model for Create and editing (up to 10
 // photos), much less censored than 2512. Optional Noct Q uncensored fine-tune
 // and Heretic (abliterated) text encoder. Added by add-qwen21.sh.
-let video = null;
+let video = null, upscaler = null, jobNote = '';
 let q21 = null, createModel = recall('createModel') || 'q21', q21Pick = recall('q21Pick') || 'noct';
 const q21Active = () => !!q21 && (mode === 'create' ? (createModel === 'q21' || !create)
   : (mode === 'instruct' || qwenMask()) && (editModel === 'q21' || !qwen));
@@ -543,9 +555,10 @@ async function info(node) {
   try { const r = await fetch('/api/object_info/' + node); return r.ok ? await r.json() : {}; } catch (e) { return {}; }
 }
 (async () => {
-  const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache, svi] = await Promise.all(
+  const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache, svi, svr] = await Promise.all(
     ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit',
-     'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader', 'TextEncodeQwenImage21', 'QwenImage21Cache', 'WanImageToVideoSVIPro'].map(info));
+     'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader', 'TextEncodeQwenImage21', 'QwenImage21Cache', 'WanImageToVideoSVIPro',
+     'SeedVR2Conditioning'].map(info));
   const f = {
     unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /fill/i.test(n) && /flux|onereward/i.test(n))
             .sort((a, b) => /onereward/i.test(a) - /onereward/i.test(b) || /fp8/i.test(b) - /fp8/i.test(a)).pop(),
@@ -618,6 +631,12 @@ async function info(node) {
     sviL: loras.filter(n => /svi.*low.*pro/i.test(n)).sort().pop(),
   };
   if (svi.WanImageToVideoSVIPro && Object.values(v).every(Boolean)) { video = v; $('modeVideo').classList.remove('hidden'); }
+  // ⬆️ Upscale: SeedVR2 (add-upscaler.sh), built into ComfyUI; the 7B over the 3B, full precision over int8
+  const u = {
+    unet: units.filter(n => /seedvr2/i.test(n)).sort((a, b) => /7b/i.test(a) - /7b/i.test(b) || /int8|fp8/i.test(b) - /int8|fp8/i.test(a)).pop(),
+    vae: optionsOf(vae, 'VAELoader', 'vae_name').filter(n => /seedvr2/i.test(n)).sort().pop(),
+  };
+  if (svr.SeedVR2Conditioning && u.unet && u.vae) { upscaler = u; showUpBox(); }
   if ((t.unet || t.noct) && t.clip && t.vae && q21enc.TextEncodeQwenImage21) {
     q21 = t;
     $('modeCreate').classList.remove('hidden');
@@ -1642,13 +1661,23 @@ function addCloudRecent(filename) {
   store('cloudRecent', JSON.stringify(list.slice(0, 24)));
 }
 
-const viewUrl = o => `/api/view?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}&type=${o.type || 'output'}`;
+const isUp = o => /^rv6_edit_up_/.test(o.filename || '') && (o.type || 'output') === 'output';
+const pngUrl = o => `/api/view?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}&type=${o.type || 'output'}`;
+// Upscaled pictures are 30-100 MB PNGs: the page shows them as a JPEG the VM makes (a few MB)
+const viewUrl = (o, max) => isUp(o) ? `/rv6m/jpeg?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}` +
+  (max ? '&max=' + max : '') : pngUrl(o);
 const isVideo = o => /\.(mp4|webm|mkv|mov)$/i.test(o.filename || '');
 function showResult(o, variants = []) {
   const v = isVideo(o);
   $('out').classList.toggle('hidden', v); $('outVideo').classList.toggle('hidden', !v);
   $('again').classList.toggle('hidden', v);
   $('saveHint').textContent = v ? 'Tap play. To save it: tap the share button in the player (or ⋯) → Save Video.' : 'Long-press the image to save it to Photos.';
+  if (isUp(o)) {
+    $('saveHint').textContent = 'Long-press the image to save it to Photos (JPEG, top quality). ';
+    const a = document.createElement('a'); a.href = pngUrl(o); a.target = '_blank'; a.textContent = 'Lossless PNG (big file)';
+    $('saveHint').append(a);
+  }
+  showUpBox(v);
   if (v) { $('outVideo').src = viewUrl(o); $('variants').innerHTML = ''; $('result').classList.remove('hidden'); return; }
   $('outVideo').removeAttribute('src');
   $('out').src = viewUrl(o);
@@ -1656,7 +1685,7 @@ function showResult(o, variants = []) {
   if (variants.length > 1) for (const v of variants) {
     const im = document.createElement('img'); im.src = viewUrl(v);
     im.classList.toggle('on', viewUrl(v) === viewUrl(o));
-    im.onclick = () => { $('out').src = im.src; for (const x of box.children) x.classList.toggle('on', x === im); };
+    im.onclick = () => { $('out').src = im.src; for (const x of box.children) x.classList.toggle('on', x === im); upHint(); };
     box.append(im);
   }
   $('result').classList.remove('hidden');
@@ -1697,7 +1726,7 @@ async function waitForJobs(ids, t0) {
       }
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
-        const what = mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
+        const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
           : q21Active() ? `Qwen 2.1${q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
             (mode === 'create' ? createDims().join('×') : `${base.width}×${base.height}`) + (ablActive() ? ' · 🔓 encoder' : '') +
             (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')
@@ -1734,10 +1763,11 @@ async function resumePending() {
   const ids = pj && (pj.ids || (pj.id ? [pj.id] : []));
   if (!ids || !ids.length || Date.now() - pj.t0 > 2 * 3600 * 1000 * ids.length) return;
   $('go').disabled = true; currentJobs = ids.slice(); $('stop').classList.remove('hidden');
-  setStatus('Picking up your last edit…');
+  jobNote = pj.note || '';
+  setStatus(jobNote ? 'Picking up your upscale…' : 'Picking up your last edit…');
   try { await waitForJobs(ids, pj.t0); }
   catch (err) { setStatus(err.message, true); }
-  finally { $('go').disabled = false; currentJobs = []; $('stop').classList.add('hidden'); }
+  finally { $('go').disabled = false; currentJobs = []; jobNote = ''; $('stop').classList.add('hidden'); }
 }
 
 // Recent results, newest first, so nothing is lost if the page is closed mid-edit
@@ -1748,14 +1778,14 @@ async function loadRecent() {
       .filter(j => j.status && j.status.status_str === 'success')
       .map(j => ({ t: (j.status.messages || []).map(m => m[1] && m[1].timestamp).filter(Boolean).pop() || 0,
                    img: (j.outputs && j.outputs['9'] && j.outputs['9'].images || [])[0] }))
-      .filter(x => x.img && x.img.type === 'output' && /^rv6_edit_\d/.test(x.img.filename))
+      .filter(x => x.img && x.img.type === 'output' && /^rv6_edit_(up_)?\d/.test(x.img.filename))
       .map(x => ({ ...x, t: x.t / 1000 }))  // ComfyUI timestamps are in ms
       .concat(cloudRecent().map(c => ({ t: c.t, img: { filename: c.f, subfolder: '', type: 'output' } })))
       .sort((a, b) => b.t - a.t).slice(0, 12);
     const box = $('recentList'); box.innerHTML = '';
     for (const x of items) {
       const vid = isVideo(x.img), im = document.createElement(vid ? 'video' : 'img');
-      im.src = `/api/view?filename=${encodeURIComponent(x.img.filename)}&subfolder=${encodeURIComponent(x.img.subfolder || '')}&type=output` + (vid ? '#t=0.5' : '');
+      im.src = viewUrl({ ...x.img, type: 'output' }, 600) + (vid ? '#t=0.5' : '');
       if (vid) { im.muted = true; im.playsInline = true; im.preload = 'metadata'; }
       im.onclick = () => { showResult(x.img); $('result').scrollIntoView({ behavior: 'smooth' }); };
       box.append(im);
@@ -1791,6 +1821,83 @@ $('again').onclick = async () => {
   $('result').classList.add('hidden');
   window.scrollTo({ top: 0, behavior: 'smooth' });
   setStatus('Paint the next area to change.');
+};
+
+// ---- ⬆️ Upscale (SeedVR2): makes the picture on screen 2× or 4K-8K with real
+// added detail. One step of the SeedVR2 7B model; the picture is read straight
+// from the VM's output folder, so nothing is uploaded.
+function showUpBox(isVid) {
+  if (isVid === undefined) isVid = !$('outVideo').classList.contains('hidden');
+  $('upBox').classList.toggle('hidden', !upscaler || isVid);
+  upHint();
+}
+function outRef() {
+  try {
+    const u = new URL($('out').src, location.href);
+    if (!/\/api\/view$|\/rv6m\/jpeg$/.test(u.pathname) || (u.searchParams.get('type') || 'output') !== 'output') return null;
+    return { filename: u.searchParams.get('filename'), subfolder: u.searchParams.get('subfolder') || '' };
+  } catch (e) { return null; }
+}
+function upDims() {
+  const w = $('out').naturalWidth, h = $('out').naturalHeight, v = $('upSize').value;
+  if (!w || !h) return null;
+  const s = Math.min(8, v === '2x' ? 2 : +v / Math.max(w, h));  // the resize node stops at 8×
+  return [Math.round(w * s / 2) * 2, Math.round(h * s / 2) * 2, s, w, h];
+}
+function upHint() {
+  const d = upDims();
+  $('upHint').textContent = !d ? 'Adds real detail (SeedVR2) and keeps the picture the same.'
+    : d[2] < 1.05 ? `This picture is already ${d[3]}×${d[4]}: pick a bigger size.`
+    : `${d[3]}×${d[4]} → ${d[0]}×${d[1]} (${(d[0] * d[1] / 1e6).toFixed(0)} MP). Adds real detail and keeps the picture the same.` +
+      (d[2] > 4.05 ? ' More than 4× invents a lot of the detail; 2-4× looks most natural.' : '');
+}
+$('out').addEventListener('load', upHint);
+$('upSize').onchange = () => { store('upSize', $('upSize').value); upHint(); };
+if (recall('upSize')) $('upSize').value = recall('upSize');
+function buildUpscaleWorkflow(src, w, h, seed) {
+  const tiles = { tile_size: 512, overlap: 128, temporal_size: 4096, temporal_overlap: 8 };  // as in ComfyUI's SeedVR2 template
+  return {
+    u1: { class_type: 'UNETLoader', inputs: { unet_name: upscaler.unet, weight_dtype: 'default' } },
+    u2: { class_type: 'VAELoader', inputs: { vae_name: upscaler.vae } },
+    '5': { class_type: 'LoadImage', inputs: { image: (src.subfolder ? src.subfolder + '/' : '') + src.filename + ' [output]' } },
+    u3: { class_type: 'ImageScale', inputs: { image: ['5', 0], upscale_method: 'lanczos', width: w, height: h, crop: 'disabled' } },
+    u4: { class_type: 'SeedVR2Preprocess', inputs: { resized_images: ['u3', 0] } },
+    u5: { class_type: 'VAEEncodeTiled', inputs: { pixels: ['u4', 0], vae: ['u2', 0], ...tiles } },
+    u6: { class_type: 'SeedVR2Conditioning', inputs: { model: ['u1', 0], vae_conditioning: ['u5', 0] } },
+    '7': { class_type: 'KSampler', inputs: { model: ['u1', 0], positive: ['u6', 0], negative: ['u6', 1], latent_image: ['u5', 0],
+           seed, steps: 1, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+    u8: { class_type: 'VAEDecodeTiled', inputs: { samples: ['7', 0], vae: ['u2', 0], ...tiles } },
+    // lab: matches the colours to the original so the upscale doesn't shift them
+    u9: { class_type: 'SeedVR2PostProcessing', inputs: { images: ['u8', 0], original_resized_images: ['u3', 0], color_correction_method: 'lab' } },
+    '9': { class_type: 'SaveImage', inputs: { images: ['u9', 0], filename_prefix: 'rv6_edit_up' } },
+  };
+}
+$('upGo').onclick = async () => {
+  const src = outRef(), d = upDims();
+  if (!upscaler || !src || !d) return setStatus('Open a picture first (a result or one under Recent edits).', true);
+  if (d[2] < 1.05) return setStatus(`This picture is already ${d[3]}×${d[4]}: pick a bigger size.`, true);
+  if ($('go').disabled) return setStatus('Wait for the current job to finish first.', true);
+  $('go').disabled = $('upGo').disabled = true; stopRequested = false; currentJobs = [];
+  $('stop').classList.remove('hidden');
+  try {
+    setStatus('Connecting… Stay on this page for now.');
+    if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Upscale again.');
+    const r = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: buildUpscaleWorkflow(src, d[0], d[1], Math.floor(Math.random() * 2 ** 32)), client_id: clientId }) });
+    if (!r.ok) throw new Error('ComfyUI rejected the upscale (' + r.status + '): ' + (await r.text()).slice(0, 600));
+    const ids = [(await r.json()).prompt_id], t0 = Date.now();
+    currentJobs = ids.slice();
+    jobNote = `Upscaled with SeedVR2 · ${d[3]}×${d[4]} → ${d[0]}×${d[1]}`;
+    store('pendingJob', JSON.stringify({ ids, t0, note: jobNote }));
+    if (stopRequested) await cancelJob(ids[0]);
+    await waitForJobs(ids, t0);
+  } catch (err) {
+    setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
+      ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Upscale again.' : err.message, true);
+  } finally {
+    $('go').disabled = $('upGo').disabled = false; currentJobs = []; jobNote = '';
+    $('stop').classList.add('hidden');
+  }
 };
 
 // ---- Remember my work: iOS throws away background tabs, so the photo, extra

@@ -84,6 +84,41 @@ async def rv6m_segment(request):
         return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
 
 
+# Upscaled pictures are 4K-8K PNGs (30-100 MB): too slow for a phone over
+# Tailscale. GET /rv6m/jpeg?filename=...&subfolder=... gives the same output
+# picture as a high-quality JPEG (a few MB), made once and kept in temp.
+# &max=600 gives a small one for the Recent edits thumbnails.
+def _jpeg(src, size):
+    from PIL import Image
+    st = os.stat(src)
+    out = os.path.join(folder_paths.get_temp_directory(), "rv6m_jpeg",
+                       f"{os.path.basename(src)}.{int(st.st_mtime)}.{st.st_size}.{size}.jpg")
+    if not os.path.exists(out):
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with Image.open(src) as im:
+            im = im.convert("RGB")
+            if size:
+                im.thumbnail((size, size), Image.LANCZOS)
+            im.save(out + ".part", "JPEG", quality=95 if not size else 85, subsampling=0 if not size else 2)
+        os.replace(out + ".part", out)
+    return out
+
+
+@PromptServer.instance.routes.get("/rv6m/jpeg")
+async def rv6m_jpeg(request):
+    root = os.path.realpath(folder_paths.get_output_directory())
+    src = os.path.realpath(os.path.join(root, request.query.get("subfolder", ""), request.query.get("filename", "")))
+    if not src.startswith(root + os.sep) or not os.path.isfile(src):
+        return web.json_response({"error": "no such output picture"}, status=404)
+    try:
+        size = max(64, min(4096, int(request.query["max"]))) if request.query.get("max", "").isdigit() else 0
+        out = await asyncio.get_running_loop().run_in_executor(None, _jpeg, src, size)
+    except Exception as e:
+        logging.exception("[rv6_mobile] jpeg failed")
+        return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+    return web.FileResponse(out, headers={"Content-Type": "image/jpeg", "Cache-Control": "max-age=86400"})
+
+
 # --- Seedream (Atlas Cloud) -------------------------------------------------
 # POST /rv6m/cloud sends the photos in ComfyUI's input folder plus the prompt
 # to Atlas Cloud, waits for the result and saves it in the output folder so it

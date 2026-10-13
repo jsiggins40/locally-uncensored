@@ -209,6 +209,10 @@ def _pro_size(size):
     return min(PRO_SIZES, key=lambda p: abs(math.log(int(p.split("*")[0]) / int(p.split("*")[1])) - r))
 
 
+SEEDREAM_THINKING = os.environ.get("RV6M_SEEDREAM_THINKING", "disabled")      # enabled | disabled
+SEEDREAM_OPTIMIZE = os.environ.get("RV6M_SEEDREAM_OPTIMIZE", "fast")          # standard | fast
+
+
 def _cloud(names, prompt, size, model):
     import base64
     import time
@@ -226,9 +230,11 @@ def _cloud(names, prompt, size, model):
     if "pro" in model.lower():
         # Seedream 5.0 Pro (Atlas's API reference): size must be one of its presets
         # (there is no "resolution" field; anything else falls back to a square
-        # 2048*2048). Pick the 2K preset closest to picture 1's shape, and ask for
-        # the same prompt optimisation the playground uses.
-        body.update(size=_pro_size(size), output_format="jpeg", thinking="enabled", prompt_optimization_mode="standard")
+        # 2048*2048). Pick the 2K preset closest to picture 1's shape. Prompt
+        # rewriting: thinking off and the "fast" mode (your choice; the playground
+        # uses enabled + standard). Change with RV6M_SEEDREAM_THINKING / _OPTIMIZE.
+        body.update(size=_pro_size(size), output_format="jpeg", thinking=SEEDREAM_THINKING,
+                    prompt_optimization_mode=SEEDREAM_OPTIMIZE)
     else:
         body["size"] = size
     sent = {k: v for k, v in body.items() if k != "images"}

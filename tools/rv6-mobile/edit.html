@@ -395,7 +395,11 @@
   </div>
 </div>
 
+<div class="hint" id="build" style="text-align:center;margin:18px 0 8px;opacity:.6"></div>
 <script>
+// Bump on every change: the page compares it with the copy on the VM and reloads
+// itself when Safari is still showing an older one
+const PAGE_BUILD = '2026-10-14b';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -2373,6 +2377,25 @@ $('ntfCopy').onclick = async () => {
   try { await navigator.clipboard.writeText($('ntfTopic').value); $('ntfMsg').textContent = 'Copied.'; }
   catch (e) { $('ntfTopic').select(); $('ntfMsg').textContent = 'Press and hold the topic to copy it.'; }
 };
+
+// ---- Always the newest page: Safari can keep showing an old copy after
+// edit-restart put a new one on the VM. Compare builds and reload if they differ.
+$('build').textContent = 'Page version ' + PAGE_BUILD;
+async function checkBuild() {
+  try {
+    if ($('go').disabled) return;  // not in the middle of sending something
+    const t = await (await fetch('./edit.html?check=' + Date.now(), { cache: 'no-store' })).text();
+    const vmBuild = (t.match(/const PAGE_BUILD = '([^']+)'/) || [])[1];
+    if (!vmBuild || vmBuild === PAGE_BUILD) return;
+    let tried = null; try { tried = sessionStorage.getItem('rv6mReloadedFor'); } catch (e) {}
+    if (tried === vmBuild) { $('build').textContent += ` (the VM has ${vmBuild}: close this tab and open the link again)`; return; }
+    try { sessionStorage.setItem('rv6mReloadedFor', vmBuild); } catch (e) {}
+    store('workPrompt', $('prompt').value);
+    location.replace(location.pathname + '?v=' + encodeURIComponent(vmBuild));  // a new URL, so not from Safari's cache
+  } catch (e) {}
+}
+setTimeout(checkBuild, 1500);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') setTimeout(checkBuild, 1500); });
 
 workReady = true;
 restoreWork().then(ok => { if (ok && !$('status').textContent) setStatus('Picked up where you left off.'); })

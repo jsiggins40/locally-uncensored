@@ -399,7 +399,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-14b';
+const PAGE_BUILD = '2026-10-14c';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -1477,7 +1477,7 @@ async function runSegment() {
   try {
     if (!baseUpload) {
       setStatus('Selecting… (the first selection loads the model, can take ~30s)');
-      baseUpload = await upload(await toBlob(base), `rv6m_${Date.now()}_sel.png`);
+      baseUpload = await upload(await toPhoto(base), `rv6m_${Date.now()}_sel.jpg`);
     } else setStatus('Selecting…');
     const r = await fetch('/rv6m/segment', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image: baseUpload, points: selPoints.map(p => [Math.round(p.x), Math.round(p.y)]),
@@ -1537,6 +1537,9 @@ function maskIsEmpty() {
   return true;
 }
 function toBlob(canvas) { return new Promise(r => canvas.toBlob(r, 'image/png')); }
+// Photos go up as high-quality JPEG: about a fifth of a PNG, which matters on a
+// slow connection (masks stay PNG, they must be exact)
+function toPhoto(canvas) { return new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95)); }
 async function exportMask() {
   // White-on-black in the red channel; LoadImageMask reads channel "red"
   const c = document.createElement('canvas'); c.width = mask.width; c.height = mask.height;
@@ -1582,21 +1585,39 @@ function ensureServer() {
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') ensureServer(); });
 window.addEventListener('pageshow', () => ensureServer());
 
+// Uploads show their progress on the status line, so a slow connection looks
+// slow rather than stuck; one that makes no progress for 60 s is retried.
+function uploadOnce(fd, size, label) {
+  return new Promise((ok, bad) => {
+    const x = new XMLHttpRequest();
+    let last = Date.now();
+    const stall = setInterval(() => { if (Date.now() - last > 60000) x.abort(); }, 5000);
+    x.open('POST', '/api/upload/image');
+    x.upload.onprogress = e => {
+      last = Date.now();
+      if (e.lengthComputable && size > 300e3)
+        setStatus(`${label} · ${Math.round(100 * e.loaded / e.total)}% of ${(e.total / 1e6).toFixed(1)} MB`);
+    };
+    x.onload = () => { clearInterval(stall); ok({ ok: x.status >= 200 && x.status < 300, status: x.status, text: x.responseText }); };
+    x.onerror = () => { clearInterval(stall); bad(new Error('Load failed')); };
+    x.onabort = () => { clearInterval(stall); bad(new Error('The upload stopped moving for a minute')); };
+    x.send(fd);
+  });
+}
 async function upload(blob, name) {
   const fd = new FormData();
   fd.append('image', blob, name); fd.append('type', 'input'); fd.append('overwrite', 'true');
+  const label = ($('status').textContent.split(' · ')[0] || 'Sending to the VM…').split('\n')[0];
   let r;
   for (let attempt = 0; ; attempt++) {  // uploads overwrite, so retrying is safe
-    const ac = new AbortController(), t = setTimeout(() => ac.abort(), 180000);
-    try { r = await fetch('/api/upload/image', { method: 'POST', body: fd, signal: ac.signal }); clearTimeout(t); break; }
+    try { r = await uploadOnce(fd, blob.size, label); break; }
     catch (e) {
-      clearTimeout(t);
       if (attempt >= 2 || !(await ensureServer()))
-        throw e.name === 'AbortError' ? new Error('Uploading the photo took over 3 minutes. Check the connection, then tap Generate again.') : e;
+        throw /stopped moving/.test(e.message) ? new Error('The upload stopped moving. The connection to the VM is too slow or dropped: check the Tailscale app, then tap Generate again.') : e;
     }
   }
-  if (!r.ok) throw new Error('Upload failed (' + r.status + '): ' + (await r.text()).slice(0, 300));
-  const j = await r.json();
+  if (!r.ok) throw new Error('Upload failed (' + r.status + '): ' + r.text.slice(0, 300));
+  const j = JSON.parse(r.text);
   return j.subfolder ? j.subfolder + '/' + j.name : j.name;
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -1618,7 +1639,7 @@ $('go').onclick = async () => {
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
     setStatus('Sending to the VM… Stay on this page for now.');
     const imgName = mode === 'create' ? null : mode === 'video' ? await upload(await toJpeg(full), `rv6m_${ts}_img.jpg`)
-      : await upload(await toBlob(base), `rv6m_${ts}_img.png`);
+      : await upload(await toPhoto(base), `rv6m_${ts}_img.jpg`);
     const seed = Math.floor(Math.random() * 2 ** 32);
     let p = JSON.parse(JSON.stringify(workflow));
     let model = $('model').value;
@@ -2279,7 +2300,7 @@ var restoring = false, workTimer = null, workReady = false;  // var: renderMore 
 async function savePhoto() {
   if (!workReady || restoring) return;
   const photo = await new Promise(r => full.toBlob(r, 'image/jpeg', 0.95));
-  await IDB.set('photo', { photo, orig: mainOrig || null, t: Date.now() });
+  await IDB.set('photo', { photo, orig: mainOrig && mainOrig.size <= 4e6 ? mainOrig : null, t: Date.now() });
   await IDB.set('mask', null);
 }
 // The extra/batch lists are redrawn often (mode switches, settings); only save

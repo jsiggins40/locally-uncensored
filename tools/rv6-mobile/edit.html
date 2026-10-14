@@ -1583,8 +1583,13 @@ async function upload(blob, name) {
   fd.append('image', blob, name); fd.append('type', 'input'); fd.append('overwrite', 'true');
   let r;
   for (let attempt = 0; ; attempt++) {  // uploads overwrite, so retrying is safe
-    try { r = await fetch('/api/upload/image', { method: 'POST', body: fd }); break; }
-    catch (e) { if (attempt >= 2 || !(await ensureServer())) throw e; }
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), 180000);
+    try { r = await fetch('/api/upload/image', { method: 'POST', body: fd, signal: ac.signal }); clearTimeout(t); break; }
+    catch (e) {
+      clearTimeout(t);
+      if (attempt >= 2 || !(await ensureServer()))
+        throw e.name === 'AbortError' ? new Error('Uploading the photo took over 3 minutes. Check the connection, then tap Generate again.') : e;
+    }
   }
   if (!r.ok) throw new Error('Upload failed (' + r.status + '): ' + (await r.text()).slice(0, 300));
   const j = await r.json();
@@ -2209,8 +2214,19 @@ var IDB = (() => {
   }));
   // iPhone Lockdown Mode turns IndexedDB off (iOS 17+): then keep the same things
   // on the VM instead (see /rv6m/work in __init__.py). Blobs go up as files.
+  const vmBusy = {}, vmNext = {};
   const vm = {
-    async set(k, v) {
+    // One save per key at a time; while one runs, only the newest value waits.
+    // (Several saves of big photos at once would clog the phone's upload and
+    // hold up the real "Sending to the VM".)
+    set(k, v) {
+      if (vmBusy[k]) { vmNext[k] = { v }; return vmBusy[k]; }
+      const go = val => vm.send(k, val).finally(() => {
+        if (vmNext[k]) { const n = vmNext[k]; delete vmNext[k]; vmBusy[k] = go(n.v); } else delete vmBusy[k];
+      });
+      return (vmBusy[k] = go(v));
+    },
+    async send(k, v) {
       const fd = new FormData(), blobs = [];
       const enc = x => x instanceof Blob ? (blobs.push(x), { $blob: 'b' + (blobs.length - 1) })
         : Array.isArray(x) ? x.map(enc) : x && typeof x === 'object' ? Object.fromEntries(Object.entries(x).map(([a, b]) => [a, enc(b)])) : x;
@@ -2258,18 +2274,24 @@ var IDB = (() => {
 var restoring = false, workTimer = null, workReady = false;  // var: renderMore runs before this line at start-up
 async function savePhoto() {
   if (!workReady || restoring) return;
-  const photo = await toBlob(full);
+  const photo = await new Promise(r => full.toBlob(r, 'image/jpeg', 0.95));
   await IDB.set('photo', { photo, orig: mainOrig || null, t: Date.now() });
   await IDB.set('mask', null);
 }
-function saveMore() {
+// The extra/batch lists are redrawn often (mode switches, settings); only save
+// them when the photos in them actually changed
+const fileId = new WeakMap(); let fileIds = 0;
+const listSig = list => list.map(c => c.orig ? (fileId.get(c.orig) || (fileId.set(c.orig, ++fileIds), fileIds)) : 0).join(',');
+const savedSig = { more: '', batch: '' };  // empty lists at start-up aren't worth a save
+function saveList(key, list) {
   if (!workReady || restoring) return;
-  IDB.set('more', more.map(c => c.orig || null).filter(Boolean));
+  const sig = listSig(list);
+  if (savedSig[key] === sig) return;
+  savedSig[key] = sig;
+  IDB.set(key, list.map(c => c.orig || null).filter(Boolean));
 }
-function saveBatch() {
-  if (!workReady || restoring) return;
-  IDB.set('batch', batch.map(c => c.orig || null).filter(Boolean));
-}
+function saveMore() { saveList('more', more); }
+function saveBatch() { saveList('batch', batch); }
 async function saveWork() {
   clearTimeout(workTimer); workTimer = null;
   if (!workReady || restoring || !photoIn) return;
@@ -2301,10 +2323,12 @@ async function restoreWork() {
     for (const b of (await IDB.get('more')) || []) {
       try { const c = await readPhoto(b); c.orig = b; more.push(c); } catch (e) {}
     }
+    savedSig.more = listSig(more);
     renderMore();
     for (const b of (await IDB.get('batch')) || []) {
       try { const c = await readPhoto(b); c.orig = b; batch.push(c); } catch (e) {}
     }
+    savedSig.batch = listSig(batch);
     renderBatch();
     return true;
   } catch (e) {

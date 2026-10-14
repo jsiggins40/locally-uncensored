@@ -399,7 +399,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-14c';
+const PAGE_BUILD = '2026-10-14d';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -2239,7 +2239,7 @@ var IDB = (() => {
   }));
   // iPhone Lockdown Mode turns IndexedDB off (iOS 17+): then keep the same things
   // on the VM instead (see /rv6m/work in __init__.py). Blobs go up as files.
-  const vmBusy = {}, vmNext = {};
+  const vmBusy = {}, vmNext = {}, vmSaved = {};
   const vm = {
     // One save per key at a time; while one runs, only the newest value waits.
     // (Several saves of big photos at once would clog the phone's upload and
@@ -2257,10 +2257,16 @@ var IDB = (() => {
         : Array.isArray(x) ? x.map(enc) : x && typeof x === 'object' ? Object.fromEntries(Object.entries(x).map(([a, b]) => [a, enc(b)])) : x;
       fd.append('key', k); fd.append('meta', JSON.stringify(enc(v) ?? null));
       blobs.forEach((b, i) => fd.append('b' + i, b, 'b' + i));
+      // A failed save is shown under the page version, so it can't go unnoticed
+      const note = msg => {
+        vmSaved[k] = msg;
+        const b = document.getElementById('build');
+        if (b) b.textContent = `Page version ${PAGE_BUILD} · kept on the VM: ` + Object.entries(vmSaved).map(([a, m]) => `${a} ${m}`).join(' · ');
+      };
       try {
         const r = await fetch('/rv6m/work', { method: 'POST', body: fd });
-        if (!r.ok) console.warn('rv6m: saving ' + k + ' on the VM failed', r.status);
-      } catch (e) { console.warn('rv6m: saving ' + k + ' on the VM failed', e); }
+        note(r.ok ? '✓' : `⚠️ ${r.status} ${(await r.text()).slice(0, 120)}`);
+      } catch (e) { note(`⚠️ ${e && e.message || e}`); }
     },
     async get(k) {
       try {

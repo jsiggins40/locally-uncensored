@@ -399,7 +399,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-14d';
+const PAGE_BUILD = '2026-10-14e';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -904,7 +904,7 @@ function renderMore() {
     const d = document.createElement('div'), x = document.createElement('button'), l = document.createElement('span');
     d.classList.toggle('unused', i >= maxMore());
     l.textContent = 'Picture ' + (i + 2); x.textContent = '✕'; x.setAttribute('aria-label', 'Remove picture ' + (i + 2));
-    x.onclick = () => { more.splice(i, 1); setStatus(''); renderMore(); };
+    x.onclick = () => { genMore++; more.splice(i, 1); setStatus(''); renderMore(); };
     d.append(c, l, x); box.append(d);
   });
   const left = maxMore() - more.length;
@@ -938,7 +938,7 @@ function renderBatch() {
   batch.forEach((c, i) => {
     const d = document.createElement('div'), x = document.createElement('button'), l = document.createElement('span');
     l.textContent = '#' + (i + 2); x.textContent = '✕'; x.setAttribute('aria-label', 'Remove batch photo ' + (i + 2));
-    x.onclick = () => { batch.splice(i, 1); renderBatch(); };
+    x.onclick = () => { genBatch++; batch.splice(i, 1); renderBatch(); };
     d.append(c, l, x); box.append(d);
   });
   $('batchClearRow').classList.toggle('hidden', !batch.length);
@@ -951,6 +951,7 @@ function renderBatch() {
       'Each photo is picture 1 of its own edit' + (usedMore().length ? '; your extra photos are pictures 2+ in every one.' : '.');
 }
 $('fileBatch').addEventListener('change', async e => {
+  genBatch++;
   const files = [...e.target.files]; e.target.value = '';
   const room = BATCH_MAX - batch.length;
   if (files.length > room) setStatus(`A batch holds up to ${BATCH_MAX + 1} photos; added the first ${room}.`, true);
@@ -959,7 +960,7 @@ $('fileBatch').addEventListener('change', async e => {
   }
   renderBatch();
 });
-$('batchClear').onclick = () => { batch.length = 0; renderBatch(); };
+$('batchClear').onclick = () => { genBatch++; batch.length = 0; renderBatch(); };
 $('count').addEventListener('change', () => renderBatch());
 
 function readPhoto(f) {
@@ -977,6 +978,7 @@ function readPhoto(f) {
   });
 }
 $('file2').addEventListener('change', async e => {
+  genMore++;
   const files = [...e.target.files]; e.target.value = '';
   const room = maxMore() - more.length;
   if (files.length > room) setStatus(`Only ${room} more fit${mode === 'cloud' ? ' (10 photos in total)' : ''}; added the first ${room}.`, true);
@@ -1405,10 +1407,11 @@ if (!$('createSize').value) $('createSize').value = '1';
 $('createSize').addEventListener('change', () => { store('createSize', $('createSize').value); createSizeHint(); });
 createSizeHint(); resHint();
 
-function loadIntoCanvas(src) {
+function loadIntoCanvas(src, stillWanted) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
+      if (stillWanted && !stillWanted()) return resolve();  // you picked another photo meanwhile
       const fs = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
       full.width = Math.round(img.naturalWidth * fs); full.height = Math.round(img.naturalHeight * fs);
       full.getContext('2d').drawImage(img, 0, 0, full.width, full.height);
@@ -1426,6 +1429,7 @@ function loadIntoCanvas(src) {
 
 $('file').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
+  genPhoto++;
   const url = URL.createObjectURL(f);
   try { await loadIntoCanvas(url); mainOrig = f; savePhoto(); setStatus(mode === 'mask' ? 'Tap the person or object to change, or use Paint.' : 'Now type what to change.'); }
   catch (err) { setStatus(err.message, true); }
@@ -2041,6 +2045,7 @@ $('stop').onclick = async () => {
 };
 
 $('again').onclick = async () => {
+  genPhoto++;
   await loadIntoCanvas($('out').src); savePhoto();
   if (mode === 'create') setMode(qwen ? 'instruct' : 'mask');  // a created picture is edited like any photo
   $('result').classList.add('hidden');
@@ -2302,9 +2307,13 @@ var IDB = (() => {
     },
   };
 })();
-var restoring = false, workTimer = null, workReady = false;  // var: renderMore runs before this line at start-up
+var restoring = false, workTimer = null, workReady = false;
+// var: renderMore runs before these lines at start-up
+// Go up when you change the main photo / extra photos / batch: a restore still
+// running then leaves that part alone (the others are restored as usual)
+var genPhoto = 0, genMore = 0, genBatch = 0;
 async function savePhoto() {
-  if (!workReady || restoring) return;
+  if (!workReady) return;
   const photo = await new Promise(r => full.toBlob(r, 'image/jpeg', 0.95));
   await IDB.set('photo', { photo, orig: mainOrig && mainOrig.size <= 4e6 ? mainOrig : null, t: Date.now() });
   await IDB.set('mask', null);
@@ -2325,7 +2334,7 @@ function saveMore() { saveList('more', more); }
 function saveBatch() { saveList('batch', batch); }
 async function saveWork() {
   clearTimeout(workTimer); workTimer = null;
-  if (!workReady || restoring || !photoIn) return;
+  if (!workReady || !photoIn) return;
   await IDB.set('mask', await toBlob(mask));
 }
 function saveWorkSoon() { clearTimeout(workTimer); workTimer = setTimeout(saveWork, 1200); }
@@ -2338,34 +2347,46 @@ async function restoreWork() {
   // Set before the first await: the start-up model check can switch modes (which saves the
   // extra-photo list) while IndexedDB is still being read, and must not save the empty list
   restoring = true;
+  const gP = genPhoto, gM = genMore, gB = genBatch;
+  const okP = () => genPhoto === gP, okM = () => genMore === gM, okB = () => genBatch === gB;
   try {
+    let restored = false;
     const ph = await IDB.get('photo');
-    if (!ph || !ph.photo || photoIn) return false;
-    const url = URL.createObjectURL(ph.photo);
-    try { await loadIntoCanvas(url); } finally { URL.revokeObjectURL(url); }
-    mainOrig = ph.orig || null;
-    const m = await IDB.get('mask');
-    if (m) {
-      const u = URL.createObjectURL(m);
-      const im = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = u; }).catch(() => null);
-      URL.revokeObjectURL(u);
-      if (im) mctx.drawImage(im, 0, 0, mask.width, mask.height);
+    if (ph && ph.photo && !photoIn && okP()) {
+      const url = URL.createObjectURL(ph.photo);
+      try { await loadIntoCanvas(url, okP); } finally { URL.revokeObjectURL(url); }
+      if (okP()) {
+        mainOrig = ph.orig || null;
+        const m = await IDB.get('mask');
+        if (m && okP()) {
+          const u = URL.createObjectURL(m);
+          const im = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = u; }).catch(() => null);
+          URL.revokeObjectURL(u);
+          if (im && okP()) mctx.drawImage(im, 0, 0, mask.width, mask.height);
+        }
+        restored = okP();
+      }
     }
-    for (const b of (await IDB.get('more')) || []) {
-      try { const c = await readPhoto(b); c.orig = b; more.push(c); } catch (e) {}
+    for (const b of (okM() && await IDB.get('more')) || []) {
+      if (!okM()) break;
+      try { const c = await readPhoto(b); c.orig = b; if (okM()) more.push(c); } catch (e) {}
     }
-    savedSig.more = listSig(more);
+    if (okM()) savedSig.more = listSig(more);
     renderMore();
-    for (const b of (await IDB.get('batch')) || []) {
-      try { const c = await readPhoto(b); c.orig = b; batch.push(c); } catch (e) {}
+    for (const b of (okB() && await IDB.get('batch')) || []) {
+      if (!okB()) break;
+      try { const c = await readPhoto(b); c.orig = b; if (okB()) batch.push(c); } catch (e) {}
     }
-    savedSig.batch = listSig(batch);
+    if (okB()) savedSig.batch = listSig(batch);
     renderBatch();
-    return true;
+    return restored;
   } catch (e) {
     setStatus('Could not bring back your last photo (' + (e && e.message || e) + '). Choose it again.', true);
     return false;
-  } finally { restoring = false; }
+  } finally {
+    restoring = false;
+    saveMore(); saveBatch();  // if you changed a list while it was being restored, keep that
+  }
 }
 
 // ---- Notify me when done (the VM sends it through ntfy; see __init__.py).

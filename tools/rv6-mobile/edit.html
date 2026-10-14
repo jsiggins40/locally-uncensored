@@ -1554,11 +1554,11 @@ async function serverUp() { lastDown = await serverState(); return lastDown === 
 let waitingForServer = null;
 function ensureServer() {
   if (!waitingForServer) waitingForServer = (async () => {
-    // Coming back to Safari, iOS and the Tailscale app need a moment to bring the
-    // network back: try quietly for ~3 s before showing anything
-    for (let i = 0; i < 3; i++) {
+    // Coming back to Safari, iOS and the Tailscale app need several seconds to bring
+    // the network back: try quietly for ~10 s before showing anything
+    for (let i = 0; i < 7; i++) {
       if (await serverUp()) return true;
-      await sleep(1000);
+      await sleep(1500);
     }
     $('offline').classList.remove('hidden');
     const why = () => $('offlineWhy').textContent = lastDown === 'down'
@@ -1794,6 +1794,7 @@ async function cloudVideoGo() {
 // only asks the VM how they are doing, so switching apps loses nothing.
 async function waitForCloud(jobs, t0, size, nPhotos = 1, note = '') {
   const done = {}, failed = {};
+  let misses = 0;  // failed checks in a row: back from another app, iOS + Tailscale need a few seconds
   const limit = size === 'video' ? 2700 : 400 + 20 * jobs.length;
   try {
     for (;;) {
@@ -1807,7 +1808,8 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1, note = '') {
       for (const id of jobs.filter(i => !(i in done) && !(i in failed))) {
         let j;
         try { j = await (await fetch('/rv6m/cloud/job/' + id, { cache: 'no-store' })).json(); }
-        catch (e) { setStatus((size === 'video' ? 'Seedance is making your video… ' : 'Seedream is working… ') + secs + 's (reconnecting to the VM…)'); break; }
+        catch (e) { if (++misses > 6) setStatus((size === 'video' ? 'Seedance is making your video… ' : 'Seedream is working… ') + secs + 's (reconnecting to the VM; it keeps working meanwhile)'); break; }
+        misses = 0;
         if (j.status === 'error') {
           if (jobs.length === 1) throw new Error((size === 'video' ? 'Seedance failed: ' : 'Seedream failed: ') + j.error);
           failed[id] = j.error; continue;  // in a batch, the others carry on
@@ -1888,6 +1890,7 @@ function showResult(o, variants = []) {
 // picks the same jobs up again.
 async function waitForJobs(ids, t0) {
   const done = {}, gpuMs = {};
+  let misses = 0;  // failed checks in a row: back from another app, iOS + Tailscale need a few seconds
   try {
     for (;;) {
       await sleep(1000);
@@ -1899,7 +1902,8 @@ async function waitForJobs(ids, t0) {
       for (const id of ids.filter(i => !(i in done))) {
         let h;
         try { h = await (await fetch('/api/history/' + id)).json(); }
-        catch (e) { setStatus('Generating… ' + secs + 's (reconnecting to the VM…)'); break; }
+        catch (e) { if (++misses > 6) setStatus('Generating… ' + secs + 's (reconnecting to the VM; it keeps working meanwhile)'); break; }
+        misses = 0;
         const job = h[id]; if (!job) continue;
         if (job.status && job.status.status_str === 'error') {
           if ((job.status.messages || []).some(x => x[0] === 'execution_interrupted')) { setStatus('Stopped.'); return; }

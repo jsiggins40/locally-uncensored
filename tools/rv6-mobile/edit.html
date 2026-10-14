@@ -2216,7 +2216,10 @@ var IDB = (() => {
         : Array.isArray(x) ? x.map(enc) : x && typeof x === 'object' ? Object.fromEntries(Object.entries(x).map(([a, b]) => [a, enc(b)])) : x;
       fd.append('key', k); fd.append('meta', JSON.stringify(enc(v) ?? null));
       blobs.forEach((b, i) => fd.append('b' + i, b, 'b' + i));
-      try { await fetch('/rv6m/work', { method: 'POST', body: fd }); } catch (e) {}
+      try {
+        const r = await fetch('/rv6m/work', { method: 'POST', body: fd });
+        if (!r.ok) console.warn('rv6m: saving ' + k + ' on the VM failed', r.status);
+      } catch (e) { console.warn('rv6m: saving ' + k + ' on the VM failed', e); }
     },
     async get(k) {
       try {
@@ -2229,12 +2232,28 @@ var IDB = (() => {
       } catch (e) { return null; }
     },
   };
-  let local = null;  // does IndexedDB work here? (false in Lockdown Mode)
+  let local = null;  // does IndexedDB open here? (not in Lockdown Mode)
   let probe = null;
   const works = () => local !== null ? Promise.resolve(local) : probe || (probe = Promise.race([
     db().then(() => true, () => false), new Promise(ok => setTimeout(() => ok(false), 3000))]).then(ok => (local = ok)));
-  return { get: k => works().then(ok => ok ? run('readonly', s => s.get(k)).catch(() => null) : vm.get(k)),
-           set: (k, v) => works().then(ok => ok ? run('readwrite', s => s.put(v, k)).catch(() => null) : vm.set(k, v)) };
+  // Every save goes to the VM as well: Safari can also give the page a store that
+  // seems to work but is emptied on reload. Restoring reads whichever copy holds
+  // the newer photo (each photo save carries its time, t).
+  let src = null;
+  const vmTime = () => fetch('/rv6m/work?key=photo', { cache: 'no-store' }).then(r => r.json()).then(j => (j.meta && j.meta.t) || 0).catch(() => 0);
+  const source = () => src || (src = (async () => {
+    if (!(await works())) return 'vm';
+    const [a, tb] = await Promise.all([run('readonly', s => s.get('photo')).catch(() => null), vmTime()]);
+    return tb > ((a && a.t) || 0) ? 'vm' : 'local';
+  })());
+  return {
+    get: async k => (await source()) === 'vm' ? vm.get(k) : run('readonly', s => s.get(k)).catch(() => null),
+    set: async (k, v) => {
+      const both = [vm.set(k, v)];
+      if (await works()) both.push(run('readwrite', s => s.put(v, k)).catch(() => null));
+      await Promise.all(both);
+    },
+  };
 })();
 var restoring = false, workTimer = null, workReady = false;  // var: renderMore runs before this line at start-up
 async function savePhoto() {
@@ -2288,7 +2307,10 @@ async function restoreWork() {
     }
     renderBatch();
     return true;
-  } catch (e) { return false; } finally { restoring = false; }
+  } catch (e) {
+    setStatus('Could not bring back your last photo (' + (e && e.message || e) + '). Choose it again.', true);
+    return false;
+  } finally { restoring = false; }
 }
 
 // ---- Notify me when done (the VM sends it through ntfy; see __init__.py).

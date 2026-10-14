@@ -158,6 +158,8 @@ async def rv6m_work_set(request):
         os.replace(final, old)
     os.replace(tmp, final)
     shutil.rmtree(old, ignore_errors=True)
+    logging.info("[rv6_mobile] saved %s for the page (%d file(s), %d KB)", key, len(types),
+                 sum(os.path.getsize(os.path.join(final, n)) for n in types) // 1024)
     return web.json_response({"ok": True})
 
 

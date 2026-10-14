@@ -326,7 +326,8 @@ def _atlas_job(endpoint, key, body, sent, limit, meta=None):
         log["submit_reply"] = sub
     except Exception as e:
         log["error"] = str(e)
-        raise
+        # Say which step and which model, so a 404 "not found" can be told apart
+        raise RuntimeError(f"sending the job (model {body.get('model')}): {e}") from None
     finally:
         _save_log(log)
     pid = _find(_data(sub), ["id", "prediction_id", "request_id"])
@@ -334,7 +335,17 @@ def _atlas_job(endpoint, key, body, sent, limit, meta=None):
         raise RuntimeError("Atlas reply had no job id: " + str(sub)[:600])
     t = time.time()
     while True:
-        res = _data(_atlas("GET", f"{ATLAS}/prediction/{pid}", key))
+        try:
+            res = _data(_atlas("GET", f"{ATLAS}/prediction/{pid}", key))
+        except RuntimeError as e:
+            # A job that was just created can briefly be "not found"; keep asking for a minute
+            if "said 404" in str(e) and time.time() - t < 60:
+                log["early_404"] = str(e)
+                time.sleep(3)
+                continue
+            log["error"] = str(e)
+            _save_log(log)
+            raise RuntimeError(f"checking on job {pid}: {e}") from None
         log["last_reply"] = res
         status = str(_find(res, ["status"]) or "").lower()
         if status in ("completed", "succeeded", "success", "done"):

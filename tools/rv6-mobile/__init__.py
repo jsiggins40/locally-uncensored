@@ -163,6 +163,35 @@ async def rv6m_work_set(request):
     return web.json_response({"ok": True})
 
 
+# Seedream / Seedance / Wan reuse the photo the page already put here when you
+# picked it, instead of uploading it a second time: copy it into ComfyUI's input
+# folder. Only when the VM still has that same photo (same time stamp "t").
+@PromptServer.instance.routes.post("/rv6m/work/use")
+async def rv6m_work_use(request):
+    import json
+    import shutil
+    body = await request.json()
+    d = os.path.join(WORK_DIR, "photo")
+    try:
+        with open(os.path.join(d, "meta.json")) as f:
+            saved = json.load(f)
+    except OSError:
+        return web.json_response({"error": "no photo kept on the VM"}, status=404)
+    meta, types = saved.get("meta") or {}, saved.get("types") or {}
+    if not isinstance(meta.get("t"), (int, float)) or str(meta.get("t")) != str(body.get("t")):
+        return web.json_response({"error": "the VM has a different photo"}, status=409)
+    first = body.get("part") if body.get("part") in ("orig", "photo") else "orig"
+    for part in [first, "orig", "photo"]:
+        ref = meta.get(part)
+        blob = isinstance(ref, dict) and ref.get("$blob")
+        ctype = types.get(blob, "") if blob else ""
+        if blob and ctype in ("image/jpeg", "image/png", "image/webp") and os.path.isfile(os.path.join(d, blob)):
+            name = f"rv6m_{int(float(meta['t']))}_{part}." + {"image/png": "png", "image/webp": "webp"}.get(ctype, "jpg")
+            shutil.copyfile(os.path.join(d, blob), os.path.join(folder_paths.get_input_directory(), name))
+            return web.json_response({"name": name})
+    return web.json_response({"error": "no usable photo kept on the VM"}, status=404)
+
+
 @PromptServer.instance.routes.get("/rv6m/work")
 async def rv6m_work_get(request):
     import json

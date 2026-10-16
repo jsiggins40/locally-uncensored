@@ -421,7 +421,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-16d';
+const PAGE_BUILD = '2026-10-16e';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -1493,6 +1493,7 @@ function loadIntoCanvas(src, stillWanted) {
       full.width = Math.round(img.naturalWidth * fs); full.height = Math.round(img.naturalHeight * fs);
       full.getContext('2d').drawImage(img, 0, 0, full.width, full.height);
       mainOrig = null; photoIn = true;
+      photoT = 0; photoSaving = null;  // the VM's copy is the old photo until savePhoto runs
       fitToRes(false);
       $('empty').classList.add('hidden'); $('stage').classList.remove('hidden');
       if (mode === 'video') applyVideo();
@@ -1671,17 +1672,21 @@ window.addEventListener('pageshow', () => ensureServer());
 function uploadOnce(fd, size, label) {
   return new Promise((ok, bad) => {
     const x = new XMLHttpRequest();
-    let last = Date.now();
-    const stall = setInterval(() => { if (Date.now() - last > 30000) x.abort(); }, 3000);
+    let last = Date.now(), queued = false;
+    // "100%" only means the phone has queued it all; on a slow link the rest is
+    // still going out, so after that wait up to 2 minutes for the VM's answer
+    const stall = setInterval(() => { if (Date.now() - last > (queued ? 120000 : 30000)) x.abort(); }, 3000);
     x.open('POST', '/api/upload/image');
     x.upload.onprogress = e => {
       last = Date.now();
-      if (e.lengthComputable && size > 300e3)
-        setStatus(`${label} · ${Math.round(100 * e.loaded / e.total)}% of ${(e.total / 1e6).toFixed(1)} MB`);
+      if (!e.lengthComputable || size <= 300e3) return;
+      queued = e.loaded >= e.total;
+      setStatus(queued ? `${label} · sent ${(e.total / 1e6).toFixed(1)} MB, waiting for the VM (slow connection)…`
+                       : `${label} · ${Math.round(100 * e.loaded / e.total)}% of ${(e.total / 1e6).toFixed(1)} MB`);
     };
     x.onload = () => { clearInterval(stall); ok({ ok: x.status >= 200 && x.status < 300, status: x.status, text: x.responseText }); };
     x.onerror = () => { clearInterval(stall); bad(new Error('Load failed')); };
-    x.onabort = () => { clearInterval(stall); bad(new Error('The upload stopped moving for 30 seconds')); };
+    x.onabort = () => { clearInterval(stall); bad(new Error(queued ? 'The upload stopped moving: no answer from the VM for 2 minutes' : 'The upload stopped moving for 30 seconds')); };
     x.send(fd);
   });
 }
@@ -1850,7 +1855,8 @@ async function cloudGo() {
     for (const [b, c] of firsts.entries()) {
       if (stopRequested) break;
       setStatus(firsts.length > 1 ? `Uploading and sending… photo ${b + 1}/${firsts.length}` : 'Sending to the VM… Stay on this page for now.');
-      const images = [await cloudUpload(b ? c.orig : mainOrig, c, `rv6m_${ts}_${b ? 'b' + b + '_' : ''}cloud1`), ...shared];
+      const main = b ? null : await photoOnVM('orig');  // already on the VM: no second upload
+      const images = [main || await cloudUpload(b ? c.orig : mainOrig, c, `rv6m_${ts}_${b ? 'b' + b + '_' : ''}cloud1`), ...shared];
       size = cloudSize(c);  // Auto: each photo's own shape
       for (let i = 0; i < n; i++) {
         const r = await fetch('/rv6m/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1881,7 +1887,7 @@ async function cloudVideoGo() {
     setStatus('Connecting… Stay on this page for now.');
     if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
     setStatus('Sending to the VM… Stay on this page for now.');
-    const ts = Date.now(), image = await upload(await toJpeg(full), `rv6m_${ts}_img.jpg`), images = [image];
+    const ts = Date.now(), image = (await photoOnVM('photo')) || await upload(await toJpeg(full), `rv6m_${ts}_img.jpg`), images = [image];
     for (const [i, c] of usedMore().entries()) images.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
     const r = await fetch('/rv6m/cloud/video', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(ref
@@ -2337,6 +2343,7 @@ $('upGo').onclick = async () => {
 // ---- Remember my work: iOS throws away background tabs, so the photo, extra
 // photos, selection and prompt are kept on this phone (IndexedDB) and put back
 // when the page reloads. Nothing leaves the phone for this.
+var vmOkT = {};  // key -> time stamp (t) of the last value the VM confirmed
 var IDB = (() => {
   let dbp = null;
   const db = () => dbp || (dbp = new Promise((ok, bad) => {
@@ -2356,12 +2363,18 @@ var IDB = (() => {
     // One save per key at a time; while one runs, only the newest value waits.
     // (Several saves of big photos at once would clog the phone's upload and
     // hold up the real "Sending to the VM".)
+    // The promise ends once the newest value is on the VM (or failed).
     set(k, v) {
       if (vmBusy[k]) { vmNext[k] = { v }; return vmBusy[k]; }
-      const go = val => vm.send(k, val).finally(() => {
-        if (vmNext[k]) { const n = vmNext[k]; delete vmNext[k]; vmBusy[k] = go(n.v); } else delete vmBusy[k];
-      });
-      return (vmBusy[k] = go(v));
+      return (vmBusy[k] = (async () => {
+        try {
+          for (let val = v; ; ) {
+            await vm.send(k, val);
+            if (!vmNext[k]) break;
+            val = vmNext[k].v; delete vmNext[k];
+          }
+        } finally { delete vmBusy[k]; }
+      })());
     },
     async send(k, v) {
       const fd = new FormData(), blobs = [];
@@ -2378,6 +2391,7 @@ var IDB = (() => {
       try {
         const r = await fetch('/rv6m/work', { method: 'POST', body: fd });
         note(r.ok ? '✓' : `⚠️ ${r.status} ${(await r.text()).slice(0, 120)}`);
+        if (r.ok && v && v.t) vmOkT[k] = v.t;
       } catch (e) { note(`⚠️ ${e && e.message || e}`); }
     },
     async get(k) {
@@ -2419,11 +2433,32 @@ var restoring = false, workTimer = null, workReady = false;
 // Go up when you change the main photo / extra photos / batch: a restore still
 // running then leaves that part alone (the others are restored as usual)
 var genPhoto = 0, genMore = 0, genBatch = 0;
+var photoT = 0, photoSaving = null;  // the photo's time stamp, and its save to the VM
 async function savePhoto() {
   if (!workReady) return;
-  const photo = await new Promise(r => full.toBlob(r, 'image/jpeg', 0.95));
-  await IDB.set('photo', { photo, orig: mainOrig && mainOrig.size <= 4e6 ? mainOrig : null, t: Date.now() });
+  const t = photoT = Date.now();
+  photoSaving = (async () => {
+    const photo = await new Promise(r => full.toBlob(r, 'image/jpeg', 0.95));
+    await IDB.set('photo', { photo, orig: mainOrig && mainOrig.size <= 4e6 ? mainOrig : null, t });
+    return vmOkT.photo === t;
+  })();
+  await photoSaving;
   await IDB.set('mask', null);
+}
+// The photo as it's already kept on the VM (sent when you picked it), copied into
+// ComfyUI's input folder: no second upload. null when that isn't possible.
+async function photoOnVM(part) {
+  try {
+    if (!photoT) return null;
+    if (photoSaving && vmOkT.photo !== photoT) {
+      setStatus('Sending to the VM… finishing the photo upload from when you picked it. Stay on this page for now.');
+      await photoSaving;
+    }
+    if (vmOkT.photo !== photoT) return null;
+    const r = await fetch('/rv6m/work/use', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ part, t: photoT }) });
+    return r.ok ? (await r.json()).name || null : null;
+  } catch (e) { return null; }
 }
 // The extra/batch lists are redrawn often (mode switches, settings); only save
 // them when the photos in them actually changed
@@ -2464,6 +2499,7 @@ async function restoreWork() {
       try { await loadIntoCanvas(url, okP); } finally { URL.revokeObjectURL(url); }
       if (okP()) {
         mainOrig = ph.orig || null;
+        if (ph.t) { photoT = ph.t; vmOkT.photo = ph.t; }
         const m = await IDB.get('mask');
         if (m && okP()) {
           const u = URL.createObjectURL(m);

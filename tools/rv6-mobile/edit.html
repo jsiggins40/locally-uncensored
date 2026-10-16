@@ -278,7 +278,7 @@
 <div id="videoBox" class="panel hidden" style="padding:10px 12px">
   <div id="vidEngineBox" class="hidden">
     <label style="margin-top:0">Engine</label>
-    <div class="seg"><button id="vidLocal">🖥️ Local (Wan 2.2)</button><button id="vidCloud">☁️ Seedance 2.5</button></div>
+    <div class="seg"><button id="vidLocal">🖥️ Local (Wan 2.2)</button><button id="vidCloud">☁️ Seedance 2.5</button><button id="vidWan">☁️ Wan 3.0</button></div>
   </div>
   <div id="vidKindBox" class="hidden">
     <label>Seedance uses my photos…</label>
@@ -294,8 +294,10 @@
   <div class="seg"><button id="vid480">480p (faster)</button><button id="vid720">720p</button></div>
   </div>
   <div id="vidRefBox" class="hidden">
+    <div id="vidDraftBox">
     <label>Draft first?</label>
     <div class="seg"><button id="vidDraftOn">📝 Draft (480p, finish later)</button><button id="vidDraftOff">Final video</button></div>
+    </div>
     <label for="vidResRef">Resolution</label>
     <select id="vidResRef">
       <option value="480p">480p · native, cheapest</option>
@@ -399,7 +401,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-14e';
+const PAGE_BUILD = '2026-10-16a';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -893,7 +895,7 @@ $('qualBtn').onclick = () => { quality = true; store('quality', '1'); applySpeed
 // ---- Extra photos: Seedream takes up to 10 in total (picture 1 + 9 more);
 // Describe edit (Qwen-Image-Edit Plus) takes pictures 2 and 3
 const more = [];  // canvases, picture 2 onwards
-const startVid = () => mode === 'video' && cloudVid() && vidKind !== 'ref';  // Seedance first frame: picture 2 = last frame
+const startVid = () => mode === 'video' && cloudVid() && (vidKind !== 'ref' || wanVid());  // first frame: picture 2 = last frame
 const maxMore = () => mode === 'cloud' || (mode === 'instruct' && q21Active()) || refVid() ? 9 : startVid() ? 1 : 2;
 const hasSecond = () => more.length > 0;
 const usedMore = () => more.slice(0, maxMore());
@@ -1123,11 +1125,14 @@ function vidDims() {
 const vidClips = () => Math.max(1, Math.ceil(+$('vidLen').value / 5));
 // ☁️ Seedance 2.5 on Atlas: same photo and prompt, 4-30 s, with sound; runs in the cloud
 let vidEngine = recall('vidEngine') || 'local', vidSound = recall('vidSound') !== '0';
-const cloudVid = () => cloudCfg.configured && (vidEngine === 'cloud' || !video);
+const cloudVid = () => cloudCfg.configured && (vidEngine === 'cloud' || vidEngine === 'wan' || !video);
+// ☁️ Wan 3.0 Prime (Alibaba) on Atlas: first frame (+ optional last frame) only, no drafts
+const wanVid = () => cloudVid() && vidEngine === 'wan';
+const WAN_RES = ['480p', '720p', '1080p', '720p-esr', '1080p-esr', '1440p-esr', '4k-esr'];
 // Seedance reference-to-video: all photos (main + extras) are references, called
 // @Image1, @Image2… in the prompt; a new shot in any shape, up to 4K (-sr/-esr upscale)
 let vidKind = recall('vidKind') || 'ref', vidDraft = recall('vidDraft') === '1';
-const refVid = () => mode === 'video' && cloudVid() && vidKind === 'ref';
+const refVid = () => mode === 'video' && cloudVid() && vidKind === 'ref' && !wanVid();
 if (recall('vidResRef')) $('vidResRef').value = recall('vidResRef');
 if (recall('vidRatio')) $('vidRatio').value = recall('vidRatio');
 if (!$('vidResRef').value) $('vidResRef').value = '1080p';
@@ -1148,24 +1153,32 @@ function renderRefChips() {
   if (!n) box.textContent = 'Choose a photo first.';
 }
 function applyVideo() {
-  const cv = cloudVid(), ref = cv && vidKind === 'ref';
-  $('vidKindBox').classList.toggle('hidden', !cv);
+  const cv = cloudVid(), wan = wanVid(), ref = cv && vidKind === 'ref' && !wan;
+  $('vidKindBox').classList.toggle('hidden', !cv || wan);
+  $('vidDraftBox').classList.toggle('hidden', wan);
+  // Wan 3.0 has no -sr upscales and no 60 fps option
+  for (const o of $('vidResRef').options) o.disabled = wan && !WAN_RES.includes(o.value);
+  if (wan && !WAN_RES.includes($('vidResRef').value)) $('vidResRef').value = '1080p';
   $('vidKindRef').classList.toggle('on', ref); $('vidKindStart').classList.toggle('on', cv && !ref);
   // Both Seedance kinds take the full resolution list; shape and @Image only apply to reference
   $('vidResBox').classList.toggle('hidden', cv); $('vidRefBox').classList.toggle('hidden', !cv); $('vidRefOnly').classList.toggle('hidden', !ref);
   $('vidDraftOn').classList.toggle('on', vidDraft); $('vidDraftOff').classList.toggle('on', !vidDraft);
-  $('vidResRef').disabled = cv && vidDraft;  // a draft is always 480p
+  $('vidResRef').disabled = cv && vidDraft && !wan;  // a Seedance draft is always 480p
   if (mode === 'video') { $('secondBox').classList.toggle('hidden', !cv); renderMore(); }
   if (ref) renderRefChips();
-  $('vidEngineBox').classList.toggle('hidden', !(cloudCfg.configured && video));
-  $('vidLocal').classList.toggle('on', !cv); $('vidCloud').classList.toggle('on', cv);
+  $('vidEngineBox').classList.toggle('hidden', !cloudCfg.configured);
+  $('vidLocal').classList.toggle('hidden', !video);
+  $('vidLocal').classList.toggle('on', !cv); $('vidCloud').classList.toggle('on', cv && !wan); $('vidWan').classList.toggle('on', wan);
   $('vidSpeedBox').classList.toggle('hidden', cv); $('vidSoundBox').classList.toggle('hidden', !cv);
   $('vidSoundOn').classList.toggle('on', vidSound); $('vidSoundOff').classList.toggle('on', !vidSound);
   for (const o of $('vidLen').options) o.disabled = cv && +o.value > 30;
   if (cv && +$('vidLen').value > 30) $('vidLen').value = '30';
   $('vid480').classList.toggle('on', vidRes !== '720'); $('vid720').classList.toggle('on', vidRes === '720');
   $('vidFast').classList.toggle('on', !vidQuality); $('vidQual').classList.toggle('on', vidQuality);
-  const draftNote = vidDraft ? '📝 Draft: a 480p preview, billed as 480p. If you like it, tap "Finish at 1080p" on the result (within 7 days) for the same video at 1080p. ' : '';
+  if (wan) return void ($('vidHint').textContent = `${$('vidLen').value} s · ${$('vidResRef').value}${vidSound ? ' · with sound' : ''}, ` +
+    'starting from your photo' + (usedMore().length ? ' and ending on picture 2' : '') + '. Made by Alibaba\'s Wan 3.0 Prime on Atlas Cloud ' +
+    '(paid per video; the -esr options make a smaller video and enhance it; Atlas\'s and Alibaba\'s content rules apply; only use photos of people who agreed).');
+  const draftNote = vidDraft && !wan ? '📝 Draft: a 480p preview, billed as 480p. If you like it, tap "Finish at 1080p" on the result (within 7 days) for the same video at 1080p. ' : '';
   if (ref) return void ($('vidHint').textContent = draftNote + `${$('vidLen').value} s · ${vidDraft ? '480p draft' : $('vidResRef').value} · ` +
     `${$('vidRatio').value === 'adaptive' ? 'shape of the main photo' : $('vidRatio').value}${vidSound ? ' · with sound' : ''}. ` +
     'Seedance 2.5 makes a new scene with the people and things in your photos (up to 10 here). Say who does what with @Image1 (the main photo), @Image2…, ' +
@@ -1188,6 +1201,7 @@ $('vid720').onclick = () => { vidRes = '720'; store('vidRes', vidRes); applyVide
 $('vidFast').onclick = () => { vidQuality = false; store('vidQuality', '0'); applyVideo(); };
 $('vidLocal').onclick = () => { vidEngine = 'local'; store('vidEngine', vidEngine); applyVideo(); };
 $('vidCloud').onclick = () => { vidEngine = 'cloud'; store('vidEngine', vidEngine); applyVideo(); };
+$('vidWan').onclick = () => { vidEngine = 'wan'; store('vidEngine', vidEngine); applyVideo(); };
 $('vidSoundOn').onclick = () => { vidSound = true; store('vidSound', '1'); applyVideo(); };
 $('vidSoundOff').onclick = () => { vidSound = false; store('vidSound', '0'); applyVideo(); };
 $('vidDraftOn').onclick = () => { vidDraft = true; store('vidDraft', '1'); applyVideo(); };
@@ -1794,7 +1808,7 @@ async function cloudGo() {
   }
 }
 async function cloudVideoGo() {
-  const ref = vidKind === 'ref';
+  const wan = wanVid(), ref = vidKind === 'ref' && !wan;
   if (!photoIn) return setStatus(ref ? 'Choose a photo first: it is @Image1.' : 'Choose a photo first: the video starts from it.', true);
   if (!$('prompt').value.trim()) return setStatus('Describe what should happen first.', true);
   $('go').disabled = true; stopRequested = false; currentJobs = [];
@@ -1810,8 +1824,8 @@ async function cloudVideoGo() {
       body: JSON.stringify(ref
         ? { kind: 'reference', images, prompt: $('prompt').value.trim(), duration: +$('vidLen').value,
             resolution: $('vidResRef').value, ratio: $('vidRatio').value, audio: vidSound, draft: vidDraft }
-        : { kind: 'start', images, prompt: $('prompt').value.trim(), duration: +$('vidLen').value,
-            resolution: $('vidResRef').value, audio: vidSound, draft: vidDraft }) });
+        : { kind: wan ? 'wan' : 'start', images, prompt: $('prompt').value.trim(), duration: +$('vidLen').value,
+            resolution: $('vidResRef').value, audio: vidSound, draft: vidDraft && !wan }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'The VM refused the cloud video (' + r.status + ')');
     const t0 = Date.now();
@@ -1838,14 +1852,14 @@ async function waitForCloud(jobs, t0, size, nPhotos = 1, note = '') {
       const secs = Math.round((Date.now() - t0) / 1000);
       if (secs > limit) throw new Error('Timed out waiting for Atlas Cloud.' + (Object.keys(done).length ? ` ${Object.keys(done).length} finished (under Recent edits).` : ''));
       const count = jobs.length > 1 ? ` (${Object.keys(done).length}/${jobs.length} done${Object.keys(failed).length ? ', ' + Object.keys(failed).length + ' failed' : ''})` : '';
-      setStatus((size === 'video' ? 'Seedance is making your video… ' : 'Seedream is working… ') + secs + 's' + count + '\n✓ It\'s on the VM now: safe to leave, it keeps going and shows here (or under Recent edits) when you come back.');
+      setStatus((size === 'video' ? 'Atlas is making your video… ' : 'Seedream is working… ') + secs + 's' + count + '\n✓ It\'s on the VM now: safe to leave, it keeps going and shows here (or under Recent edits) when you come back.');
       for (const id of jobs.filter(i => !(i in done) && !(i in failed))) {
         let j;
         try { j = await (await fetch('/rv6m/cloud/job/' + id, { cache: 'no-store' })).json(); }
-        catch (e) { if (++misses > 6) setStatus((size === 'video' ? 'Seedance is making your video… ' : 'Seedream is working… ') + secs + 's (reconnecting to the VM; it keeps working meanwhile)'); break; }
+        catch (e) { if (++misses > 6) setStatus((size === 'video' ? 'Atlas is making your video… ' : 'Seedream is working… ') + secs + 's (reconnecting to the VM; it keeps working meanwhile)'); break; }
         misses = 0;
         if (j.status === 'error') {
-          if (jobs.length === 1) throw new Error((size === 'video' ? 'Seedance failed: ' : 'Seedream failed: ') + j.error);
+          if (jobs.length === 1) throw new Error((size === 'video' ? 'The video failed: ' : 'Seedream failed: ') + j.error);
           failed[id] = j.error; continue;  // in a batch, the others carry on
         }
         if (j.status !== 'done') continue;
@@ -1875,7 +1889,7 @@ function sentSummary(sent, size) {
   if (!sent) return 'Seedream · ' + size.replace('*', '×');
   const kb = (sent.images || []).map(x => +(x.match(/\((\d+) KB\)/) || [0, 0])[1]);
   if (sent.finished) return `Seedance draft finished at 1080p (from ${sent.finished})`;
-  return `${String(sent.model).replace(/^bytedance\//, '')} · ${sent.duration ? sent.duration + ' s · ' + (sent.generate_audio ? 'sound · ' : '') : ''}${sent.resolution || String(sent.size || '').replace('*', '×')}` +
+  return `${String(sent.model).replace(/^(bytedance|alibaba)\//, '')} · ${sent.duration ? sent.duration + ' s · ' + (sent.generate_audio || sent.audio ? 'sound · ' : '') : ''}${sent.resolution || String(sent.size || '').replace('*', '×')}` +
          (sent.ratio && sent.ratio !== 'adaptive' ? ' · ' + sent.ratio : '') +
          ` · sent ${kb.length} photo${kb.length > 1 ? 's' : ''} (${kb.map(k => k >= 1024 ? (k / 1024).toFixed(1) + ' MB' : k + ' KB').join(', ')})`;
 }
@@ -1982,7 +1996,7 @@ async function resumePending() {
   let pc = null; try { pc = JSON.parse(recall('pendingCloud') || 'null'); } catch (e) {}
   if (pc && pc.jobs && pc.jobs.length && Date.now() - pc.t0 < (pc.size === 'video' ? 2700 : 400 + 20 * pc.jobs.length) * 1000) {
     $('go').disabled = true; $('stop').classList.remove('hidden'); stopRequested = false;
-    setStatus(pc.size === 'video' ? 'Picking up your Seedance video…' : 'Picking up your Seedream edit…');
+    setStatus(pc.size === 'video' ? 'Picking up your video…' : 'Picking up your Seedream edit…');
     try { await waitForCloud(pc.jobs, pc.t0, pc.size || '', pc.nPhotos || 1, pc.note || ''); }
     catch (err) { setStatus(err.message, true); }
     finally { $('go').disabled = false; $('stop').classList.add('hidden'); }

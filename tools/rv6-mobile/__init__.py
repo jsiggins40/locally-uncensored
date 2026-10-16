@@ -380,6 +380,10 @@ def _atlas_job(endpoint, key, body, sent, limit, meta=None):
 # and RV6M_CLOUD_REF_MODEL.
 CLOUD_VIDEO_MODEL = os.environ.get("RV6M_CLOUD_VIDEO_MODEL", "bytedance/seedance-2.5/image-to-video")
 CLOUD_REF_MODEL = os.environ.get("RV6M_CLOUD_REF_MODEL", "bytedance/seedance-2.5/reference-to-video")
+# ☁️ Wan 3.0 Prime image-to-video (Alibaba), from Atlas's API reference: first frame +
+# optional last_image, 2-30 s (or -1), "audio" (not generate_audio), no ratio/draft
+CLOUD_WAN_MODEL = os.environ.get("RV6M_CLOUD_WAN_MODEL", "alibaba/wan-3.0-prime/image-to-video")
+WAN_RESOLUTIONS = ["480p", "720p", "1080p", "720p-esr", "1080p-esr", "1440p-esr", "4k-esr"]
 # From Atlas's Seedance 2.5 API references (the same for both kinds). 480p/720p/1080p are made
 # natively; -sr (FlashVSR) and -esr (Atlas Video Enhance) make the nearest
 # native size and then upscale it (4k-esr: from 1080p to 3840x2160 at 16:9).
@@ -388,16 +392,17 @@ REF_RESOLUTIONS = ["480p", "720p", "720p-sr", "720p-esr", "1080p", "1080p-sr", "
 REF_RATIOS = ["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]
 
 
-def _ref_image(path):
-    """A photo as Seedance takes it (both kinds): sides 300-6000 px, shape (W/H) 0.4-2.5, under 30 MB."""
+def _ref_image(path, min_side=300, max_ratio=2.5, who="Seedance"):
+    """A photo as the video model takes it. Seedance (both kinds): sides 300-6000 px, shape
+    (W/H) 0.4-2.5, under 30 MB. Wan 3.0: sides 240-8000 px, up to 8:1, under 20 MB."""
     import base64
     from PIL import Image
     with Image.open(path) as im:
         w, h = im.size
-        if not 0.4 <= w / h <= 2.5:
-            raise RuntimeError(f"{os.path.basename(path)} is {w}x{h}: Seedance only takes photos between 2.5:1 and 1:2.5. Crop it first.")
-        if min(w, h) < 300:
-            s = 300 / min(w, h)
+        if not 1 / max_ratio <= w / h <= max_ratio:
+            raise RuntimeError(f"{os.path.basename(path)} is {w}x{h}: {who} only takes photos up to {max_ratio:g}:1. Crop it first.")
+        if min(w, h) < min_side:
+            s = min_side / min(w, h)
             buf = io.BytesIO()
             im.convert("RGB").resize((round(w * s), round(h * s)), Image.LANCZOS).save(buf, "JPEG", quality=95)
             return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -467,11 +472,19 @@ def _cloud_video(names, prompt, model, duration, resolution, audio, ratio="adapt
     key = _cloud_key()
     if not key:
         raise RuntimeError("No Atlas API key on the VM (~/.atlascloud_key)")
-    ref = "reference" in model
-    images = [_ref_image(folder_paths.get_annotated_filepath(n)) for n in names]
+    ref, wan = "reference" in model, "wan" in model.lower()
+    limits = dict(min_side=240, max_ratio=8, who="Wan 3.0") if wan else {}
+    images = [_ref_image(folder_paths.get_annotated_filepath(n), **limits) for n in names]
     body = {"model": model, "prompt": prompt, "duration": int(duration), "resolution": resolution,
             "generate_audio": bool(audio), "watermark": False}
-    if ref:
+    if wan:
+        # Wan 3.0's own field names; it has no ratio, watermark, output_format or draft
+        body = {"model": model, "prompt": prompt, "image": images[0], "duration": int(duration),
+                "resolution": resolution, "audio": bool(audio)}
+        if len(images) > 1:
+            body["last_image"] = images[1]
+        draft = False
+    elif ref:
         # omni_reference_task_type left unset (= auto), as Atlas recommends
         body.update(reference_images=images, ratio=ratio, output_format="mp4")
     else:
@@ -513,7 +526,7 @@ async def _run_cloud(jid, fn, *args):
 @PromptServer.instance.routes.get("/rv6m/cloud/status")
 async def rv6m_cloud_status(request):
     return web.json_response({"configured": bool(_cloud_key()), "model": CLOUD_MODEL, "video_model": CLOUD_VIDEO_MODEL,
-                              "ref_model": CLOUD_REF_MODEL, "ref_resolutions": REF_RESOLUTIONS})
+                              "ref_model": CLOUD_REF_MODEL, "ref_resolutions": REF_RESOLUTIONS, "wan_model": CLOUD_WAN_MODEL})
 
 
 # Starts the edit in the background and returns a job id right away, so the
@@ -538,24 +551,24 @@ async def rv6m_cloud(request):
 async def rv6m_cloud_video(request):
     import uuid
     body = await request.json()
-    ref = body.get("kind") == "reference"
+    ref, wan = body.get("kind") == "reference", body.get("kind") == "wan"
     names = [n for n in (body.get("images") or [body.get("image")]) if n][:30 if ref else 2]  # first (+ last) frame
     if not names or not str(body.get("prompt", "")).strip():
         return web.json_response({"error": "need a photo and a prompt"}, status=400)
     if not _cloud_key():
         return web.json_response({"error": "No Atlas API key on the VM (~/.atlascloud_key)"}, status=400)
     res = str(body.get("resolution") or "720p")
-    if res not in REF_RESOLUTIONS:
-        return web.json_response({"error": f"Seedance doesn't make {res} videos"}, status=400)
+    if res not in (WAN_RESOLUTIONS if wan else REF_RESOLUTIONS):
+        return web.json_response({"error": f"{'Wan 3.0' if wan else 'Seedance'} doesn't make {res} videos"}, status=400)
     ratio = str(body.get("ratio") or "adaptive")
     if ratio not in REF_RATIOS:
         ratio = "adaptive"
     duration = int(body.get("duration") or 5)
-    duration = -1 if duration == -1 else min(30, max(4, duration))
+    duration = -1 if duration == -1 else min(30, max(2 if wan else 4, duration))
     jid = uuid.uuid4().hex
     _jobs[jid] = {"status": "running"}
     asyncio.ensure_future(_run_cloud(jid, _cloud_video, names, body["prompt"],
-                                     body.get("model") or (CLOUD_REF_MODEL if ref else CLOUD_VIDEO_MODEL),
+                                     body.get("model") or (CLOUD_REF_MODEL if ref else CLOUD_WAN_MODEL if wan else CLOUD_VIDEO_MODEL),
                                      duration, res, body.get("audio", True), ratio, bool(body.get("draft"))))
     return web.json_response({"job": jid})
 

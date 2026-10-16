@@ -43,6 +43,10 @@
   #result img { width:100%; border-radius:10px; display:block; }
   .hint { color:var(--muted); font-size:13px; }
   .hidden { display:none !important; }
+  #bgBox { margin:6px 0 4px; }
+  #bgBox .bg { display:flex; align-items:center; gap:8px; padding:8px 10px; margin-top:6px; border-radius:10px; background:var(--panel, #1c1c22); font-size:14px; }
+  #bgBox .bg span { flex:1; }
+  #bgBox .bg button { padding:4px 10px; }
   #batchList { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-bottom:8px; }
   #batchList:empty { display:none; }
   #batchList div { position:relative; }
@@ -343,6 +347,7 @@
   Reconnecting to the VM… <span id="offlineWhy"></span>
 </div>
 <p id="status"></p>
+<div id="bgBox" class="hidden"></div>
 
 <div id="result" class="panel hidden">
   <img id="out" alt="Result">
@@ -401,7 +406,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-16a';
+const PAGE_BUILD = '2026-10-16b';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -1798,8 +1803,8 @@ async function cloudGo() {
       }
     }
     const t0 = Date.now(), note = firsts.length > 1 ? `Batch: ${firsts.length} photos` + (n > 1 ? ` × ${n}` : '') : '';
-    store('pendingCloud', JSON.stringify({ jobs, t0, size, nPhotos: 1 + shared.length, note }));
-    await waitForCloud(jobs, t0, size, 1 + shared.length, note);
+    startBg({ jobs, t0, size, note, label: firsts.length > 1 ? `Seedream batch (${jobs.length})` : jobs.length > 1 ? `Seedream × ${jobs.length}` : 'Seedream edit' });
+    setStatus('☁️ Sent to Atlas. It runs in the background: you can start something else now. It shows below when ready (and under Recent edits).');
   } catch (err) {
     setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
       ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.' : err.message, true);
@@ -1828,9 +1833,9 @@ async function cloudVideoGo() {
             resolution: $('vidResRef').value, audio: vidSound, draft: vidDraft && !wan }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'The VM refused the cloud video (' + r.status + ')');
-    const t0 = Date.now();
-    store('pendingCloud', JSON.stringify({ jobs: [j.job], t0, size: 'video', nPhotos: images.length }));
-    await waitForCloud([j.job], t0, 'video', images.length);
+    startBg({ jobs: [j.job], t0: Date.now(), size: 'video',
+              label: (wan ? 'Wan 3.0 video' : 'Seedance video') + (vidDraft && !wan ? ' (draft)' : '') });
+    setStatus('☁️ Sent to Atlas. It runs in the background: you can start something else now. It shows below when ready (and under Recent edits).');
   } catch (err) {
     setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
       ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.' : err.message, true);
@@ -1838,51 +1843,81 @@ async function cloudVideoGo() {
     $('go').disabled = false; $('stop').classList.add('hidden');
   }
 }
-// Cloud jobs run on the VM even while Safari is in the background; this
-// only asks the VM how they are doing, so switching apps loses nothing.
-async function waitForCloud(jobs, t0, size, nPhotos = 1, note = '') {
-  const done = {}, failed = {};
-  let misses = 0;  // failed checks in a row: back from another app, iOS + Tailscale need a few seconds
-  const limit = size === 'video' ? 2700 : 400 + 20 * jobs.length;
-  try {
-    for (;;) {
-      await sleep(1500);
-      // Atlas jobs can't be cancelled (and are charged anyway); Stop just stops waiting
-      if (stopRequested) { setStatus('Stopped waiting. A finished image still shows up under Recent edits.'); return; }
-      const secs = Math.round((Date.now() - t0) / 1000);
-      if (secs > limit) throw new Error('Timed out waiting for Atlas Cloud.' + (Object.keys(done).length ? ` ${Object.keys(done).length} finished (under Recent edits).` : ''));
-      const count = jobs.length > 1 ? ` (${Object.keys(done).length}/${jobs.length} done${Object.keys(failed).length ? ', ' + Object.keys(failed).length + ' failed' : ''})` : '';
-      setStatus((size === 'video' ? 'Atlas is making your video… ' : 'Seedream is working… ') + secs + 's' + count + '\n✓ It\'s on the VM now: safe to leave, it keeps going and shows here (or under Recent edits) when you come back.');
-      for (const id of jobs.filter(i => !(i in done) && !(i in failed))) {
-        let j;
-        try { j = await (await fetch('/rv6m/cloud/job/' + id, { cache: 'no-store' })).json(); }
-        catch (e) { if (++misses > 6) setStatus((size === 'video' ? 'Atlas is making your video… ' : 'Seedream is working… ') + secs + 's (reconnecting to the VM; it keeps working meanwhile)'); break; }
-        misses = 0;
-        if (j.status === 'error') {
-          if (jobs.length === 1) throw new Error((size === 'video' ? 'The video failed: ' : 'Seedream failed: ') + j.error);
-          failed[id] = j.error; continue;  // in a batch, the others carry on
-        }
-        if (j.status !== 'done') continue;
-        done[id] = { filename: j.filename, subfolder: '', type: 'output', seconds: j.seconds, sent: j.sent };
-        addCloudRecent(j.filename);
-        const got = jobs.filter(i => i in done).map(i => done[i]);
-        showResult(got[0], got);
-        if (got.length === 1) $('result').scrollIntoView({ behavior: 'smooth' });
-      }
-      if (Object.keys(done).length + Object.keys(failed).length === jobs.length) {
-        const nf = Object.keys(failed).length;
-        if (!Object.keys(done).length) throw new Error(`All ${jobs.length} Seedream edits failed: ` + Object.values(failed)[0]);
-        const cloud = Math.max(...Object.values(done).map(d => d.seconds || 0));
-        setStatus(`Done in ${secs}s (Atlas Cloud ${cloud.toFixed(0)}s).\n` + (note ? note + ' · ' : '') + sentSummary(Object.values(done)[0].sent, size) +
-                  (nf ? `\n${nf} of ${jobs.length} failed: ${Object.values(failed)[0]}` : '') +
-                  (Object.keys(done).length > 1 ? '\nTap a thumbnail to compare.' : ''), nf > 0);
-        loadRecent();
-        return;
-      }
-    }
-  } finally {
-    store('pendingCloud', '');
+// ---- ☁️ Atlas jobs (Seedream, Seedance, Wan, Finish at 1080p) run in the
+// background: as soon as one is sent, Generate is free again. Each shows as a
+// line under the status ("running · 1m 20s", then "ready · Open" or the error);
+// a finished one opens by itself when nothing else is going on. The list is kept
+// in localStorage so a reloaded page picks the jobs up again.
+const bgState = {};  // key -> { entry, done, failed, secs, finished, error, got, gone }
+function bgList() { try { return JSON.parse(recall('bgCloud') || '[]'); } catch (e) { return []; } }
+function bgSave(list) { store('bgCloud', JSON.stringify(list)); }
+const bgLimit = e => e.size === 'video' ? 2700 : 400 + 20 * e.jobs.length;
+const fmtSecs = s => s >= 60 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s` : `${s}s`;
+function renderBg() {
+  const box = $('bgBox'); box.innerHTML = '';
+  for (const [key, st] of Object.entries(bgState)) {
+    if (st.gone) continue;
+    const row = document.createElement('div'), txt = document.createElement('span'), x = document.createElement('button');
+    row.className = 'bg';
+    const n = st.entry.jobs.length, nd = Object.keys(st.done).length, nf = Object.keys(st.failed).length;
+    const what = st.entry.label || (st.entry.size === 'video' ? 'Atlas video' : 'Seedream edit');
+    if (!st.finished) txt.textContent = `☁️ ${what} · ${fmtSecs(st.secs || 0)}` + (n > 1 ? ` · ${nd}/${n} done` : '') + ' (keeps going if you leave)';
+    else if (st.got && st.got.length) {
+      txt.textContent = `✓ ${what} ready` + (nf ? ` (${nf} of ${n} failed)` : '');
+      const o = document.createElement('button'); o.textContent = 'Open'; o.className = 'primary';
+      o.onclick = () => openBg(key); row.append(txt, o);
+    } else txt.textContent = `⚠️ ${what} failed: ${st.error || ''}`;
+    if (!row.contains(txt)) row.append(txt);
+    x.textContent = '✕'; x.setAttribute('aria-label', st.finished ? 'Hide' : 'Stop watching (it still finishes on Atlas)');
+    x.onclick = () => { if (!st.finished) st.stopped = true; st.gone = true; bgSave(bgList().filter(e => e.key !== key)); renderBg(); };
+    row.append(x); box.append(row);
   }
+  box.classList.toggle('hidden', !box.children.length);
+}
+function startBg(entry) {
+  entry.key = entry.key || entry.t0 + '-' + Math.random().toString(36).slice(2, 6);
+  bgSave([...bgList().filter(e => e.key !== entry.key), entry]);
+  bgWatch(entry);
+}
+async function bgWatch(entry) {
+  if (bgState[entry.key]) return;
+  const st = bgState[entry.key] = { entry, done: {}, failed: {}, secs: Math.round((Date.now() - entry.t0) / 1000) };
+  renderBg();
+  for (;;) {
+    await sleep(3000);
+    if (st.stopped) return;
+    st.secs = Math.round((Date.now() - entry.t0) / 1000);
+    if (st.secs > bgLimit(entry)) { st.error = 'timed out waiting for Atlas'; break; }
+    for (const id of entry.jobs.filter(i => !(i in st.done) && !(i in st.failed))) {
+      let j;
+      try { j = await (await fetch('/rv6m/cloud/job/' + id, { cache: 'no-store' })).json(); }
+      catch (e) { break; }  // VM out of reach for a moment: ask again next time
+      if (j.status === 'error') { st.failed[id] = j.error; continue; }
+      if (j.status !== 'done') continue;
+      st.done[id] = { filename: j.filename, subfolder: '', type: 'output', seconds: j.seconds, sent: j.sent };
+      addCloudRecent(j.filename);
+    }
+    renderBg();
+    if (Object.keys(st.done).length + Object.keys(st.failed).length === entry.jobs.length) break;
+  }
+  st.finished = true;
+  bgSave(bgList().filter(e => e.key !== entry.key));
+  st.got = entry.jobs.filter(i => i in st.done).map(i => st.done[i]);
+  if (!st.got.length && !st.error) st.error = Object.values(st.failed)[0] || 'no result';
+  if (st.got.length) { loadRecent(); if (!$('go').disabled) openBg(entry.key); }
+  renderBg();
+}
+function openBg(key) {
+  const st = bgState[key];
+  if (!st || !st.got || !st.got.length) return;
+  showResult(st.got[0], st.got);
+  const n = st.entry.jobs.length, nf = Object.keys(st.failed).length;
+  const cloud = Math.max(...st.got.map(d => d.seconds || 0));
+  setStatus(`Done in ${fmtSecs(st.secs || 0)} (Atlas Cloud ${cloud.toFixed(0)}s).\n` + (st.entry.note ? st.entry.note + ' · ' : '') +
+            sentSummary(st.got[0].sent, st.entry.size) + (nf ? `\n${nf} of ${n} failed: ${Object.values(st.failed)[0]}` : '') +
+            (st.got.length > 1 ? '\nTap a thumbnail to compare.' : ''), nf > 0);
+  $('result').scrollIntoView({ behavior: 'smooth' });
+  st.gone = true; renderBg();
 }
 // What the VM actually sent to Atlas, so results can be compared with Atlas's own playground
 function sentSummary(sent, size) {
@@ -1993,15 +2028,12 @@ async function waitForJobs(ids, t0) {
 // Pick up an edit that was still running when the page was left or reloaded
 // (called at the end of the script, once every variable it uses exists)
 async function resumePending() {
+  // Atlas jobs still running (an older page kept one as "pendingCloud")
   let pc = null; try { pc = JSON.parse(recall('pendingCloud') || 'null'); } catch (e) {}
-  if (pc && pc.jobs && pc.jobs.length && Date.now() - pc.t0 < (pc.size === 'video' ? 2700 : 400 + 20 * pc.jobs.length) * 1000) {
-    $('go').disabled = true; $('stop').classList.remove('hidden'); stopRequested = false;
-    setStatus(pc.size === 'video' ? 'Picking up your video…' : 'Picking up your Seedream edit…');
-    try { await waitForCloud(pc.jobs, pc.t0, pc.size || '', pc.nPhotos || 1, pc.note || ''); }
-    catch (err) { setStatus(err.message, true); }
-    finally { $('go').disabled = false; $('stop').classList.add('hidden'); }
-    return;
-  }
+  if (pc && pc.jobs && pc.jobs.length) { bgSave([...bgList(), { ...pc, key: 'old-' + pc.t0 }]); store('pendingCloud', ''); }
+  const live = bgList().filter(e => e.jobs && e.jobs.length && Date.now() - e.t0 < bgLimit(e) * 1000);
+  bgSave(live);
+  live.forEach(bgWatch);
   let pj = null; try { pj = JSON.parse(recall('pendingJob') || 'null'); } catch (e) {}
   const ids = pj && (pj.ids || (pj.id ? [pj.id] : []));
   if (!ids || !ids.length || Date.now() - pj.t0 > 2 * 3600 * 1000 * ids.length) return;
@@ -2017,13 +2049,17 @@ async function resumePending() {
 async function loadRecent() {
   try {
     const h = await (await fetch('/api/history?max_items=40')).json();
+    // Cloud results: the VM's own list, plus any this phone remembers
+    let vmCloud = [];
+    try { const r = await fetch('/rv6m/cloud/recent', { cache: 'no-store' }); if (r.ok) vmCloud = await r.json(); } catch (e) {}
+    const seenF = new Set(), cloudItems = [...vmCloud, ...cloudRecent()].filter(c => c.f && !seenF.has(c.f) && seenF.add(c.f));
     const items = Object.values(h)
       .filter(j => j.status && j.status.status_str === 'success')
       .map(j => ({ t: (j.status.messages || []).map(m => m[1] && m[1].timestamp).filter(Boolean).pop() || 0,
                    img: (j.outputs && j.outputs['9'] && j.outputs['9'].images || [])[0] }))
       .filter(x => x.img && x.img.type === 'output' && /^rv6_edit_(up_)?\d/.test(x.img.filename))
       .map(x => ({ ...x, t: x.t / 1000 }))  // ComfyUI timestamps are in ms
-      .concat(cloudRecent().map(c => ({ t: c.t, img: { filename: c.f, subfolder: '', type: 'output' } })))
+      .concat(cloudItems.map(c => ({ t: c.t, img: { filename: c.f, subfolder: '', type: 'output' } })))
       .sort((a, b) => b.t - a.t).slice(0, 12);
     const box = $('recentList'); box.innerHTML = '';
     for (const x of items) {
@@ -2093,9 +2129,8 @@ $('finishBtn').onclick = async () => {
     const r = await fetch('/rv6m/cloud/finish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'The VM refused (' + r.status + ')');
-    const t0 = Date.now();
-    store('pendingCloud', JSON.stringify({ jobs: [j.job], t0, size: 'video', nPhotos: 0 }));
-    await waitForCloud([j.job], t0, 'video', 0);
+    startBg({ jobs: [j.job], t0: Date.now(), size: 'video', label: 'Finish at 1080p' });
+    setStatus('☁️ Sent to Atlas. It runs in the background: you can start something else now.');
   } catch (err) {
     setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
       ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Finish again.' : err.message, true);

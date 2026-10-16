@@ -573,6 +573,19 @@ async def rv6m_cloud_video(request):
     return web.json_response({"job": jid})
 
 
+# Recent cloud results straight from the output folder, so Recent edits shows
+# them even when the page that sent them stopped watching (or another device did)
+@PromptServer.instance.routes.get("/rv6m/cloud/recent")
+async def rv6m_cloud_recent(request):
+    out = folder_paths.get_output_directory()
+    try:
+        files = [(f, os.path.getmtime(os.path.join(out, f))) for f in os.listdir(out) if f.startswith("rv6_cloud_")]
+    except OSError:
+        files = []
+    files.sort(key=lambda x: -x[1])
+    return web.json_response([{"f": f, "t": t} for f, t in files[:24]])
+
+
 @PromptServer.instance.routes.get("/rv6m/drafts")
 async def rv6m_drafts(request):
     import time

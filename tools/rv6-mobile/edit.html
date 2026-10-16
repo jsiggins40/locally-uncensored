@@ -118,6 +118,21 @@
     <option value="2048">2048 px (slow, may blur or double things)</option>
   </select>
   <div class="hint" id="resHint"></div>
+  <div id="shapeBox" class="hidden">
+    <label for="editShape">Shape</label>
+    <select id="editShape">
+      <option value="">Same as the photo</option>
+      <option value="16:9">16:9 · wide</option>
+      <option value="9:16">9:16 · phone, tall</option>
+      <option value="1:1">1:1 · square</option>
+      <option value="4:3">4:3</option>
+      <option value="3:4">3:4</option>
+      <option value="3:2">3:2</option>
+      <option value="2:3">2:3</option>
+      <option value="21:9">21:9 · cinema</option>
+    </select>
+    <div class="hint" id="shapeHint"></div>
+  </div>
 </div>
 
 <div class="panel">
@@ -406,7 +421,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-16b';
+const PAGE_BUILD = '2026-10-16c';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -551,6 +566,7 @@ function setMode(m) {
   for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr || vid);
   $('tagBox').classList.toggle('hidden', cloud || q || fx || vid);
   $('res').previousElementSibling.classList.toggle('hidden', cloud || cr || vid);
+  shapeUI();
   $('resHint').classList.toggle('hidden', cloud || cr || vid);
   $('neg').closest('details').classList.toggle('hidden', cloud || fx || vid);
   $('cloudBox').classList.toggle('hidden', !cloud);
@@ -1057,7 +1073,7 @@ function buildFillWorkflow(imgName, maskName, text, seed, lora = null) {
   return p;
 }
 
-function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '', moreNames = [], maskName = null) {
+function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = [], negative = '', moreNames = [], maskName = null, outDims = null) {
   const [img2Name, img3Name] = moreNames || [];
   // The Plus encoder takes up to three images; the output keeps picture 1's size and layout
   const enc = text => qwen.plus
@@ -1110,6 +1126,9 @@ function buildInstructWorkflow(imgName, instruction, seed, steps, cfg, extras = 
     });
     p['7'].inputs.latent_image = ['32', 0];
     p['9'].inputs.images = ['36', 0];
+  } else if (outDims) {
+    // Another shape: an empty Qwen latent of that size (as in ComfyUI's Qwen-Image graph)
+    p['6'] = { class_type: 'EmptySD3LatentImage', inputs: { width: outDims[0], height: outDims[1], batch_size: 1 } };
   }
   return aioActive() ? toAio(p) : p;
 }
@@ -1282,7 +1301,7 @@ const q21Cfg = () => +$('q21cfg').value || 1;
 function showQ21Cfg() { setVal($('q21cfg'), +(recall(q21Key()) || (q21Unet() === q21.noct ? 3 : 1))); }
 $('q21cfg').addEventListener('input', () => store(q21Key(), $('q21cfg').value));
 for (const b of document.querySelectorAll('button.step[data-for=q21cfg]')) b.addEventListener('pointerup', () => store(q21Key(), $('q21cfg').value));
-function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, maskName = null) {
+function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, maskName = null, outDims = null) {
   const edit = imgNames.length > 0, cfg = q21Cfg();
   const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: q21Unet(), weight_dtype: 'default' } },
@@ -1295,6 +1314,11 @@ function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, 
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
   };
   if (!edit) p['6'] = { class_type: 'EmptyLatentImage', inputs: { width: w, height: h, batch_size: 1 } };
+  if (edit && outDims && !maskName) {
+    // Another shape: sample on an empty latent of that size instead of the photo's
+    p['6'] = { class_type: 'EmptyLatentImage', inputs: { width: outDims[0], height: outDims[1], batch_size: 1 } };
+    p['7'].inputs.latent_image = ['6', 0];
+  }
   imgNames.forEach((n, i) => {
     const id = i === 0 ? '5' : String(40 + i);
     p[id] = { class_type: 'LoadImage', inputs: { image: n } };
@@ -1406,7 +1430,29 @@ function fitToRes(keepMask) {
   undoStack = [];
   resHint();
 }
+// ---- Shape for Qwen edits (✨ Describe edit): the model re-frames the scene for
+// the new shape (fills in or leaves out the edges) instead of stretching the
+// photo; the long side follows "Output size"
+const shapeAvail = () => mode === 'instruct' && (q21Active() || !!qwen);
+function editOutDims() {
+  if (!shapeAvail() || !$('editShape').value) return null;
+  const [a, b] = $('editShape').value.split(':').map(Number), L = +$('res').value;
+  const r32 = v => Math.max(256, Math.round(v / 32) * 32);
+  return a >= b ? [r32(L), r32(L * b / a)] : [r32(L * a / b), r32(L)];
+}
+function shapeUI() {
+  $('shapeBox').classList.toggle('hidden', !shapeAvail());
+  const d = editOutDims();
+  $('shapeHint').textContent = d
+    ? `Output ${d[0]}×${d[1]}. The model re-frames the scene for this shape: it adds to (or trims) the edges instead of stretching. ` +
+      'Say what should fill any new space, e.g. "make it a wide shot, extend the street on both sides".'
+    : 'The result keeps the shape of your photo.';
+}
+$('editShape').value = recall('editShape') || '';
+if ($('editShape').selectedIndex < 0) $('editShape').value = '';
+$('editShape').addEventListener('change', () => { store('editShape', $('editShape').value); shapeUI(); });
 function resHint() {
+  shapeUI();
   const loaded = photoIn;
   const small = loaded && Math.max(full.width, full.height) < +$('res').value;
   $('resHint').textContent = (loaded ? `This photo: ${base.width}×${base.height}` +
@@ -1674,7 +1720,7 @@ $('go').onclick = async () => {
       if (mode === 'instruct') for (const [i, c] of usedMore().entries()) names.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
       const maskName = qwenMask() ? await upload(await exportMask(), `rv6m_${ts}_mask.png`) : null;
       const [w, h] = createDims();
-      p = buildQ21Workflow($('prompt').value.trim(), seed, +$('steps').value, mode === 'create' ? [] : [imgName, ...names], w, h, maskName);
+      p = buildQ21Workflow($('prompt').value.trim(), seed, +$('steps').value, mode === 'create' ? [] : [imgName, ...names], w, h, maskName, editOutDims());
     } else if (mode === 'create') {
       const [w, h] = createDims();
       const extras = activeLoras();
@@ -1695,7 +1741,7 @@ $('go').onclick = async () => {
       if (mode === 'instruct' && qwen.plus) for (const [i, c] of usedMore().entries()) moreNames.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
       const maskName = qwenMask() ? await upload(await exportMask(), `rv6m_${ts}_mask.png`) : null;
       p = buildInstructWorkflow(imgName, instruction, seed, +$('steps').value, +$('cfg').value, extras,
-                                fastActive() ? '' : $('neg').value, moreNames, maskName);
+                                fastActive() ? '' : $('neg').value, moreNames, maskName, maskName ? null : editOutDims());
     } else if (mode === 'whole') {
       // Inpainting checkpoints need a mask; restyling uses the regular Realistic Vision instead
       if (isInpaint(model)) {
@@ -2006,11 +2052,11 @@ async function waitForJobs(ids, t0) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
         const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
           : q21Active() ? `Qwen 2.1${q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
-            (mode === 'create' ? createDims().join('×') : `${base.width}×${base.height}`) + (ablActive() ? ' · 🔓 encoder' : '') +
+            (mode === 'create' ? createDims().join('×') : (editOutDims() || [base.width, base.height]).join('×')) + (ablActive() ? ' · 🔓 encoder' : '') +
             (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')
           : mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${createDims().join('×')}` +
             (activeLoras().length ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') : fixMask() ? `Fix (OneReward) · 28 steps · ${base.width}×${base.height}` + (activeFluxLora() ? ' · LoRA' : '') : usesQwen()
-          ? (aioActive() ? 'Rapid AIO · ' : '') + `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${base.width}×${base.height}` +
+          ? (aioActive() ? 'Rapid AIO · ' : '') + `${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${(editOutDims() || [base.width, base.height]).join('×')}` +
             (activeLoras().length && !aioActive() ? ' · LoRA' : '') + (ablActive() ? ' · 🔓 encoder' : '') + (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')
           : `${$('steps').value} steps · ${base.width}×${base.height}`;
         setStatus(`Done in ${secs}s. GPU time ${gpu ? gpu.toFixed(1) + 's' : '?'}` +

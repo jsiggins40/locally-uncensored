@@ -421,7 +421,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-16c';
+const PAGE_BUILD = '2026-10-16d';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -435,8 +435,20 @@ const full = document.createElement('canvas');  // the photo at up to 2048 px, f
 let mainOrig = null;
 const SENDABLE = /^image\/(jpeg|png|webp)$/;
 const extOf = f => ({ 'image/png': 'png', 'image/webp': 'webp' })[f.type] || 'jpg';
+// iOS can lose access to a picked file partway through reading it (after a while
+// or after switching apps), which froze uploads mid-way. So each picked original
+// is copied into memory right away; a very large one (or one that can't be read)
+// is replaced by the page's own high-quality copy of the photo.
+async function toMem(f, canvas) {
+  try { if (f && f.size <= 12e6) return new Blob([await f.arrayBuffer()], { type: f.type || 'image/jpeg' }); } catch (e) {}
+  return canvas ? new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95)) : null;
+}
 async function cloudUpload(orig, canvas, name) {
-  if (orig && SENDABLE.test(orig.type) && orig.size <= 10e6) return upload(orig, `${name}.${extOf(orig)}`);
+  if (orig && SENDABLE.test(orig.type) && orig.size <= 10e6) {
+    // The original once; if that upload stalls or fails, send the page's 2048 px copy instead
+    try { return await upload(orig, `${name}.${extOf(orig)}`, 1); }
+    catch (e) { if (!/stopped moving|load failed|failed to fetch|network/i.test(e.message)) throw e; }
+  }
   return upload(await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95)), `${name}.jpg`);
 }
 
@@ -979,7 +991,7 @@ $('fileBatch').addEventListener('change', async e => {
   const room = BATCH_MAX - batch.length;
   if (files.length > room) setStatus(`A batch holds up to ${BATCH_MAX + 1} photos; added the first ${room}.`, true);
   for (const f of files.slice(0, Math.max(0, room))) {
-    try { const c = await readPhoto(f); c.orig = f; batch.push(c); } catch (err) { setStatus(err.message, true); }
+    try { const c = await readPhoto(f); c.orig = await toMem(f, c); batch.push(c); } catch (err) { setStatus(err.message, true); }
   }
   renderBatch();
 });
@@ -1006,7 +1018,7 @@ $('file2').addEventListener('change', async e => {
   const room = maxMore() - more.length;
   if (files.length > room) setStatus(`Only ${room} more fit${mode === 'cloud' ? ' (10 photos in total)' : ''}; added the first ${room}.`, true);
   for (const f of files.slice(0, Math.max(0, room))) {
-    try { const c = await readPhoto(f); c.orig = f; more.push(c); } catch (err) { setStatus(err.message, true); }
+    try { const c = await readPhoto(f); c.orig = await toMem(f, c); more.push(c); } catch (err) { setStatus(err.message, true); }
   }
   renderMore();
 });
@@ -1496,7 +1508,7 @@ $('file').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   genPhoto++;
   const url = URL.createObjectURL(f);
-  try { await loadIntoCanvas(url); mainOrig = f; savePhoto(); setStatus(mode === 'mask' ? 'Tap the person or object to change, or use Paint.' : 'Now type what to change.'); }
+  try { await loadIntoCanvas(url); mainOrig = await toMem(f, full); savePhoto(); setStatus(mode === 'mask' ? 'Tap the person or object to change, or use Paint.' : 'Now type what to change.'); }
   catch (err) { setStatus(err.message, true); }
   finally { URL.revokeObjectURL(url); e.target.value = ''; }
 });
@@ -1655,12 +1667,12 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 window.addEventListener('pageshow', () => ensureServer());
 
 // Uploads show their progress on the status line, so a slow connection looks
-// slow rather than stuck; one that makes no progress for 60 s is retried.
+// slow rather than stuck; one that makes no progress for 30 s is retried.
 function uploadOnce(fd, size, label) {
   return new Promise((ok, bad) => {
     const x = new XMLHttpRequest();
     let last = Date.now();
-    const stall = setInterval(() => { if (Date.now() - last > 60000) x.abort(); }, 5000);
+    const stall = setInterval(() => { if (Date.now() - last > 30000) x.abort(); }, 3000);
     x.open('POST', '/api/upload/image');
     x.upload.onprogress = e => {
       last = Date.now();
@@ -1669,11 +1681,11 @@ function uploadOnce(fd, size, label) {
     };
     x.onload = () => { clearInterval(stall); ok({ ok: x.status >= 200 && x.status < 300, status: x.status, text: x.responseText }); };
     x.onerror = () => { clearInterval(stall); bad(new Error('Load failed')); };
-    x.onabort = () => { clearInterval(stall); bad(new Error('The upload stopped moving for a minute')); };
+    x.onabort = () => { clearInterval(stall); bad(new Error('The upload stopped moving for 30 seconds')); };
     x.send(fd);
   });
 }
-async function upload(blob, name) {
+async function upload(blob, name, tries = 3) {
   const fd = new FormData();
   fd.append('image', blob, name); fd.append('type', 'input'); fd.append('overwrite', 'true');
   const label = ($('status').textContent.split(' · ')[0] || 'Sending to the VM…').split('\n')[0];
@@ -1681,7 +1693,7 @@ async function upload(blob, name) {
   for (let attempt = 0; ; attempt++) {  // uploads overwrite, so retrying is safe
     try { r = await uploadOnce(fd, blob.size, label); break; }
     catch (e) {
-      if (attempt >= 2 || !(await ensureServer()))
+      if (attempt >= tries - 1 || !(await ensureServer()))
         throw /stopped moving/.test(e.message) ? new Error('The upload stopped moving. The connection to the VM is too slow or dropped: check the Tailscale app, then tap Generate again.') : e;
     }
   }

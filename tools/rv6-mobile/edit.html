@@ -421,7 +421,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-24a';
+const PAGE_BUILD = '2026-10-24b';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -457,6 +457,8 @@ fetch('./workflow.json').then(r => r.json()).then(w => workflow = w)
 
 // SD1.5 Realistic Vision uses the separate VAE file; SDXL checkpoints use their own.
 const isRV = name => /realistic_vision/i.test(name);
+// Any Realistic Vision download, also Civitai's names (realisticVisionV60B1_…, VAE built in)
+const isRVAny = name => /realistic.?vision/i.test(name);
 let allModels = [], aioCkpt = null;
 const isInpaint = name => /inpaint/i.test(name);
 function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -464,10 +466,10 @@ function recall(k) { try { return localStorage.getItem(k); } catch (e) { return 
 
 // Starting points per model; each model's Civitai page has the author's own advice.
 const PRESETS = [
-  { match: /realistic_vision.*inpaint/i, label: 'Realistic Vision inpainting',
+  { match: /realistic.?vision.*inpaint/i, label: 'Realistic Vision inpainting',
     steps: 28, cfg: 6, denoise: 1.0,
     hint: 'Best for replacing an area completely.' },
-  { match: /realistic_vision/i, label: 'Realistic Vision',
+  { match: /realistic.?vision/i, label: 'Realistic Vision',
     steps: 28, cfg: 6, denoise: 0.7, hint: 'Regular SD1.5 model: keep strength 0.6–0.8.' },
   { match: /anteros/i, label: 'Anteros XXXL',
     steps: 30, cfg: 4.5, denoise: 0.75,
@@ -1381,7 +1383,7 @@ const ckptReady = fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.j
   const ck = Array.isArray(v[0]) ? v[0] : (v[1] && v[1].options) || [];
   aioCkpt = ck.filter(n => /rapid.?aio/i.test(n)).sort().pop() || null;
   allModels = ck.filter(n => !/rapid.?aio/i.test(n));
-  const names = allModels.filter(n => !/^Realistic_Vision_V6\.0_NV_B1_fp16/.test(n));
+  const names = allModels;
   $('modeWhole').classList.toggle('hidden', !allModels.length);
   $('model').innerHTML = '';
   for (const n of names) $('model').add(new Option(n.replace(/\.safetensors$/, ''), n));
@@ -1776,7 +1778,7 @@ $('go').onclick = async () => {
     } else if (mode === 'whole') {
       // Inpainting checkpoints need a mask; restyling uses the regular Realistic Vision instead
       if (isInpaint(model)) {
-        const plain = allModels.find(n => isRV(n) && !isInpaint(n));
+        const plain = allModels.find(n => isRVAny(n) && !isInpaint(n));
         if (!plain) throw new Error('Restyle needs a non-inpainting model. Pick Anteros or bigASP.');
         model = plain;
       }

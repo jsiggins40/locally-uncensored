@@ -214,12 +214,14 @@
   <div id="q21Box" class="hidden">
     <div id="q21PickRow">
       <label>Qwen 2.1 version</label>
-      <div class="seg"><button id="q21Noct">🔓 Noct Q uncensored</button><button id="q21Off">Official</button></div>
+      <div class="seg"><button id="q21Noct">🔓 Noct Q uncensored</button><button id="q21Off">Official</button><button id="q21Turbo" class="hidden">⚡ Turbo</button></div>
       <div class="hint" id="q21Hint"></div>
     </div>
+    <div id="q21CfgBox">
     <div class="lbl"><span>Follow the prompt</span></div>
     <div class="ctl"><button class="step" data-for="q21cfg" data-dir="-1" aria-label="Less">−</button><input id="q21cfg" type="range" min="1" max="8" step="0.5" value="3" data-nudge="0.5"><button class="step" data-for="q21cfg" data-dir="1" aria-label="More">+</button><span class="val" id="q21cfgVal"></span></div>
     <div class="hint">Higher = bigger changes (poses, actions) and follows your words harder; too high looks harsh or overcooked. Try 4–6 when it won't change the pose.</div>
+    </div>
   </div>
   <div id="speedBox" class="hidden">
     <div class="seg" style="margin-top:12px"><button id="fastBtn">⚡ Fast</button><button id="qualBtn">✨ Quality</button></div>
@@ -421,7 +423,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-24b';
+const PAGE_BUILD = '2026-10-24c';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -536,7 +538,11 @@ let video = null, upscaler = null, jobNote = '';
 let q21 = null, createModel = recall('createModel') || 'q21', q21Pick = recall('q21Pick') || 'noct';
 const q21Active = () => !!q21 && (mode === 'create' ? (createModel === 'q21' || !create)
   : (mode === 'instruct' || qwenMask()) && (editModel === 'q21' || !qwen));
-const q21Unet = () => (q21Pick === 'noct' && q21.noct) || q21.unet || q21.noct;
+const q21Turbo = () => !!(q21 && q21.turbo && q21Pick === 'turbo');
+const q21Unet = () => (q21Pick === 'noct' && q21.noct) || (q21Turbo() && q21.turbo.unet) || q21.unet || q21.noct;
+// Qwen-Image 2.1 Turbo: 8 steps at CFG 1 on the schedule it was distilled for
+// (Qwen's sample_sigmas, terminal 0 added); other schedules weren't evaluated
+const Q21_TURBO_SIGMAS = '1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0';
 const usesQwen = () => mode === 'instruct' || mode === 'create' || qwenMask();
 const MODE_TEXT = {
   video: ['Turns the photo into a video. Say what happens and how the camera moves; the person and scene come from the photo. Long videos are made 5 seconds at a time and joined seamlessly.',
@@ -657,10 +663,10 @@ async function info(node) {
   try { const r = await fetch('/api/object_info/' + node); return r.ok ? await r.json() : {}; } catch (e) { return {}; }
 }
 (async () => {
-  const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache, svi, svr] = await Promise.all(
+  const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache, svi, svr, msig] = await Promise.all(
     ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit',
      'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader', 'TextEncodeQwenImage21', 'QwenImage21Cache', 'WanImageToVideoSVIPro',
-     'SeedVR2Conditioning'].map(info));
+     'SeedVR2Conditioning', 'ManualSigmas'].map(info));
   const f = {
     unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /fill/i.test(n) && /flux|onereward/i.test(n))
             .sort((a, b) => /onereward/i.test(a) - /onereward/i.test(b) || /fp8/i.test(b) - /fp8/i.test(a)).pop(),
@@ -712,13 +718,18 @@ async function info(node) {
   const bf16Last = (a, b) => /bf16/i.test(a) - /bf16/i.test(b) || a.localeCompare(b);
   const units = optionsOf(unet, 'UNETLoader', 'unet_name'), clips = optionsOf(clip, 'CLIPLoader', 'clip_name');
   const t = {
-    unet: units.filter(n => /qwen_image_2\.1/i.test(n) && !/noct|uncensor/i.test(n)).sort(bf16Last).pop() || null,
+    unet: units.filter(n => /qwen_image_2\.1/i.test(n) && !/noct|uncensor|turbo/i.test(n)).sort(bf16Last).pop() || null,
     noct: units.filter(n => /noct/i.test(n)).sort().pop() || null,
     clip: clips.filter(n => /qwen3vl_8b/i.test(n) && !/heretic|abliterat|uncensor/i.test(n)).sort(bf16Last).pop(),
     clipAbl: clips.filter(n => /heretic|abliterat|uncensor/i.test(n) && /qwen3vl|qwen_image_2\.1|2\.1/i.test(n)).sort().pop() || null,
     vae: optionsOf(vae, 'VAELoader', 'vae_name').filter(n => /qwen_image_2\.1_vae/i.test(n)).sort().pop(),
     cache: !!q21cache.QwenImage21Cache,
   };
+  // ⚡ Turbo (add-qwen21-turbo.sh): its own model, or a LoRA on the official one
+  const sigIn = Object.keys(((msig.ManualSigmas || {}).input || {}).required || {})[0];
+  const tUnet = units.filter(n => /qwen.?image.?2\.1/i.test(n) && /turbo/i.test(n) && !/noct/i.test(n)).sort(bf16Last).pop();
+  const tLora = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name').filter(n => /qwen.?image.?2\.1/i.test(n) && /turbo/i.test(n)).sort().pop();
+  t.turbo = sigIn && (tUnet || (tLora && t.unet)) ? { unet: tUnet || t.unet, lora: tUnet ? null : tLora, sigIn } : null;
   // 🎬 Video: Wan 2.2 image-to-video (high + low noise models), LightX2V 4-step and
   // SVI 2.0 Pro LoRAs, KJNodes' SVI node (add-video.sh)
   const loras = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name');
@@ -889,25 +900,32 @@ function applyQ21() {
   const on = q21Active();
   $('q21Box').classList.toggle('hidden', !on);
   if (!on) return;
-  $('q21PickRow').classList.toggle('hidden', !(q21.noct && q21.unet));
+  $('q21PickRow').classList.toggle('hidden', [q21.noct, q21.unet, q21.turbo].filter(Boolean).length < 2);
+  $('q21Noct').classList.toggle('hidden', !q21.noct); $('q21Off').classList.toggle('hidden', !q21.unet); $('q21Turbo').classList.toggle('hidden', !q21.turbo);
   showQ21Cfg();
-  $('q21Noct').classList.toggle('on', q21Unet() === q21.noct); $('q21Off').classList.toggle('on', q21Unet() !== q21.noct);
-  $('q21Hint').textContent = q21Unet() === q21.noct
+  const turbo = q21Turbo(), noct = !turbo && q21Unet() === q21.noct;
+  $('q21Noct').classList.toggle('on', noct); $('q21Off').classList.toggle('on', !noct && !turbo); $('q21Turbo').classList.toggle('on', turbo);
+  $('q21CfgBox').classList.toggle('hidden', turbo);
+  $('q21Hint').textContent = turbo
+    ? 'Turbo: official Qwen 2.1 made for 8 steps, about 3× faster. A little less fine detail than Official; prompt strength is fixed (it\'s built for CFG 1).'
+    : noct
     ? 'Noct Q: community fine-tune that renders explicit scenes as asked far more often. Its author recommends prompt strength 3. Compare with Official if quality looks off.'
     : 'Official Qwen 2.1: already loose on NSFW; the best general image quality.';
+  if (on) { setVal($('steps'), turbo ? 8 : 25); setVal($('cfg'), 1); }
 }
 $('emQ21').onclick = () => { editModel = 'q21'; store('editModel', editModel); setMode(mode); };
 $('cmQ2512').onclick = () => { createModel = '2512'; store('createModel', createModel); setMode(mode); };
 $('cmQ21').onclick = () => { createModel = 'q21'; store('createModel', createModel); setMode(mode); };
 $('q21Noct').onclick = () => { q21Pick = 'noct'; store('q21Pick', q21Pick); applyQ21(); };
 $('q21Off').onclick = () => { q21Pick = 'official'; store('q21Pick', q21Pick); applyQ21(); };
+$('q21Turbo').onclick = () => { q21Pick = 'turbo'; store('q21Pick', q21Pick); applyQ21(); };
 $('emQwen').onclick = () => { editModel = 'qwen'; store('editModel', editModel); setMode(mode); };
 $('emAio').onclick = () => { editModel = 'aio'; store('editModel', editModel); setMode(mode); };
 const speedLora = () => q21Active() ? false : aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
 function fastActive() { return !!speedLora() && !quality; }
 function applySpeed() {
   const cr = mode === 'create';
-  if (q21Active()) { setVal($('steps'), 25); setVal($('cfg'), 1); return; }  // Qwen's own 2.1 settings
+  if (q21Active()) { setVal($('steps'), q21Turbo() ? 8 : 25); setVal($('cfg'), 1); return; }  // Qwen's own 2.1 settings
   if (!(cr ? create : qwen)) return;
   $('fastBtn').classList.toggle('on', fastActive()); $('qualBtn').classList.toggle('on', !fastActive());
   if (aioActive()) {
@@ -1311,7 +1329,7 @@ function buildVideoWorkflow(imgName, text, seed) {
 const Q21_NEG = 'blurry, low quality, distorted, deformed, bad anatomy, extra limbs, extra fingers, watermark, text';
 // "Follow the prompt" slider, remembered per version (defaults: Noct Q 3, Official 1)
 const q21Key = () => 'q21cfg_' + (q21Unet() === q21.noct ? 'noct' : 'official');
-const q21Cfg = () => +$('q21cfg').value || 1;
+const q21Cfg = () => q21Turbo() ? 1 : +$('q21cfg').value || 1;
 function showQ21Cfg() { setVal($('q21cfg'), +(recall(q21Key()) || (q21Unet() === q21.noct ? 3 : 1))); }
 $('q21cfg').addEventListener('input', () => store(q21Key(), $('q21cfg').value));
 for (const b of document.querySelectorAll('button.step[data-for=q21cfg]')) b.addEventListener('pointerup', () => store(q21Key(), $('q21cfg').value));
@@ -1338,9 +1356,24 @@ function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, 
     p[id] = { class_type: 'LoadImage', inputs: { image: n } };
     p['3'].inputs['images.image_' + (i + 1)] = [id, 0];
   });
+  if (q21Turbo() && q21.turbo.lora) {
+    p['18'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: q21.turbo.lora, strength_model: 1 } };
+    p['7'].inputs.model = ['18', 0];
+  }
   if (q21.cache) {
-    p['19'] = { class_type: 'QwenImage21Cache', inputs: { model: ['1', 0], device: 'auto', dtype: 'default' } };
+    p['19'] = { class_type: 'QwenImage21Cache', inputs: { model: p['7'].inputs.model, device: 'auto', dtype: 'default' } };
     p['7'].inputs.model = ['19', 0];
+  }
+  if (q21Turbo()) {
+    // Same model, conditioning and latent, sampled on Turbo's own 8-step schedule
+    const k = p['7'].inputs;
+    Object.assign(p, {
+      '70': { class_type: 'RandomNoise', inputs: { noise_seed: seed } },
+      '71': { class_type: 'CFGGuider', inputs: { model: k.model, positive: k.positive, negative: k.negative, cfg: 1 } },
+      '72': { class_type: 'KSamplerSelect', inputs: { sampler_name: 'euler' } },
+      '73': { class_type: 'ManualSigmas', inputs: { [q21.turbo.sigIn]: Q21_TURBO_SIGMAS } },
+    });
+    p['7'] = { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['70', 0], guider: ['71', 0], sampler: ['72', 0], sigmas: ['73', 0], latent_image: k.latent_image } };
   }
   if (maskName) {
     // Selected area: the whole picture is re-generated, then only the (soft-edged)
@@ -2085,7 +2118,7 @@ async function waitForJobs(ids, t0) {
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
         const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
-          : q21Active() ? `Qwen 2.1${q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
+          : q21Active() ? `Qwen 2.1${q21Turbo() ? ' Turbo' : q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
             (mode === 'create' ? createDims().join('×') : (editOutDims() || [base.width, base.height]).join('×')) + (ablActive() ? ' · 🔓 encoder' : '') +
             (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')
           : mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${createDims().join('×')}` +

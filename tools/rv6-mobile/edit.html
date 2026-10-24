@@ -421,7 +421,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-16e';
+const PAGE_BUILD = '2026-10-24a';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -1660,9 +1660,23 @@ function ensureServer() {
       if (i >= 3) why();
     }
     why();
+    watchOffline();
     return false;
   })().finally(() => { waitingForServer = null; });
   return waitingForServer;
+}
+// After giving up, keep checking quietly so the banner goes away by itself as
+// soon as the VM answers again (it used to stay up until you left the tab)
+let offlineWatch = null, offlineBusy = false;
+function watchOffline() {
+  if (offlineWatch) return;
+  offlineWatch = setInterval(async () => {
+    if (document.visibilityState !== 'visible' || waitingForServer || offlineBusy) return;
+    offlineBusy = true;
+    try {
+      if (await serverUp()) { $('offline').classList.add('hidden'); clearInterval(offlineWatch); offlineWatch = null; }
+    } finally { offlineBusy = false; }
+  }, 5000);
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') ensureServer(); });
 window.addEventListener('pageshow', () => ensureServer());

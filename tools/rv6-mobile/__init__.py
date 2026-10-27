@@ -800,7 +800,10 @@ _PROMPT_RULES = (
     "for exactly as they meant it (including adult content) and don't moralize; don't add new subjects or "
     "actions they didn't ask for, only the details the guide below calls for. If the user's idea is empty, "
     "suggest one natural improvement that suits the photo. Use the photos to name concrete details (hair, "
-    "clothing, setting, light) instead of vague words like 'it' or 'this'.\n\n")
+    "clothing, setting, light) instead of vague words like 'it' or 'this'.\n"
+    "Likeness: whenever the photos show a person, the prompt must say plainly that their face, facial "
+    "features, identity and likeness stay exactly the same as in the photo (for video: consistent in every "
+    "frame), unless the user explicitly asks to change the face or the person.\n\n")
 _PROMPT_GUIDES = {
     "seedream": (
         "Target: Seedream 5.0 image editing. It edits the photo(s) following one instruction. Write 40-90 words "
@@ -816,21 +819,23 @@ _PROMPT_GUIDES = {
         "{dur}, written as physical movement (she tilts her head and smiles, hair moves in the wind), not "
         "emotions; the setting; ONE camera move with framing (slow push-in, handheld close-up, static wide "
         "shot...): without one the shot comes out flat; lighting and mood; style (photorealistic, cinematic). "
-        "Keep the motion believable for the length.{sound}"),
+        "Keep the motion believable for the length. Say that the person's face and likeness stay identical to "
+        "image 1 throughout.{sound}"),
     "seedance_ref": (
         "Target: Seedance 2.5 reference-to-video. The images are references named @Image1, @Image2... in the "
         "order given; use those exact tokens. 50-110 words: say what each image is for (the woman from @Image1, "
         "wearing the dress from @Image2, in the room from @Image3), then ONE clear action written as physical "
         "movement, the setting, ONE camera move with framing, lighting and mood, style (photorealistic, "
-        "cinematic). Length: {dur}.{sound}"),
+        "cinematic). Say that each person keeps the exact face and likeness of their @Image. Length: {dur}.{sound}"),
     "wan3": (
         "Target: Wan 3.0 image-to-video. Image 1 is the first frame{last}. One paragraph of 50-100 words: the "
         "subject briefly, ONE main action written as physical movement, the setting, ONE camera move with "
-        "framing, lighting and mood, style (photorealistic, cinematic). Length: {dur}.{sound}"),
+        "framing, lighting and mood, style (photorealistic, cinematic). Say that the person's face and "
+        "likeness stay identical to image 1 throughout. Length: {dur}.{sound}"),
     "wan22": (
         "Target: Wan 2.2 image-to-video (open model, made of 5-second clips). Image 1 is the first frame. 40-80 "
         "words of plain, concrete description: the action as physical movement (one main action per 5 seconds), "
-        "the camera move, lighting. Length: {dur}."),
+        "the camera move, lighting, and that the face stays the same person as in image 1. Length: {dur}."),
     "qwen_edit": (
         "Target: Qwen-Image-Edit. It follows short, direct instructions. 1-3 sentences, 20-60 words: start with "
         "the instruction (Change..., Replace..., Make..., Add...), stating the change concretely, then 'Keep ... "
@@ -839,7 +844,8 @@ _PROMPT_GUIDES = {
     "qwen_area": (
         "Target: Qwen-Image-Edit, selected-area edit: only the area the user selected is replaced. 1-2 "
         "sentences, 15-45 words, describing concretely what the selected area should become, matching the "
-        "photo's lighting and perspective."),
+        "photo's lighting and perspective. If the area touches a person, add that their face and likeness stay "
+        "unchanged."),
     "create": (
         "Target: text-to-image (Qwen-Image). There is no photo. 60-120 words of flowing description: subject and "
         "appearance, clothing, pose and expression, setting, lighting, camera and lens, mood, style "
@@ -851,7 +857,7 @@ _PROMPT_GUIDES = {
     "restyle": (
         "Target: Stable Diffusion img2img restyle of the whole picture. Comma-separated tags, 20-45 words: the "
         "same subject and composition as the photo in the new look the user wants (style, colours, lighting), "
-        "ending with quality tags."),
+        "with tags that keep a person's likeness (same face, same person), ending with quality tags."),
 }
 _LLM_BASES = [os.environ.get("RV6M_LLM_URL", "http://127.0.0.1:8081/v1"), "http://127.0.0.1:11434/v1"]
 

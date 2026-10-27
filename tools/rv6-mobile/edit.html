@@ -429,7 +429,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-27b';
+const PAGE_BUILD = '2026-10-27c';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -1717,7 +1717,7 @@ async function exportMask() {
 // failing: ping until it answers (up to 60s) before doing anything.
 // 'ok', 'down' (the VM answered but ComfyUI didn't: Tailscale gives 502 while it is
 // stopped or restarting) or 'net' (no answer at all: phone network, Tailscale or the VM)
-let lastDown = '';
+let lastDown = '', lastFast = false, otherRouteOk = null;
 // Connection log (kept on this phone, last 80 lines): when you leave / come back
 // and how each check of the VM went, to find out why it drops. Bottom of the page.
 const connLog = (() => { try { return JSON.parse(localStorage.getItem('connLog')) || []; } catch (e) { return []; } })();
@@ -1734,6 +1734,8 @@ async function serverState(ms = 12000) {
   try { const r = await fetch('/api/system_stats', { cache: 'no-store', signal: ac.signal }); st = r.ok ? 'ok' : 'down'; note = 'HTTP ' + r.status; }
   catch (e) { st = 'net'; note = ac.signal.aborted ? `no answer within ${ms / 1000}s` : 'failed: ' + ((e && e.message) || e); }
   finally { clearTimeout(t); }
+  // Failing at once (not timing out) = the phone has no route to the VM at all
+  lastFast = st === 'net' && !ac.signal.aborted && Date.now() - t0 < 1500;
   // Every problem is logged, and the first answer after one
   if (st !== 'ok' || connLast !== 'ok') clog(`check: ${st === 'ok' ? 'OK' : st === 'down' ? 'VM up, ComfyUI not' : 'NO CONNECTION'} (${note}, ${Date.now() - t0} ms)`);
   connLast = st;
@@ -1746,8 +1748,8 @@ async function probeOtherPort() {
   const ac = new AbortController(), t0 = Date.now(), t = setTimeout(() => ac.abort(), 6000);
   try {
     await fetch(`${location.protocol}//${location.hostname}:8443/?probe=${t0}`, { mode: 'no-cors', cache: 'no-store', signal: ac.signal });
-    clog(`  other route (chat port 8443): answered in ${Date.now() - t0} ms`);
-  } catch (e) { clog(`  other route (chat port 8443): ${ac.signal.aborted ? 'no answer within 6s' : 'failed: ' + ((e && e.message) || e)}`); }
+    clog(`  other route (chat port 8443): answered in ${Date.now() - t0} ms`); otherRouteOk = true;
+  } catch (e) { clog(`  other route (chat port 8443): ${ac.signal.aborted ? 'no answer within 6s' : 'failed: ' + ((e && e.message) || e)}`); otherRouteOk = false; }
   finally { clearTimeout(t); }
 }
 async function serverUp(ms) { lastDown = await serverState(ms); return lastDown === 'ok'; }
@@ -1768,11 +1770,13 @@ function ensureServer() {
     $('offline').classList.remove('hidden');
     const why = () => $('offlineWhy').textContent = lastDown === 'down'
       ? 'The VM answers but ComfyUI doesn\'t: it is restarting, or it stopped. If this lasts, run edit-restart in Blink.'
+      : lastFast && otherRouteOk === false
+      ? 'Your iPhone\'s Tailscale is off (every request fails instantly). Open the Tailscale app and switch it on; this page carries on by itself. To stop it happening, see VPN On Demand in Tailscale\'s settings.'
       : 'No answer from the VM. Check the Tailscale app says Connected, and that the VM is running (it is preemptible: Nebius can stop it).';
     $('offlineWhy').textContent = '';
     for (let i = 0; i < 30; i++) {
       await sleep(2000);
-      if (await serverUp(6000)) { $('offline').classList.add('hidden'); clog(`banner gone after ${Math.round((Date.now() - t0) / 1000)} s`); return true; }
+      if (await serverUp(6000)) { $('offline').classList.add('hidden'); $('offlineWhy').textContent = ''; clog(`banner gone after ${Math.round((Date.now() - t0) / 1000)} s`); return true; }
       if (i >= 3) why();
       if (i === 5 && lastDown === 'net') probeOtherPort();
     }
@@ -1791,7 +1795,7 @@ function watchOffline() {
     if (document.visibilityState !== 'visible' || waitingForServer || offlineBusy) return;
     offlineBusy = true;
     try {
-      if (await serverUp(6000)) { $('offline').classList.add('hidden'); clog('banner gone (VM answered again)'); clearInterval(offlineWatch); offlineWatch = null; }
+      if (await serverUp(6000)) { $('offline').classList.add('hidden'); $('offlineWhy').textContent = ''; clog('banner gone (VM answered again)'); clearInterval(offlineWatch); offlineWatch = null; }
     } finally { offlineBusy = false; }
   }, 5000);
 }
@@ -1806,7 +1810,7 @@ let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     clog(`back on the page (away ${hiddenAt ? Math.round((Date.now() - hiddenAt) / 1000) + ' s' : '?'}; ${navigator.onLine ? 'phone online' : 'PHONE SAYS OFFLINE'})`);
-    connLast = ''; ensureServer();
+    connLast = ''; otherRouteOk = null; ensureServer();
   } else { hiddenAt = Date.now(); clog('left the page'); }
 });
 window.addEventListener('pageshow', e => { clog(e.persisted ? 'page restored by Safari' : 'page loaded'); connLast = ''; ensureServer(); });

@@ -433,7 +433,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-27d';
+const PAGE_BUILD = '2026-10-27e';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -1721,7 +1721,7 @@ async function exportMask() {
 // failing: ping until it answers (up to 60s) before doing anything.
 // 'ok', 'down' (the VM answered but ComfyUI didn't: Tailscale gives 502 while it is
 // stopped or restarting) or 'net' (no answer at all: phone network, Tailscale or the VM)
-let lastDown = '', lastFast = false, otherRouteOk = null;
+let lastDown = '', lastFast = false, otherRouteOk = null, navOk = null;
 // Connection log (kept on this phone, last 80 lines): when you leave / come back
 // and how each check of the VM went, to find out why it drops. Bottom of the page.
 const connLog = (() => { try { return JSON.parse(localStorage.getItem('connLog')) || []; } catch (e) { return []; } })();
@@ -1757,6 +1757,48 @@ async function probeOtherPort() {
   finally { clearTimeout(t); }
 }
 async function serverUp(ms) { lastDown = await serverState(ms); return lastDown === 'ok'; }
+// After Safari has been in the background, this copy of the page can lose its
+// ability to make requests (they fail at once) while the phone reaches the VM
+// fine: the connection log showed a reload working on its first try. Test that
+// with a page load in a hidden frame (a navigation, like a reload) and an XHR;
+// if the frame gets through, reload the page. Photos, prompt and running jobs
+// are kept and picked up again. At most once a minute, so it can't loop.
+function navProbe() {
+  return new Promise(ok => {
+    const f = document.createElement('iframe'), t0 = Date.now();
+    let t;
+    const done = v => { clearTimeout(t); f.remove(); clog(`  page-load test: ${v ? 'got through' : 'failed'} (${Date.now() - t0} ms)`); ok(v); };
+    t = setTimeout(() => done(false), 8000);
+    f.onload = () => { let txt = ''; try { txt = f.contentDocument.body.textContent; } catch (e) {} done(/"system"/.test(txt)); };
+    f.style.display = 'none'; f.src = '/api/system_stats?nav=' + t0;
+    document.body.appendChild(f);
+  });
+}
+function xhrProbe() {
+  return new Promise(ok => {
+    const x = new XMLHttpRequest(), t0 = Date.now();
+    const done = v => { clog(`  XHR test: ${v} (${Date.now() - t0} ms)`); ok(v); };
+    x.timeout = 5000; x.onload = () => done('HTTP ' + x.status); x.onerror = () => done('failed'); x.ontimeout = () => done('no answer');
+    try { x.open('GET', '/api/system_stats?xhr=' + t0); x.send(); } catch (e) { done('failed: ' + e.message); }
+  });
+}
+let fastFails = 0, lastNavProbe = 0;
+async function maybeReload() {
+  fastFails = lastFast ? fastFails + 1 : 0;
+  if (fastFails < 3 || Date.now() - lastNavProbe < 15000) return false;
+  lastNavProbe = Date.now();
+  const [nav] = await Promise.all([navProbe(), xhrProbe()]);
+  navOk = nav;
+  if (!nav) return false;
+  let last = 0; try { last = +sessionStorage.getItem('autoReloadAt') || 0; } catch (e) {}
+  if (Date.now() - last < 60000) { clog('  (reloaded less than a minute ago: not again)'); return false; }
+  try { sessionStorage.setItem('autoReloadAt', String(Date.now())); } catch (e) {}
+  store('workPrompt', $('prompt').value);
+  clog('the phone reaches the VM but this page can\'t: reloading the page');
+  setStatus('Reconnecting: reloading the page (your photo, prompt and jobs are kept)…');
+  location.reload();
+  return true;
+}
 let waitingForServer = null;
 function ensureServer() {
   if (!waitingForServer) waitingForServer = (async () => {
@@ -1768,18 +1810,20 @@ function ensureServer() {
     while (Date.now() - t0 < 15000) {
       if (await serverUp(4000)) return true;
       if (!probed && lastDown === 'net') { probed = true; probeOtherPort(); }
+      if (await maybeReload()) return new Promise(() => {});  // the page is reloading
       await sleep(1000);
     }
     clog('banner shown: "Reconnecting to the VM"');
     $('offline').classList.remove('hidden');
     const why = () => $('offlineWhy').textContent = lastDown === 'down'
       ? 'The VM answers but ComfyUI doesn\'t: it is restarting, or it stopped. If this lasts, run edit-restart in Blink.'
-      : lastFast && otherRouteOk === false
-      ? 'Your iPhone\'s Tailscale is off (every request fails instantly). Open the Tailscale app and switch it on; this page carries on by itself. To stop it happening, see VPN On Demand in Tailscale\'s settings.'
+      : lastFast && navOk === false && otherRouteOk === false
+      ? 'Your iPhone can\'t reach the VM at all (every request fails instantly, even a fresh page load). Check the Tailscale app says Connected; this page carries on by itself.'
       : 'No answer from the VM. Check the Tailscale app says Connected, and that the VM is running (it is preemptible: Nebius can stop it).';
     $('offlineWhy').textContent = '';
     for (let i = 0; i < 30; i++) {
       await sleep(2000);
+      if (await maybeReload()) return new Promise(() => {});
       if (await serverUp(6000)) { $('offline').classList.add('hidden'); $('offlineWhy').textContent = ''; clog(`banner gone after ${Math.round((Date.now() - t0) / 1000)} s`); return true; }
       if (i >= 3) why();
       if (i === 5 && lastDown === 'net') probeOtherPort();
@@ -1800,6 +1844,7 @@ function watchOffline() {
     offlineBusy = true;
     try {
       if (await serverUp(6000)) { $('offline').classList.add('hidden'); $('offlineWhy').textContent = ''; clog('banner gone (VM answered again)'); clearInterval(offlineWatch); offlineWatch = null; }
+      else await maybeReload();
     } finally { offlineBusy = false; }
   }, 5000);
 }
@@ -1814,7 +1859,7 @@ let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     clog(`back on the page (away ${hiddenAt ? Math.round((Date.now() - hiddenAt) / 1000) + ' s' : '?'}; ${navigator.onLine ? 'phone online' : 'PHONE SAYS OFFLINE'})`);
-    connLast = ''; otherRouteOk = null; ensureServer();
+    connLast = ''; otherRouteOk = null; navOk = null; fastFails = 0; ensureServer();
   } else { hiddenAt = Date.now(); clog('left the page'); }
 });
 window.addEventListener('pageshow', e => { clog(e.persisted ? 'page restored by Safari' : 'page loaded'); connLast = ''; ensureServer(); });

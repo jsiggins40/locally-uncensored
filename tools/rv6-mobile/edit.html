@@ -376,6 +376,10 @@
   <button id="again" style="width:100%">Keep editing this result</button>
   <button id="finishBtn" class="hidden primary" style="width:100%;margin-top:8px">✨ Finish this draft at 1080p</button>
   <div class="hint hidden" id="finishHint" style="margin-top:4px"></div>
+  <div id="realBox" class="hidden" style="margin-top:10px">
+    <button id="realGo" style="width:100%">✨ Make realistic</button>
+    <div class="hint" id="realHint"></div>
+  </div>
   <div id="upBox" class="hidden" style="margin-top:10px">
     <div class="row" style="margin-top:0">
       <select id="upSize" style="flex:1">
@@ -429,7 +433,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-27c';
+const PAGE_BUILD = '2026-10-27d';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -2360,10 +2364,71 @@ loadDrafts();
 function showUpBox(isVid) {
   if (isVid === undefined) isVid = !$('outVideo').classList.contains('hidden');
   $('upBox').classList.toggle('hidden', !upscaler);
+  showRealBox(isVid);
   $('upSize').classList.toggle('hidden', isVid); $('upVidSize').classList.toggle('hidden', !isVid);
   upHint();
 }
 const upIsVid = () => !$('outVideo').classList.contains('hidden');
+
+// ---- ✨ Make realistic: a Qwen 2511 pass over the picture on screen that keeps
+// everything (face, pose, clothes, background) and only turns the glossy "AI"
+// look into an ordinary photo, with the Ultra-Realistic Portrait LoRA when
+// add-qwen-loras.sh installed it. Read from the output folder: no upload.
+const realLora = () => qwen && (qwen.extras.find(l => /ultra.?realistic|(^|\/)URP_/i.test(l.file + ' ' + l.label))
+                             || qwen.extras.find(l => /hyper.?realistic|(^|\/)HRP_/i.test(l.file + ' ' + l.label)));
+const REAL_TEXT = 'Make this a real, unretouched photograph: natural skin texture with visible pores, fine hairs and small ' +
+  'imperfections, realistic lighting and colour, natural depth of field, no airbrushing, no beauty filter, no plastic or glossy CGI look. ' +
+  'Keep the face, identity, expression, pose, body, hair, clothing, background and framing exactly the same.';
+function showRealBox(isVid) {
+  const l = realLora();
+  $('realBox').classList.toggle('hidden', !!isVid || !qwen);
+  $('realHint').textContent = (l ? `Qwen 2511 with ${l.label}` : 'Qwen 2511 (for more skin detail, add the Ultra-Realistic Portrait LoRA: add-qwen-loras.sh)') +
+    `, at your edit size (${$('res').value} px). Keeps the people and scene; ⬆️ Upscale afterwards for a big final.`;
+}
+function realismWorkflow(src, w, h, seed) {
+  const l = realLora(), name = (src.subfolder ? src.subfolder + '/' : '') + src.filename + ' [output]';
+  const saved = quality; quality = false;  // the Lightning speed-up when it's installed: 8 steps at CFG 1
+  let p;
+  try {
+    p = buildInstructWorkflow(name, (l && /URP_|ultra/i.test(l.file + l.label) ? 'Ultra-realistic portrait. ' : '') + REAL_TEXT, seed,
+                              qwen.lora ? qwen.loraSteps : 30, qwen.lora ? 1 : 4, l ? [{ file: l.file, w: 0.85 }] : [],
+                              qwen.lora ? '' : 'plastic skin, airbrushed, CGI, 3d render, cartoon, oversaturated', [], null, null);
+  } finally { quality = saved; }
+  // Qwen works at about 1-2 MP: bring the picture to the edit size first (multiples of 16)
+  const k = Math.min(1, +$('res').value / Math.max(w, h));
+  p['50'] = { class_type: 'ImageScale', inputs: { image: ['5', 0], upscale_method: 'lanczos', crop: 'disabled',
+              width: Math.max(16, Math.round(w * k / 16) * 16), height: Math.max(16, Math.round(h * k / 16) * 16) } };
+  for (const [id, n] of Object.entries(p)) if (id !== '50') for (const [key, v] of Object.entries(n.inputs))
+    if (Array.isArray(v) && v[0] === '5' && v[1] === 0) n.inputs[key] = ['50', 0];
+  return p;
+}
+$('realGo').onclick = async () => {
+  const src = outRef(), el = $('out');
+  if (!qwen || !src || upIsVid() || !el.naturalWidth) return setStatus('Open a picture first (a result or one under Recent edits).', true);
+  if ($('go').disabled) return setStatus('Wait for the current job to finish first.', true);
+  $('go').disabled = $('realGo').disabled = true; stopRequested = false; currentJobs = [];
+  $('stop').classList.remove('hidden');
+  try {
+    setStatus('Connecting… Stay on this page for now.');
+    if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Make realistic again.');
+    const p = realismWorkflow(src, el.naturalWidth, el.naturalHeight, Math.floor(Math.random() * 2 ** 32));
+    const r = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: p, client_id: clientId }) });
+    if (!r.ok) throw new Error('ComfyUI rejected it (' + r.status + '): ' + (await r.text()).slice(0, 600));
+    const ids = [(await r.json()).prompt_id], t0 = Date.now(), l = realLora();
+    currentJobs = ids.slice();
+    jobNote = `Made realistic · Qwen 2511${l ? ' + ' + l.label : ''} · ${p['50'].inputs.width}×${p['50'].inputs.height}`;
+    store('pendingJob', JSON.stringify({ ids, t0, note: jobNote }));
+    if (stopRequested) await cancelJob(ids[0]);
+    await waitForJobs(ids, t0);
+  } catch (err) {
+    setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
+      ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Make realistic again.' : err.message, true);
+  } finally {
+    $('go').disabled = $('realGo').disabled = false; currentJobs = []; jobNote = '';
+    $('stop').classList.add('hidden');
+  }
+};
 function outRef() {
   try {
     const u = new URL(upIsVid() ? $('outVideo').src : $('out').src, location.href);

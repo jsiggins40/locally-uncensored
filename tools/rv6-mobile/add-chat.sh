@@ -242,8 +242,9 @@ else:
 PY
   fi
   # Runs llama-server with Qwen's own template (--jinja). GPU: everything on
-  # the GPU, thinking "medium", 32K context. CPU: the GPU is hidden from it
-  # entirely, all cores, thinking "low", 16K context.
+  # the GPU, thinking "medium", 64K context (photos in a chat use thousands of
+  # tokens each; 32K ran out). CPU: the GPU is hidden from it entirely, all
+  # cores, thinking "low", 16K context. Override with CHAT_CTX=<tokens>.
   if has glm; then
     # MODE=gpu: everything on the GPU(s), spread across them by llama.cpp.
     # MODE=split: core layers on the GPU, routed experts in system RAM.
@@ -258,9 +259,9 @@ SH
     chmod +x "$HOME/.local/bin/qwen-start"
   else
   if [ "$DEVICE" = cpu ]; then
-    run='CUDA_VISIBLE_DEVICES= exec'; dev="-ngl 0 -t $(nproc) -c 16384"; effort=low
+    run='CUDA_VISIBLE_DEVICES= exec'; dev="-ngl 0 -t $(nproc) -c ${CHAT_CTX:-16384}"; effort=low
   else
-    run=exec; dev="-ngl 99 -c $([ "$DEVICE" = max ] && echo 131072 || echo 32768)"; effort=medium
+    run=exec; dev="-ngl 99 -c ${CHAT_CTX:-$([ "$DEVICE" = max ] && echo 131072 || echo 65536)}"; effort=medium
   fi
   cat > "$HOME/.local/bin/qwen-start" <<SH
 #!/usr/bin/env bash

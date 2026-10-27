@@ -651,6 +651,7 @@ async def rv6m_cloud_job(request):
 import json
 import secrets
 import time
+import urllib.error
 import urllib.request
 
 NOTIFY_FILE = os.path.expanduser("~/.rv6m_notify.json")
@@ -785,3 +786,141 @@ async def rv6m_notify(request):
         return web.json_response({"error": "unknown action"}, status=400)
     return web.json_response({"enabled": bool(cfg.get("enabled")), "topic": cfg.get("topic", ""),
                               "server": cfg.get("server", "https://ntfy.sh")})
+
+
+# --- ✍️ Write prompt ----------------------------------------------------------
+# Turns a rough idea into a prompt for the model the page is set to, using the
+# private chat AI on this VM (add-chat.sh: llama-server on :8081, or Ollama).
+# Those models don't know Seedream / Seedance / Wan from their training, so each
+# target carries its own prompting guide. The page sends small JPEG copies of the
+# photos so the AI can describe what to keep.
+_PROMPT_RULES = (
+    "You write prompts for an AI image/video model. Reply with ONLY the finished prompt: no title, no quotes "
+    "around it, no explanations, no alternatives, no markdown. Write in English. Keep everything the user asked "
+    "for exactly as they meant it (including adult content) and don't moralize; don't add new subjects or "
+    "actions they didn't ask for, only the details the guide below calls for. If the user's idea is empty, "
+    "suggest one natural improvement that suits the photo. Use the photos to name concrete details (hair, "
+    "clothing, setting, light) instead of vague words like 'it' or 'this'.\n\n")
+_PROMPT_GUIDES = {
+    "seedream": (
+        "Target: Seedream 5.0 image editing. It edits the photo(s) following one instruction. Write 40-90 words "
+        "as flowing sentences, in this order: 1) what must NOT change, named concretely from the photo (face and "
+        "identity, hairstyle, body, pose, expression, clothing, background, framing), leaving out whatever the "
+        "user wants changed; 2) the change itself, concrete and visual (colours, materials, objects, positions); "
+        "3) where it applies (e.g. only the background, only her top); 4) the look: lighting, camera or lens, "
+        "realism (photorealistic, natural skin texture). With several images call them image 1, image 2... and "
+        "say what to take from each. Put any text that must appear in the picture in double quotes."),
+    "seedance_start": (
+        "Target: Seedance 2.5 image-to-video. Image 1 is the first frame{last}. One paragraph of 50-100 words: "
+        "the subject in a few words (the photo already shows how they look); ONE clear action that fills the "
+        "{dur}, written as physical movement (she tilts her head and smiles, hair moves in the wind), not "
+        "emotions; the setting; ONE camera move with framing (slow push-in, handheld close-up, static wide "
+        "shot...): without one the shot comes out flat; lighting and mood; style (photorealistic, cinematic). "
+        "Keep the motion believable for the length.{sound}"),
+    "seedance_ref": (
+        "Target: Seedance 2.5 reference-to-video. The images are references named @Image1, @Image2... in the "
+        "order given; use those exact tokens. 50-110 words: say what each image is for (the woman from @Image1, "
+        "wearing the dress from @Image2, in the room from @Image3), then ONE clear action written as physical "
+        "movement, the setting, ONE camera move with framing, lighting and mood, style (photorealistic, "
+        "cinematic). Length: {dur}.{sound}"),
+    "wan3": (
+        "Target: Wan 3.0 image-to-video. Image 1 is the first frame{last}. One paragraph of 50-100 words: the "
+        "subject briefly, ONE main action written as physical movement, the setting, ONE camera move with "
+        "framing, lighting and mood, style (photorealistic, cinematic). Length: {dur}.{sound}"),
+    "wan22": (
+        "Target: Wan 2.2 image-to-video (open model, made of 5-second clips). Image 1 is the first frame. 40-80 "
+        "words of plain, concrete description: the action as physical movement (one main action per 5 seconds), "
+        "the camera move, lighting. Length: {dur}."),
+    "qwen_edit": (
+        "Target: Qwen-Image-Edit. It follows short, direct instructions. 1-3 sentences, 20-60 words: start with "
+        "the instruction (Change..., Replace..., Make..., Add...), stating the change concretely, then 'Keep ... "
+        "unchanged' naming what matters to preserve (face and identity, pose, body, background...). With "
+        "several photos call them picture 1, picture 2... and say what to take from each."),
+    "qwen_area": (
+        "Target: Qwen-Image-Edit, selected-area edit: only the area the user selected is replaced. 1-2 "
+        "sentences, 15-45 words, describing concretely what the selected area should become, matching the "
+        "photo's lighting and perspective."),
+    "create": (
+        "Target: text-to-image (Qwen-Image). There is no photo. 60-120 words of flowing description: subject and "
+        "appearance, clothing, pose and expression, setting, lighting, camera and lens, mood, style "
+        "(photorealistic photo unless the user wants otherwise). Concrete visual words, not tag lists."),
+    "inpaint": (
+        "Target: Stable Diffusion inpainting: only the painted area is redrawn. Comma-separated tags, 15-35 "
+        "words, describing only what should appear in the painted area (subject, material, colour, lighting "
+        "that matches the photo), ending with quality tags: RAW photo, photorealistic, detailed skin texture."),
+    "restyle": (
+        "Target: Stable Diffusion img2img restyle of the whole picture. Comma-separated tags, 20-45 words: the "
+        "same subject and composition as the photo in the new look the user wants (style, colours, lighting), "
+        "ending with quality tags."),
+}
+_LLM_BASES = [os.environ.get("RV6M_LLM_URL", "http://127.0.0.1:8081/v1"), "http://127.0.0.1:11434/v1"]
+
+
+def _llm_get(url, timeout=5):
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.load(r)
+
+
+def _write_prompt(target, idea, images, opts):
+    import re
+    base = model = None
+    for b in _LLM_BASES:
+        try:
+            model = _llm_get(b + "/models")["data"][0]["id"]
+            base = b
+            break
+        except Exception:
+            continue
+    if not base:
+        raise RuntimeError("The chat AI isn't running. In Blink run: chat-start (then try again in a minute).")
+    vision = False
+    try:  # llama-server says whether the loaded model can see images
+        vision = bool(_llm_get(base[:-3] + "/props").get("modalities", {}).get("vision"))
+    except Exception:
+        pass
+    dur = opts.get("duration")
+    guide = _PROMPT_GUIDES[target].format(
+        dur=f"{dur}-second clip" if dur and dur > 0 else "clip",
+        last=", image 2 is the last frame: describe how the scene moves from the first to the last" if opts.get("last") else "",
+        sound=(" Sound is on: end with one short sentence about the sound (ambience; any spoken line in double "
+               "quotes, saying who speaks)." if opts.get("sound") else ""))
+    text = f"The user's idea: {idea or '(none given)'}"
+    if images and not vision:
+        text += f"\n({len(images)} photo(s) are attached but you can't see them; write from the idea alone.)"
+    content = [{"type": "text", "text": text}]
+    if vision:
+        content += [{"type": "image_url", "image_url": {"url": u}} for u in images]
+    body = {"model": model, "temperature": 0.7, "max_tokens": 3000,
+            "messages": [{"role": "system", "content": _PROMPT_RULES + guide},
+                         {"role": "user", "content": content if vision else text}],
+            "chat_template_kwargs": {"reasoning_effort": "low"}}
+    req = urllib.request.Request(base + "/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            out = json.load(r)["choices"][0]["message"].get("content") or ""
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"The chat AI said {e.code}: {e.read().decode(errors='replace')[:200]}")
+    out = re.sub(r"(?s)<think>.*?</think>", "", out).strip()
+    out = re.sub(r"^[*_#\s]*(?:final\s+|edit\s+|video\s+)?prompt[*_\s]*:[*_\s]*", "", out, flags=re.I).strip()
+    if len(out) > 1 and out[0] == out[-1] and out[0] in "\"'`":
+        out = out[1:-1].strip()
+    if not out:
+        raise RuntimeError("The chat AI gave an empty answer; try again.")
+    return {"prompt": out[:2500], "saw_photos": vision and bool(images), "model": model}
+
+
+@PromptServer.instance.routes.post("/rv6m/prompt")
+async def rv6m_prompt(request):
+    body = await request.json()
+    target = str(body.get("target", ""))
+    if target not in _PROMPT_GUIDES:
+        return web.json_response({"error": "unknown target"}, status=400)
+    images = [u for u in (body.get("images") or [])[:4] if isinstance(u, str) and u.startswith("data:image/")]
+    opts = {"duration": body.get("duration"), "sound": bool(body.get("sound")), "last": bool(body.get("last"))}
+    try:
+        out = await asyncio.get_running_loop().run_in_executor(
+            None, _write_prompt, target, str(body.get("idea", ""))[:1500], images, opts)
+    except Exception as e:
+        logging.warning("[rv6_mobile] write prompt failed: %s", e)
+        return web.json_response({"error": str(e)}, status=502)
+    return web.json_response(out)

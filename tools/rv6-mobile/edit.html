@@ -197,6 +197,8 @@
 <div class="panel">
   <label for="prompt" style="margin-top:0" id="promptLabel">What should appear in the painted area?</label>
   <textarea id="prompt" rows="3" placeholder="e.g. red silk dress"></textarea>
+  <div class="row" style="margin-top:6px"><button id="writeBtn">✍️ Write prompt</button><button id="writeUndo" class="hidden">↩︎ Undo</button></div>
+  <div class="hint" id="writeHint">Type a rough idea, then tap ✍️: the chat AI on your VM looks at the photo and writes a full prompt for the model you're using. You can edit it before Generate.</div>
   <div id="tagBox">
   <div class="hint">Tap tags to add or remove them.</div>
   <div id="tags"></div>
@@ -423,7 +425,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-24c';
+const PAGE_BUILD = '2026-10-27a';
 const $ = id => document.getElementById(id);
 const base = $('base'), mask = $('mask');
 const bctx = base.getContext('2d'), mctx = mask.getContext('2d');
@@ -1427,6 +1429,49 @@ const ckptReady = fetch('/api/object_info/CheckpointLoaderSimple').then(r => r.j
 }).catch(e => setStatus('Could not list models: ' + e, true));
 
 function setStatus(msg, err) { $('status').textContent = msg; $('status').classList.toggle('err', !!err); }
+
+// ---- ✍️ Write prompt: the VM's chat AI (add-chat.sh) turns a rough idea into a
+// prompt written for the current model; /rv6m/prompt holds each model's guide
+function promptTarget() {
+  if (mode === 'cloud') return 'seedream';
+  if (mode === 'video') return refVid() ? 'seedance_ref' : wanVid() ? 'wan3' : cloudVid() ? 'seedance_start' : 'wan22';
+  if (mode === 'create') return 'create';
+  if (mode === 'instruct') return 'qwen_edit';
+  if (mode === 'whole') return 'restyle';
+  if (qwenMask()) return 'qwen_area';
+  return 'inpaint';
+}
+function thumbUrl(c, max = 768) {
+  const k = Math.min(1, max / Math.max(c.width, c.height)), t = document.createElement('canvas');
+  t.width = Math.round(c.width * k); t.height = Math.round(c.height * k);
+  t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
+  return t.toDataURL('image/jpeg', 0.8);
+}
+let writeBefore = null;
+$('writeBtn').onclick = async () => {
+  const target = promptTarget(), idea = $('prompt').value.trim();
+  const pics = target === 'create' ? [] : [...(photoIn ? [full] : []), ...(['seedance_ref', 'seedream', 'qwen_edit'].includes(target) || startVid() ? usedMore() : [])].slice(0, 4);
+  const cloud = mode === 'video' && cloudVid();
+  $('writeBtn').disabled = true;
+  const t0 = Date.now(), tick = setInterval(() => setStatus(`✍️ The chat AI is writing the prompt… ${Math.round((Date.now() - t0) / 1000)}s`), 1000);
+  try {
+    const r = await fetch('/rv6m/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target, idea, images: pics.map(c => thumbUrl(c)),
+        duration: mode === 'video' ? +$('vidLen').value : null, sound: cloud && vidSound,
+        last: startVid() && usedMore().length > 0 }) });
+    const j = await r.json().catch(() => ({ error: `VM answered ${r.status}` }));
+    if (!r.ok || !j.prompt) throw new Error(j.error || `VM answered ${r.status}`);
+    writeBefore = $('prompt').value; $('writeUndo').classList.remove('hidden');
+    $('prompt').value = j.prompt; $('prompt').dispatchEvent(new Event('input'));
+    setStatus(`✍️ Prompt written in ${Math.round((Date.now() - t0) / 1000)}s` + (pics.length && !j.saw_photos ? ' (this chat AI can\'t see photos, so it worked from your words only)' : '') + '. Check it, then Generate.');
+  } catch (e) { setStatus('✍️ ' + (e.message || e), true); }
+  finally { clearInterval(tick); $('writeBtn').disabled = false; }
+};
+$('writeUndo').onclick = () => {
+  if (writeBefore === null) return;
+  $('prompt').value = writeBefore; $('prompt').dispatchEvent(new Event('input'));
+  writeBefore = null; $('writeUndo').classList.add('hidden'); setStatus('Your own words are back.');
+};
 
 const FMT = { q21cfg: v => (+v).toFixed(1), loraW: v => (+v).toFixed(2), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
 function paint(r) {

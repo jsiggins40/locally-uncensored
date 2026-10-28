@@ -266,8 +266,10 @@ SH
   cat > "$HOME/.local/bin/qwen-start" <<SH
 #!/usr/bin/env bash
 . "$LLM/qwen-chat.env"
-# Qwen-VL reads photos properly from 1024 image tokens up (llama.cpp warns below that)
-mm=(); [ -n "\$MMPROJ" ] && mm=(--mmproj "\$MMPROJ" --image-min-tokens 1024)
+# Qwen-VL reads photos properly from 1024 image tokens up (llama.cpp warns below
+# that); at most 2048 (~1400 px square): a full-size phone photo otherwise takes
+# 10K+ tokens and a few of them filled the whole 64K context
+mm=(); [ -n "\$MMPROJ" ] && mm=(--mmproj "\$MMPROJ" --image-min-tokens 1024 --image-max-tokens 2048)
 $run "$SERVER" -m "\$MODEL" "\${mm[@]}" --jinja $dev --host 127.0.0.1 --port 8081 \\
   --alias qwen3.8-27b-uncensored --chat-template-kwargs '{"reasoning_effort":"$effort"}'
 SH

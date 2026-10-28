@@ -266,7 +266,8 @@ SH
   cat > "$HOME/.local/bin/qwen-start" <<SH
 #!/usr/bin/env bash
 . "$LLM/qwen-chat.env"
-mm=(); [ -n "\$MMPROJ" ] && mm=(--mmproj "\$MMPROJ")
+# Qwen-VL reads photos properly from 1024 image tokens up (llama.cpp warns below that)
+mm=(); [ -n "\$MMPROJ" ] && mm=(--mmproj "\$MMPROJ" --image-min-tokens 1024)
 $run "$SERVER" -m "\$MODEL" "\${mm[@]}" --jinja $dev --host 127.0.0.1 --port 8081 \\
   --alias qwen3.8-27b-uncensored --chat-template-kwargs '{"reasoning_effort":"$effort"}'
 SH

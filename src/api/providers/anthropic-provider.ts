@@ -5,7 +5,8 @@
  * - System prompt is a separate `system` param, not a message
  * - SSE events use `event: content_block_delta` format
  * - Tool calling uses `tool_use` content blocks
- * - No /models endpoint — model list is hardcoded
+ * - Anthropic itself: hardcoded model list. A compatible gateway (Atlas Cloud,
+ *   DeepSeek /anthropic, ...): its own /v1/models, Claude list as fallback
  */
 
 import type {
@@ -14,6 +15,7 @@ import type {
 } from './types'
 import { ProviderError } from './types'
 import { parseSSEWithEvents } from '../sse'
+import { localFetch, localFetchStream, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost } from '../backend'
 
 // ── Anthropic API Types ────────────────────────────────────────
 
@@ -125,13 +127,44 @@ export class AnthropicProvider implements ProviderClient {
     return `${base}/v1/messages`
   }
 
+  /** True when the endpoint is Anthropic's own API, not a compatible gateway. */
+  private get isAnthropicHost(): boolean {
+    return hostnameOf(this.baseUrl) === 'api.anthropic.com'
+  }
+
+  /**
+   * Gateways that speak the Messages API (Atlas Cloud, DeepSeek's /anthropic,
+   * opencode-zen, claude-relay-server) are public hosts outside the pinned CSP
+   * in src-tauri/tauri.conf.json, so a direct webview fetch to them is killed
+   * before it reaches the network. Same rule as the OpenAI provider: anything
+   * the CSP does not list takes the Rust proxy, which also sidesteps CORS.
+   */
+  private get useLocalProxy(): boolean {
+    return !isDirectFetchAllowed(hostnameOf(this.baseUrl))
+  }
+
   private get headers(): Record<string, string> {
-    return {
+    const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'x-api-key': this.config.apiKey,
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true',
     }
+    // Gateways document their key as Claude Code's ANTHROPIC_AUTH_TOKEN, which
+    // goes out as a Bearer token, and some accept only that. Anthropic itself
+    // reads x-api-key, so its requests stay exactly as they were.
+    if (!this.isAnthropicHost && this.config.apiKey) {
+      headers['Authorization'] = `Bearer ${this.config.apiKey}`
+    }
+    return headers
+  }
+
+  /** POST to the Messages endpoint over whichever transport this host needs. */
+  private async postMessages(body: Record<string, any>, signal?: AbortSignal, stream = false): Promise<Response> {
+    const init = { method: 'POST', headers: this.headers, body: JSON.stringify(body), signal }
+    if (!this.useLocalProxy) return fetch(this.messagesUrl(), init)
+    await ensureProxyAllowsHost(this.baseUrl)
+    return (stream ? localFetchStream : localFetch)(this.messagesUrl(), init)
   }
 
   async *chatStream(
@@ -173,23 +206,13 @@ export class AnthropicProvider implements ProviderClient {
 
     applyCacheControl(body)
 
-    let res = await fetch(this.messagesUrl(), {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify(body),
-      signal: options?.signal,
-    })
+    let res = await this.postMessages(body, options?.signal, true)
 
     // Retry without extended thinking if the model rejects it (e.g. older
     // Claude versions don't support `thinking`).
     if (!res.ok && res.status === 400 && 'thinking' in body) {
       delete body.thinking
-      res = await fetch(this.messagesUrl(), {
-        method: 'POST',
-        headers: this.headers,
-        body: JSON.stringify(body),
-        signal: options?.signal,
-      })
+      res = await this.postMessages(body, options?.signal, true)
     }
 
     if (!res.ok) {
@@ -313,22 +336,12 @@ export class AnthropicProvider implements ProviderClient {
 
     applyCacheControl(body)
 
-    let res = await fetch(this.messagesUrl(), {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify(body),
-      signal: options?.signal,
-    })
+    let res = await this.postMessages(body, options?.signal)
 
     // Retry without extended thinking if the model rejects it.
     if (!res.ok && res.status === 400 && 'thinking' in body) {
       delete body.thinking
-      res = await fetch(this.messagesUrl(), {
-        method: 'POST',
-        headers: this.headers,
-        body: JSON.stringify(body),
-        signal: options?.signal,
-      })
+      res = await this.postMessages(body, options?.signal)
     }
 
     if (!res.ok) {
@@ -365,8 +378,34 @@ export class AnthropicProvider implements ProviderClient {
   }
 
   async listModels(): Promise<ProviderModel[]> {
-    // Anthropic has no public /models endpoint
-    return [...CLAUDE_MODELS]
+    if (this.isAnthropicHost) return [...CLAUDE_MODELS]
+
+    // A gateway serves its own catalogue (Atlas Cloud fronts DeepSeek, GLM,
+    // Qwen, ...), so the Claude list would offer IDs it cannot route. Ask its
+    // /v1/models; both the Anthropic and the OpenAI shape carry `data[].id`.
+    // A gateway without the endpoint keeps the Claude list it had before.
+    try {
+      const url = this.messagesUrl().replace(/\/messages$/, '/models')
+      if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
+      const res = this.useLocalProxy
+        ? await localFetch(url, { headers: this.headers })
+        : await fetch(url, { headers: this.headers })
+      if (!res.ok) return [...CLAUDE_MODELS]
+      const data = await res.json()
+      const entries: any[] = Array.isArray(data?.data) ? data.data : []
+      const models: ProviderModel[] = entries
+        .filter(m => typeof m?.id === 'string' && m.id)
+        .map(m => ({
+          id: m.id,
+          name: m.display_name || m.name || m.id,
+          provider: 'anthropic' as const,
+          providerName: this.config.name || 'Anthropic',
+          supportsTools: true,
+        }))
+      return models.length > 0 ? models : [...CLAUDE_MODELS]
+    } catch {
+      return [...CLAUDE_MODELS]
+    }
   }
 
   async checkConnection(): Promise<boolean> {
@@ -374,14 +413,10 @@ export class AnthropicProvider implements ProviderClient {
 
     try {
       // Send a minimal request to verify the API key
-      const res = await fetch(this.messagesUrl(), {
-        method: 'POST',
-        headers: this.headers,
-        body: JSON.stringify({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 1,
-          messages: [{ role: 'user', content: 'hi' }],
-        }),
+      const res = await this.postMessages({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'hi' }],
       })
       // 200 or 400 (bad request but auth worked) both mean the key is valid
       return res.status !== 401 && res.status !== 403

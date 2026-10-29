@@ -64,7 +64,8 @@ export function providerSlotView(id: ProviderId, config: ProviderConfig): SlotVi
     id === 'ollama'
       ? PROVIDER_PRESETS.find(p => p.id === 'ollama')!
       : id === 'anthropic'
-        ? PROVIDER_PRESETS.find(p => p.id === 'anthropic')!
+        ? PROVIDER_PRESETS.find(p => p.providerId === 'anthropic' && (p.name === config.name || p.baseUrl === config.baseUrl)) ||
+          PROVIDER_PRESETS.find(p => p.id === 'anthropic')!
         : PROVIDER_PRESETS.find(p => p.providerId === 'openai' && (p.name === config.name || p.baseUrl === config.baseUrl)) ||
           PROVIDER_PRESETS.find(p => p.id === 'custom-openai')!
   if (config.managed) {

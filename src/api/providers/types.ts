@@ -97,6 +97,10 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
 
   // Anthropic (own API format)
   { id: 'anthropic', name: 'Anthropic', providerId: 'anthropic', baseUrl: 'https://api.anthropic.com', isLocal: false, placeholder: 'sk-ant-...' },
+  // Atlas Cloud's Anthropic-compatible gateway (the endpoint Claude Code uses
+  // via ANTHROPIC_BASE_URL). Serves DeepSeek, GLM, Qwen etc. under their own
+  // IDs, e.g. deepseek-ai/deepseek-v4-pro. Shares the one `anthropic` slot.
+  { id: 'atlascloud', name: 'Atlas Cloud', providerId: 'anthropic', baseUrl: 'https://api.atlascloud.ai', isLocal: false, placeholder: 'Atlas Cloud API key' },
 ]
 
 // ── Model ──────────────────────────────────────────────────────

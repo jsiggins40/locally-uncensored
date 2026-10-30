@@ -37,6 +37,7 @@
   #stage canvas { display:block; width:100%; height:auto; }
   #mask { position:absolute; inset:0; opacity:.5; }
   #pts { position:absolute; inset:0; pointer-events:none; }
+  #marks { position:absolute; inset:0; touch-action:none; cursor:crosshair; }
   #empty { text-align:center; padding:40px 10px; color:var(--muted); border:2px dashed #444; border-radius:12px; }
   #status { min-height:1.4em; color:var(--muted); white-space:pre-wrap; word-break:break-word; }
   #status.err { color:var(--danger); }
@@ -122,6 +123,7 @@
     <canvas id="base"></canvas>
     <canvas id="mask"></canvas>
     <canvas id="pts"></canvas>
+    <canvas id="marks" class="hidden"></canvas>
   </div>
 </div>
 
@@ -258,6 +260,13 @@
     </label>
     <div class="row hidden" id="batchClearRow" style="margin-top:6px"><button id="batchClear">Clear batch</button></div>
     <div class="hint" id="batchHint" style="margin-top:6px"></div>
+  </div>
+  <div id="markBox" class="hidden" style="margin-top:10px">
+    <label style="margin-top:0">📍 Mark on the photo (Seedream reads exact positions)</label>
+    <div class="seg"><button id="markBoxBtn" class="on">▭ Drag a box</button><button id="markPtBtn">• Tap a spot</button></div>
+    <div class="seg"><button id="markChange" class="on">✏️ Change here</button><button id="markKeep">🔒 Keep unchanged</button></div>
+    <div class="row"><button id="markUndo">Undo mark</button><button id="markClear">Clear marks</button></div>
+    <div class="hint" id="markHint" style="margin-top:6px">Drag a box over what to change (or what to keep, e.g. her face), and its position goes into your prompt as Image 1 &lt;bbox&gt;…&lt;/bbox&gt;. Then describe the change around it.</div>
   </div>
   <div id="paintTools">
   <div class="row" style="margin-top:10px">
@@ -481,7 +490,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-30b';
+const PAGE_BUILD = '2026-10-30c';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -492,6 +501,7 @@ const clientId = Math.random().toString(36).slice(2);
 let erasing = false, drawing = false, last = null, undoStack = [], workflow = null;
 let tool = 'select', selLabel = 1, selPoints = [], selBase = null, baseUpload = null, segBusy = false, segPending = false;
 const pts = $('pts'), pctx = pts.getContext('2d');
+const marksCv = $('marks'), kctx = marksCv.getContext('2d');
 const full = document.createElement('canvas');  // the photo at up to 2048 px, for Seedream
 // Seedream gets the untouched original file when there is one (like Atlas's own
 // playground), not a resized and re-compressed copy
@@ -643,6 +653,7 @@ function setMode(m) {
   $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus) || refVid() || startVid()));
   $('batchBox').classList.toggle('hidden', !cloud); renderBatch();
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
+  $('markBox').classList.toggle('hidden', !cloud); $('marks').classList.toggle('hidden', !cloud);
   for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud || fx || vid);
   for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr || vid);
   $('tagBox').classList.toggle('hidden', cloud || q || fx || vid);
@@ -1622,7 +1633,8 @@ function fitToRes(keepMask) {
   const h = Math.max(32, Math.floor(full.height * scale / 32) * 32);
   let old = null;
   if (keepMask && mask.width) { old = document.createElement('canvas'); old.width = mask.width; old.height = mask.height; old.getContext('2d').drawImage(mask, 0, 0); }
-  base.width = mask.width = pts.width = w; base.height = mask.height = pts.height = h;
+  base.width = mask.width = pts.width = marksCv.width = w; base.height = mask.height = pts.height = marksCv.height = h;
+  drawMarks();
   baseUpload = null; selPoints = []; selBase = null; drawPts();
   bctx.drawImage(full, 0, 0, w, h);
   mctx.clearRect(0, 0, w, h);
@@ -1682,6 +1694,7 @@ function loadIntoCanvas(src, stillWanted) {
       full.width = Math.round(img.naturalWidth * fs); full.height = Math.round(img.naturalHeight * fs);
       full.getContext('2d').drawImage(img, 0, 0, full.width, full.height);
       mainOrig = null; photoIn = true;
+      clearMarks(true);  // positions belonged to the previous photo
       photoT = 0; photoSaving = null;  // the VM's copy is the old photo until savePhoto runs
       fitToRes(false);
       $('empty').classList.add('hidden'); $('stage').classList.remove('hidden');
@@ -1729,6 +1742,89 @@ mask.addEventListener('pointerdown', e => {
   mask.setPointerCapture(e.pointerId);
   drawing = true; last = pos(e); stroke(last, last);
 });
+
+// ---- 📍 Marks for Seedream (ByteDance's interactive editing): a box or spot on
+// the main photo becomes Image 1 <bbox>x1 y1 x2 y2</bbox> / <point>x y</point> in
+// the prompt, on a 0-999 grid (0 0 top-left, 999 999 bottom-right)
+let marks = [], markShape = 'box', markKeep = false, markDrag = null;
+const n999 = v => Math.max(0, Math.min(999, Math.round(v * 1000)));
+function markToken(m) {
+  const t = m.type === 'box' ? `Image 1 <bbox>${m.x1} ${m.y1} ${m.x2} ${m.y2}</bbox>` : `Image 1 <point>${m.x} ${m.y}</point>`;
+  return m.keep ? (m.type === 'box' ? `keep ${t} unchanged` : `keep the object at ${t} unchanged`) : t;
+}
+function drawMarks(temp) {
+  const W = marksCv.width, H = marksCv.height;
+  kctx.clearRect(0, 0, W, H);
+  const r = marksCv.getBoundingClientRect(), k = r.width ? W / r.width : 1;
+  kctx.lineWidth = 3 * k; kctx.font = `bold ${Math.round(16 * k)}px system-ui, sans-serif`;
+  [...marks, ...(temp ? [temp] : [])].forEach((m, i) => {
+    const col = m.keep ? '#ff3b30' : '#34c759';
+    kctx.strokeStyle = col; kctx.fillStyle = col;
+    if (m.type === 'box') {
+      const x = m.x1 / 1000 * W, y = m.y1 / 1000 * H, w = (m.x2 - m.x1) / 1000 * W, h = (m.y2 - m.y1) / 1000 * H;
+      kctx.fillStyle = col + '22'; kctx.fillRect(x, y, w, h); kctx.strokeRect(x, y, w, h);
+      if (m !== temp) { kctx.fillStyle = col; kctx.fillText(String(i + 1) + (m.keep ? ' 🔒' : ''), x + 6 * k, y + 20 * k); }
+    } else {
+      kctx.beginPath(); kctx.arc(m.x / 1000 * W, m.y / 1000 * H, 10 * k, 0, 2 * Math.PI); kctx.fill();
+      kctx.strokeStyle = '#fff'; kctx.stroke();
+    }
+  });
+}
+function insertToken(tok) {
+  const ta = $('prompt'), v = ta.value;
+  // Still typing in the prompt: at the cursor; otherwise where the cursor was when you left it; else at the end
+  const at = document.activeElement === ta ? ta.selectionStart : ta.dataset.caret !== undefined ? +ta.dataset.caret : v.length;
+  const before = v.slice(0, at), after = v.slice(at);
+  const ins = (before && !/\s$/.test(before) ? ' ' : '') + tok + (after && !/^[\s,.;:!?]/.test(after) ? ' ' : '');
+  ta.value = before + ins + after; delete ta.dataset.caret;
+  ta.dispatchEvent(new Event('input'));
+}
+function removeToken(tok) {
+  const ta = $('prompt'), i = ta.value.indexOf(tok);
+  if (i < 0) return;
+  ta.value = (ta.value.slice(0, i) + ta.value.slice(i + tok.length)).replace(/[ \t]{2,}/g, ' ').replace(/ ([,.])/g, '$1').trim();
+  ta.dispatchEvent(new Event('input'));
+}
+function addMark(m) {
+  m.token = markToken(m); marks.push(m); insertToken(m.token); drawMarks();
+  setStatus(`Mark ${marks.length} added to the prompt: ${m.token}`);
+}
+function clearMarks(newPhoto) {
+  if (!marks.length) return;
+  for (const m of marks) removeToken(m.token);
+  marks = []; drawMarks();
+  if (newPhoto) setStatus('New photo: the old marks were removed from the prompt (their positions were for the previous photo).');
+}
+// Where the cursor was in the prompt when you went to the photo (tapping the photo takes focus away)
+$('prompt').addEventListener('blur', () => { $('prompt').dataset.caret = $('prompt').selectionStart; });
+$('prompt').addEventListener('focus', () => { delete $('prompt').dataset.caret; });
+const markPos = e => { const r = marksCv.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }; };
+marksCv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const p = markPos(e);
+  if (markShape === 'point') return addMark({ type: 'point', keep: markKeep, x: n999(p.x), y: n999(p.y) });
+  marksCv.setPointerCapture(e.pointerId); markDrag = { a: p, b: p };
+});
+marksCv.addEventListener('pointermove', e => {
+  if (!markDrag) return;
+  markDrag.b = markPos(e);
+  const { a, b } = markDrag;
+  drawMarks({ type: 'box', keep: markKeep, x1: n999(Math.min(a.x, b.x)), y1: n999(Math.min(a.y, b.y)), x2: n999(Math.max(a.x, b.x)), y2: n999(Math.max(a.y, b.y)) });
+});
+for (const ev of ['pointerup', 'pointercancel']) marksCv.addEventListener(ev, () => {
+  if (!markDrag) return;
+  const { a, b } = markDrag; markDrag = null;
+  const m = { type: 'box', keep: markKeep, x1: n999(Math.min(a.x, b.x)), y1: n999(Math.min(a.y, b.y)), x2: n999(Math.max(a.x, b.x)), y2: n999(Math.max(a.y, b.y)) };
+  if (m.x2 - m.x1 < 15 || m.y2 - m.y1 < 15) { drawMarks(); return setStatus('That box was too small: drag across the area (or switch to • Tap a spot).'); }
+  addMark(m);
+});
+$('markBoxBtn').onclick = () => { markShape = 'box'; $('markBoxBtn').classList.add('on'); $('markPtBtn').classList.remove('on'); };
+$('markPtBtn').onclick = () => { markShape = 'point'; $('markPtBtn').classList.add('on'); $('markBoxBtn').classList.remove('on'); };
+$('markChange').onclick = () => { markKeep = false; $('markChange').classList.add('on'); $('markKeep').classList.remove('on'); };
+$('markKeep').onclick = () => { markKeep = true; $('markKeep').classList.add('on'); $('markChange').classList.remove('on'); };
+$('markUndo').onclick = () => { const m = marks.pop(); if (m) { removeToken(m.token); drawMarks(); setStatus('Last mark removed.'); } };
+$('markClear').onclick = () => { clearMarks(); setStatus('Marks cleared.'); };
+addEventListener('resize', () => drawMarks());
 
 function drawPts() {
   pctx.clearRect(0, 0, pts.width, pts.height);

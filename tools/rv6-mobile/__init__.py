@@ -812,7 +812,10 @@ _PROMPT_GUIDES = {
         "user wants changed; 2) the change itself, concrete and visual (colours, materials, objects, positions); "
         "3) where it applies (e.g. only the background, only her top); 4) the look: lighting, camera or lens, "
         "realism (photorealistic, natural skin texture). With several images call them image 1, image 2... and "
-        "say what to take from each. Put any text that must appear in the picture in double quotes."),
+        "say what to take from each. Put any text that must appear in the picture in double quotes. The idea may "
+        "contain position tags like Image 1 <bbox>x1 y1 x2 y2</bbox> or Image 1 <point>x y</point> (0-999 grid, "
+        "0 0 = top-left): keep every tag exactly as written, numbers unchanged, attached to the thing it marks "
+        "(e.g. replace the jacket in Image 1 <bbox>...</bbox>; keep Image 1 <bbox>...</bbox> unchanged)."),
     "seedance_start": (
         "Target: Seedance 2.5 image-to-video. Image 1 is the first frame{last}. One paragraph of 50-100 words: "
         "the subject in a few words (the photo already shows how they look); ONE clear action that fills the "

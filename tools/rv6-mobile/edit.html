@@ -75,8 +75,13 @@
   /* Phone: one column in the original order (the two column boxes don't exist for layout) */
   body { display:flex; flex-direction:column; }
   #colMain, #colSide { display:contents; }
-  #setupBox { order:1; } #workBox { order:2; } #colSide > * { order:3; } #setupBox { order:1; }
-  #result { order:4; } #recent { order:5; } #notifyBox, #build, #connBox { order:6; }
+  #colSide > * { order:5; }
+  #setupBox { order:1; } #workBox { order:2; } #stageBox { order:3; } #toolsBox { order:4; }
+  #result { order:6; } #recent { order:7; } #notifyBox, #build, #connBox { order:8; }
+  /* On the phone the modes, the picture and its tools read as one panel, as before */
+  #workBox { border-radius:12px 12px 0 0; margin-bottom:0; padding-bottom:0; }
+  #stageBox { border-radius:0; margin-bottom:0; padding-top:0; padding-bottom:0; }
+  #toolsBox { border-radius:0 0 12px 12px; padding-top:0; }
   #status { margin:8px 0; }
   body.dragging::after { content:'Drop the photo'; position:fixed; inset:12px; border:3px dashed var(--accent); border-radius:16px;
     background:#4f8cff22; color:#fff; font-size:28px; display:flex; align-items:center; justify-content:center; z-index:20; pointer-events:none; }
@@ -84,16 +89,21 @@
     button:not(:disabled):hover, .btn:hover { filter:brightness(1.25); cursor:pointer; }
     .chip:hover { filter:brightness(1.25); cursor:pointer; }
   }
-  /* Computer: photo and results on the left, settings / prompt / Generate on the
-     right (stays in view while you scroll); pictures fit the window height */
+  /* Computer: all the controls (photo, modes, selection tools, prompt, Generate)
+     on the left and kept in view; the picture and results on the right, the
+     picture sized to fit the window height */
   @media (min-width:1100px) {
-    body { display:grid; grid-template-columns:minmax(0,1fr) 460px; grid-template-areas:"head head" "main side";
+    body { display:grid; grid-template-columns:480px minmax(0,1fr); grid-template-areas:"side main";
            column-gap:24px; align-items:start; max-width:1900px; margin:0 auto; padding:16px 24px 40px; }
-    body > h1 { grid-area:head; }
+    body > h1 { display:none; }  /* the browser tab shows the title; the columns get the full height */
     #colMain { grid-area:main; display:block; min-width:0; }
     #colSide { grid-area:side; display:block; position:sticky; top:12px; max-height:calc(100vh - 24px); overflow-y:auto;
                overscroll-behavior:contain; padding-right:4px; }
     #stage { margin:0 auto; }
+    #workBox, #stageBox, #toolsBox { border-radius:12px; margin-bottom:12px; padding:12px; }
+    #prompt { min-height:300px; resize:vertical; line-height:1.45; }
+    /* Generate stays reachable at the bottom of the controls column */
+    #go { position:sticky; bottom:0; z-index:2; box-shadow:0 -10px 16px var(--bg); }
     #empty { padding:140px 20px; font-size:18px; }
     #result img#out { width:auto; max-width:100%; max-height:calc(100vh - 150px); margin:0 auto; }
     #outVideo { max-height:calc(100vh - 150px); }
@@ -106,62 +116,12 @@
 <h1>Photo Edit</h1>
 
 <div id="colMain">
-<div class="panel" id="workBox">
-  <div class="seg" role="tablist">
-    <button id="modeInstruct">✨ Describe edit</button>
-    <button id="modeMask" class="on">Selected area</button>
-    <button id="modeWhole">Restyle</button>
-    <button id="modeCloud" class="hidden">☁️ Seedream</button>
-    <button id="modeCreate" class="hidden">✍️ Create</button>
-    <button id="modeVideo" class="hidden">🎬 Video</button>
-  </div>
-  <div id="engineBox" class="hidden">
-    <div class="seg"><button id="engChange">✨ Change (Qwen)</button><button id="engFix">🩹 Fix (OneReward)</button></div>
-  </div>
-  <div class="hint" id="modeHint" style="margin-bottom:8px">Tap or paint what you want changed. Everything else stays.</div>
+<div class="panel" id="stageBox">
   <div id="empty">Choose a photo, then tap or paint the area you want to change.</div>
   <div id="stage" class="hidden">
     <canvas id="base"></canvas>
     <canvas id="mask"></canvas>
     <canvas id="pts"></canvas>
-  </div>
-  <div id="secondBox" class="hidden" style="margin-top:10px">
-    <div id="moreList"></div>
-    <label class="btn" id="addMore" style="display:block;text-align:center;margin:0;color:var(--text)">
-      <span id="addMoreText">➕ Add more photos (optional)</span>
-      <input id="file2" type="file" accept="image/*" multiple class="hidden">
-    </label>
-    <div class="hint" id="moreHint" style="margin-top:6px"></div>
-  </div>
-  <div id="batchBox" class="hidden" style="margin-top:10px">
-    <div id="batchList"></div>
-    <label class="btn" id="addBatch" style="display:block;text-align:center;margin:0;color:var(--text)">
-      <span id="addBatchText">📚 Batch: run the same prompt on more photos</span>
-      <input id="fileBatch" type="file" accept="image/*" multiple class="hidden">
-    </label>
-    <div class="row hidden" id="batchClearRow" style="margin-top:6px"><button id="batchClear">Clear batch</button></div>
-    <div class="hint" id="batchHint" style="margin-top:6px"></div>
-  </div>
-  <div id="paintTools">
-  <div class="row" style="margin-top:10px">
-    <button id="select" class="on">👆 Tap select</button>
-    <button id="paint">Paint</button>
-    <button id="erase">Erase</button>
-  </div>
-  <div id="selectRow">
-    <div class="row" style="margin-top:8px">
-      <button id="selAdd" class="on">＋ Include</button>
-      <button id="selSub">− Exclude</button>
-      <button id="selReset">Reset taps</button>
-    </div>
-    <div class="hint" style="margin-top:6px">Tap a person or object to select it. Tap more spots to grow the selection; switch to − Exclude and tap parts to leave out. Then fine-tune with Paint/Erase.</div>
-  </div>
-  <div class="row" style="margin-top:8px">
-    <button id="undo">Undo</button>
-    <button id="clear">Clear all</button>
-  </div>
-  <div class="lbl"><span>Brush size</span></div>
-  <div class="ctl"><button class="step" data-for="brush" data-dir="-1" aria-label="Less">−</button><input id="brush" type="range" min="5" max="120" step="1" value="40" data-nudge="5"><button class="step" data-for="brush" data-dir="1" aria-label="More">+</button><span class="val" id="brushVal"></span></div>
   </div>
 </div>
 
@@ -264,6 +224,61 @@
       <option value="21:9">21:9 · cinema</option>
     </select>
     <div class="hint" id="shapeHint"></div>
+  </div>
+</div>
+
+<div class="panel" id="workBox">
+  <div class="seg" role="tablist">
+    <button id="modeInstruct">✨ Describe edit</button>
+    <button id="modeMask" class="on">Selected area</button>
+    <button id="modeWhole">Restyle</button>
+    <button id="modeCloud" class="hidden">☁️ Seedream</button>
+    <button id="modeCreate" class="hidden">✍️ Create</button>
+    <button id="modeVideo" class="hidden">🎬 Video</button>
+  </div>
+  <div id="engineBox" class="hidden">
+    <div class="seg"><button id="engChange">✨ Change (Qwen)</button><button id="engFix">🩹 Fix (OneReward)</button></div>
+  </div>
+  <div class="hint" id="modeHint" style="margin-bottom:8px">Tap or paint what you want changed. Everything else stays.</div>
+</div>
+<div class="panel" id="toolsBox">
+  <div id="secondBox" class="hidden" style="margin-top:10px">
+    <div id="moreList"></div>
+    <label class="btn" id="addMore" style="display:block;text-align:center;margin:0;color:var(--text)">
+      <span id="addMoreText">➕ Add more photos (optional)</span>
+      <input id="file2" type="file" accept="image/*" multiple class="hidden">
+    </label>
+    <div class="hint" id="moreHint" style="margin-top:6px"></div>
+  </div>
+  <div id="batchBox" class="hidden" style="margin-top:10px">
+    <div id="batchList"></div>
+    <label class="btn" id="addBatch" style="display:block;text-align:center;margin:0;color:var(--text)">
+      <span id="addBatchText">📚 Batch: run the same prompt on more photos</span>
+      <input id="fileBatch" type="file" accept="image/*" multiple class="hidden">
+    </label>
+    <div class="row hidden" id="batchClearRow" style="margin-top:6px"><button id="batchClear">Clear batch</button></div>
+    <div class="hint" id="batchHint" style="margin-top:6px"></div>
+  </div>
+  <div id="paintTools">
+  <div class="row" style="margin-top:10px">
+    <button id="select" class="on">👆 Tap select</button>
+    <button id="paint">Paint</button>
+    <button id="erase">Erase</button>
+  </div>
+  <div id="selectRow">
+    <div class="row" style="margin-top:8px">
+      <button id="selAdd" class="on">＋ Include</button>
+      <button id="selSub">− Exclude</button>
+      <button id="selReset">Reset taps</button>
+    </div>
+    <div class="hint" style="margin-top:6px">Tap a person or object to select it. Tap more spots to grow the selection; switch to − Exclude and tap parts to leave out. Then fine-tune with Paint/Erase.</div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="undo">Undo</button>
+    <button id="clear">Clear all</button>
+  </div>
+  <div class="lbl"><span>Brush size</span></div>
+  <div class="ctl"><button class="step" data-for="brush" data-dir="-1" aria-label="Less">−</button><input id="brush" type="range" min="5" max="120" step="1" value="40" data-nudge="5"><button class="step" data-for="brush" data-dir="1" aria-label="More">+</button><span class="val" id="brushVal"></span></div>
   </div>
 </div>
 
@@ -466,7 +481,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-30a';
+const PAGE_BUILD = '2026-10-30b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -1595,7 +1610,7 @@ let photoIn = false;  // canvases start at 300x150 before any photo
 function fitStage() {
   const st = $('stage');
   if (!wide() || !base.width) { st.style.width = ''; return; }
-  const room = Math.max(320, innerHeight - 200), cw = $('workBox').clientWidth - 24;
+  const room = Math.max(320, innerHeight - 110), cw = $('stageBox').clientWidth - 24;
   st.style.width = Math.round(Math.min(cw, room * base.width / base.height)) + 'px';
 }
 addEventListener('resize', fitStage);

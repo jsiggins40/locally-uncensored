@@ -604,6 +604,28 @@ async def rv6m_cloud_video(request):
 
 # Recent cloud results straight from the output folder, so Recent edits shows
 # them even when the page that sent them stopped watching (or another device did)
+# Recent edits / all edits: straight from the output folder, newest first. ComfyUI's
+# own history is forgotten at every restart; the files stay.
+RECENT_EXT = (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm")
+
+
+@PromptServer.instance.routes.get("/rv6m/recent")
+async def rv6m_recent(request):
+    out = folder_paths.get_output_directory()
+    try:
+        off = max(0, int(request.query.get("offset", 0)))
+        lim = max(1, min(int(request.query.get("limit", 24)), 200))
+    except ValueError:
+        return web.json_response({"error": "bad offset/limit"}, status=400)
+    try:
+        files = [(f, os.path.getmtime(os.path.join(out, f))) for f in os.listdir(out)
+                 if f.startswith(("rv6_edit_", "rv6_cloud_")) and f.lower().endswith(RECENT_EXT)]
+    except OSError:
+        files = []
+    files.sort(key=lambda x: -x[1])
+    return web.json_response({"items": [{"f": f, "t": t} for f, t in files[off:off + lim]], "total": len(files)})
+
+
 @PromptServer.instance.routes.get("/rv6m/cloud/recent")
 async def rv6m_cloud_recent(request):
     out = folder_paths.get_output_directory()

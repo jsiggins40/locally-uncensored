@@ -175,6 +175,8 @@
   <div class="lbl" style="margin-top:0"><span>Recent edits</span></div>
   <div class="hint">Tap one to open it.</div>
   <div id="recentList"></div>
+  <div class="row hidden" id="recentMoreRow" style="margin-top:8px"><button id="recentMore">Show more</button></div>
+  <div class="hint" id="recentCount" style="margin-top:4px"></div>
 </div>
 
 </div>
@@ -523,7 +525,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-31d';
+const PAGE_BUILD = '2026-10-31e';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -2750,7 +2752,32 @@ async function resumePending() {
 }
 
 // Recent results, newest first, so nothing is lost if the page is closed mid-edit
+let recentShown = 12;
+function showRecent(items, total) {
+  const box = $('recentList'); box.innerHTML = '';
+  for (const x of items) {
+    const vid = isVideo(x.img), im = document.createElement(vid ? 'video' : 'img');
+    im.src = viewUrl({ ...x.img, type: 'output' }, 600) + (vid ? '#t=0.5' : '');
+    im.loading = 'lazy';
+    if (vid) { im.muted = true; im.playsInline = true; im.preload = 'metadata'; }
+    im.onclick = () => { showResult(x.img); $('result').scrollIntoView({ behavior: 'smooth' }); };
+    box.append(im);
+  }
+  $('recent').classList.toggle('hidden', !items.length);
+  $('recentMoreRow').classList.toggle('hidden', !(total > items.length));
+  $('recentCount').textContent = total > 12 ? `Showing ${items.length} of ${total} (all kept on the VM, newest first)` : '';
+}
+$('recentMore').onclick = () => { recentShown += 24; loadRecent(); };
 async function loadRecent() {
+  // Every result file on the VM, newest first (kept across restarts)
+  try {
+    const r = await fetch(`/rv6m/recent?limit=${recentShown}`, { cache: 'no-store' });
+    if (r.ok) {
+      const j = await r.json();
+      return showRecent(j.items.map(c => ({ t: c.t, img: { filename: c.f, subfolder: '', type: 'output' } })), j.total);
+    }
+  } catch (e) {}
+  // Older VM code without that list: ComfyUI's history (lost at restarts) + cloud results
   try {
     const h = await (await fetch('/api/history?max_items=40')).json();
     // Cloud results: the VM's own list, plus any this phone remembers
@@ -2765,15 +2792,7 @@ async function loadRecent() {
       .map(x => ({ ...x, t: x.t / 1000 }))  // ComfyUI timestamps are in ms
       .concat(cloudItems.map(c => ({ t: c.t, img: { filename: c.f, subfolder: '', type: 'output' } })))
       .sort((a, b) => b.t - a.t).slice(0, 12);
-    const box = $('recentList'); box.innerHTML = '';
-    for (const x of items) {
-      const vid = isVideo(x.img), im = document.createElement(vid ? 'video' : 'img');
-      im.src = viewUrl({ ...x.img, type: 'output' }, 600) + (vid ? '#t=0.5' : '');
-      if (vid) { im.muted = true; im.playsInline = true; im.preload = 'metadata'; }
-      im.onclick = () => { showResult(x.img); $('result').scrollIntoView({ behavior: 'smooth' }); };
-      box.append(im);
-    }
-    $('recent').classList.toggle('hidden', !items.length);
+    showRecent(items, items.length);
   } catch (e) {}
 }
 loadRecent();

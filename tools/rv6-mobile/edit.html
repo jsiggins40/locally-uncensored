@@ -180,10 +180,13 @@
 </div>
 <div id="colSide">
 <div class="panel" id="setupBox">
+  <div class="row" style="flex-wrap:nowrap">
   <label class="btn" style="display:block;text-align:center;margin:0;color:var(--text)">
     📷 Choose photo
     <input id="file" type="file" accept="image/*" class="hidden">
   </label>
+  <button id="pasteBtn" style="flex:none">📋 Paste photo</button>
+  </div>
   <div id="modelBox">
   <label for="model">Model</label>
   <select id="model"><option>Loading…</option></select>
@@ -519,7 +522,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-31a';
+const PAGE_BUILD = '2026-10-31b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -1560,6 +1563,24 @@ addEventListener('drop', e => {
   if (!takeFiles(e.dataTransfer.files, t?.closest('#secondBox') ? 'more' : t?.closest('#batchBox') ? 'batch' : 'main'))
     setStatus('That isn\'t a picture.', true);
 });
+// 📋 Paste photo: read a copied picture from the clipboard (the browser asks the first time)
+$('pasteBtn').onclick = async () => {
+  const how = desktop ? 'press Ctrl+V on the page' : 'long-press the prompt box → Paste';
+  if (!navigator.clipboard || !navigator.clipboard.read) return setStatus(`This browser can't read the clipboard from a button: ${how} instead.`, true);
+  try {
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find(t => /^image\//.test(t));
+      if (!type) continue;
+      const blob = await item.getType(type);
+      takeFiles([new File([blob], 'pasted.' + (type.split('/')[1] || 'png').replace('jpeg', 'jpg'), { type })], 'main');
+      return;
+    }
+    setStatus('There is no picture on the clipboard. Copy one first (e.g. Copy in Photos, or Copy image in a browser).', true);
+  } catch (e) {
+    setStatus(/denied|not allowed|permission/i.test(e.message || e.name)
+      ? `The browser didn't allow reading the clipboard: allow it when asked, or ${how}.` : `Couldn't paste: ${e.message || e}. Or ${how}.`, true);
+  }
+};
 addEventListener('paste', e => {
   const files = [...(e.clipboardData?.files || [])];
   if (!files.some(f => /^image\//.test(f.type))) return;  // ordinary text paste

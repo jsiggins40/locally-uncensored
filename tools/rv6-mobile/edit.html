@@ -523,7 +523,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-31c';
+const PAGE_BUILD = '2026-10-31d';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -1775,9 +1775,13 @@ $('file').addEventListener('change', async e => {
   const url = URL.createObjectURL(f);
   try {
     await loadIntoCanvas(url); mainOrig = await toMem(f, full); savePhoto();
-    const x = extrasNote();
+    // A new photo starts fresh: extra / batch photos belonged to the previous one
+    // (they're kept on the VM for every device, so old people kept coming along)
+    const dropped = more.length + batch.length;
+    if (more.length) { genMore++; more.length = 0; renderMore(); }
+    if (batch.length) { genBatch++; batch.length = 0; renderBatch(); }
     setStatus((mode === 'mask' ? 'Tap the person or object to change, or use Paint.' : 'Now type what to change.')
-      + (x ? `\n${x} It's from before: remove it under the photo (✕ or Clear extra photos) if it doesn't belong.` : ''));
+      + (dropped ? `\nNew photo: the ${dropped} extra/batch photo${dropped > 1 ? 's' : ''} from before ${dropped > 1 ? 'were' : 'was'} removed, so only this photo is used.` : ''));
   }
   catch (err) { setStatus(err.message, true); }
   finally { URL.revokeObjectURL(url); e.target.value = ''; }

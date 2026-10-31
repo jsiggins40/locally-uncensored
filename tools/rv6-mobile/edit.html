@@ -38,6 +38,14 @@
   #mask { position:absolute; inset:0; opacity:.5; }
   #pts { position:absolute; inset:0; pointer-events:none; }
   #marks { position:absolute; inset:0; touch-action:none; cursor:crosshair; }
+  .seqStep { margin-top:8px; }
+  .seqStep .lbl { margin:0 0 4px; }
+  .seqStep textarea { min-height:70px; }
+  #seqStrip { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; margin-top:10px; }
+  #seqStrip:empty { display:none; }
+  #seqStrip figure { margin:0; position:relative; }
+  #seqStrip img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:8px; display:block; cursor:pointer; }
+  #seqStrip figcaption { position:absolute; left:4px; top:4px; background:#000b; border-radius:6px; padding:1px 6px; font-size:12px; }
   #empty { text-align:center; padding:40px 10px; color:var(--muted); border:2px dashed #444; border-radius:12px; }
   #status { min-height:1.4em; color:var(--muted); white-space:pre-wrap; word-break:break-word; }
   #status.err { color:var(--danger); }
@@ -268,6 +276,27 @@
     <div class="row"><button id="markUndo">Undo mark</button><button id="markClear">Clear marks</button></div>
     <div class="hint" id="markHint" style="margin-top:6px">Drag a box over what to change (or what to keep, e.g. her face), and its position goes into your prompt as Image 1 &lt;bbox&gt;…&lt;/bbox&gt;. Then describe the change around it.</div>
   </div>
+  <div id="seqBox" class="hidden" style="margin-top:12px">
+    <details id="seqDetails"><summary style="font-weight:600">🎞️ Sequence: several Seedream steps in a row</summary>
+      <div class="hint" style="margin:6px 0">Write one step per box. Step 1 edits your photo, every next step edits the previous step's result, so the people and the scene carry over. Your 🔒 keep boxes are added to every step.</div>
+      <div class="row" style="margin-top:6px">
+        <label class="btn" style="text-align:center;margin:0;color:var(--text)">📄 Load from a text file<input id="seqFile" type="file" accept=".txt,text/plain" class="hidden"></label>
+        <button id="seqExport">💾 Save to file (with instructions)</button>
+      </div>
+      <details id="seqPasteBox" style="margin-top:8px"><summary style="color:var(--muted);font-size:14px">Paste or type all steps at once</summary>
+        <textarea id="seqPaste" rows="8" style="margin-top:6px" placeholder="Step 1: …&#10;Step 2: …&#10;Step 3: …&#10;&#10;(or put a blank line between steps)"></textarea>
+        <button id="seqSplit" style="width:100%;margin-top:6px">Split into steps</button>
+      </details>
+      <div id="seqSteps"></div>
+      <div class="row" style="margin-top:6px"><button id="seqAdd">＋ Add step</button></div>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--text)"><input type="checkbox" id="seqKeep" checked style="width:20px;height:20px"> Add my 🔒 keep boxes to every step</label>
+      <div class="row" style="margin-top:6px"><select id="seqSaved"><option value="">Saved sequences…</option></select><button id="seqSave" style="flex:none">Save</button><button id="seqDel" style="flex:none">Delete</button></div>
+      <div class="row" style="margin-top:6px"><span style="flex:none;color:var(--muted);font-size:14px">Start at step</span><select id="seqStart"></select></div>
+      <div class="hint" style="margin-top:4px">To continue from another result: open it, tap Keep editing this result, then start at the next step. Variations per step = the Variations setting; the chain continues from the first one.</div>
+      <button id="seqRun" class="primary" style="margin-top:10px">🎞️ Run sequence</button>
+      <div id="seqStrip"></div>
+    </details>
+  </div>
   <div id="paintTools">
   <div class="row" style="margin-top:10px">
     <button id="select" class="on">👆 Tap select</button>
@@ -490,7 +519,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-10-30c';
+const PAGE_BUILD = '2026-10-31a';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -654,6 +683,7 @@ function setMode(m) {
   $('batchBox').classList.toggle('hidden', !cloud); renderBatch();
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   $('markBox').classList.toggle('hidden', !cloud); $('marks').classList.toggle('hidden', !cloud);
+  $('seqBox').classList.toggle('hidden', !cloud);
   for (const id of ['modelBox', 'denoiseBox', 'tuneBox']) $(id).classList.toggle('hidden', inst || cloud || fx || vid);
   for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr || vid);
   $('tagBox').classList.toggle('hidden', cloud || q || fx || vid);
@@ -1825,6 +1855,177 @@ $('markKeep').onclick = () => { markKeep = true; $('markKeep').classList.add('on
 $('markUndo').onclick = () => { const m = marks.pop(); if (m) { removeToken(m.token); drawMarks(); setStatus('Last mark removed.'); } };
 $('markClear').onclick = () => { clearMarks(); setStatus('Marks cleared.'); };
 addEventListener('resize', () => drawMarks());
+
+// ---- 🎞️ Sequence: your steps run as a chain on Seedream; each step edits the
+// previous step's result (read from the VM's output folder: no upload)
+let seqSteps = (() => { try { return JSON.parse(recall('seqSteps')) || ['', '']; } catch (e) { return ['', '']; } })();
+const seqSavedAll = () => { try { return JSON.parse(recall('seqSaved')) || {}; } catch (e) { return {}; } };
+function renderSeq() {
+  const box = $('seqSteps'); box.innerHTML = '';
+  seqSteps.forEach((t, i) => {
+    const d = document.createElement('div'); d.className = 'seqStep';
+    const head = document.createElement('div'); head.className = 'lbl';
+    const name = document.createElement('span'); name.textContent = `Step ${i + 1}`;
+    const x = document.createElement('button'); x.textContent = '✕'; x.style.padding = '2px 10px'; x.setAttribute('aria-label', `Remove step ${i + 1}`);
+    x.onclick = () => { seqSteps.splice(i, 1); if (!seqSteps.length) seqSteps.push(''); saveSeqDraft(); renderSeq(); };
+    head.append(name, x);
+    const ta = document.createElement('textarea'); ta.rows = 3; ta.value = t;
+    ta.placeholder = i ? 'e.g. Continue the same scene: …' : 'e.g. …what changes in step 1';
+    ta.oninput = () => { seqSteps[i] = ta.value; saveSeqDraft(); };
+    d.append(head, ta); box.append(d);
+  });
+  const st = $('seqStart'), was = +st.value || 1; st.innerHTML = '';
+  seqSteps.forEach((_, i) => st.add(new Option(String(i + 1), String(i + 1))));
+  st.value = String(Math.min(was, seqSteps.length));
+  const sv = $('seqSaved'), cur = sv.value; sv.innerHTML = '<option value="">Saved sequences…</option>';
+  for (const n of Object.keys(seqSavedAll()).sort()) sv.add(new Option(n, n));
+  sv.value = cur in seqSavedAll() ? cur : '';
+}
+function saveSeqDraft() { store('seqSteps', JSON.stringify(seqSteps)); }
+$('seqAdd').onclick = () => { seqSteps.push(''); saveSeqDraft(); renderSeq(); };
+// One text (a Notepad file or pasted) -> steps: "Step 1:" / "1." labels first,
+// then lines of ---, then blank lines; a block of single lines = one step per line
+function splitSteps(text) {
+  const t = String(text || '').replace(/\r\n?/g, '\n').replace(/^\uFEFF/, '')
+    .split('\n').filter(l => !/^[ \t]*#/.test(l)).join('\n').trim();  // lines starting with # are notes
+  if (!t) return [];
+  const label = /^[ \t]*(?:step[ \t]*\d+|\d+[.)])[ \t]*[:.)\-–]?[ \t]*/gim;
+  let parts;
+  if ((t.match(label) || []).length >= 2) parts = t.split(/^(?=[ \t]*(?:step[ \t]*\d+|\d+[.)]))/gim).map(x => x.replace(label, ''));
+  else if (/^[ \t]*-{3,}[ \t]*$/m.test(t)) parts = t.split(/^[ \t]*-{3,}[ \t]*$/m);
+  else if (/\n[ \t]*\n/.test(t)) parts = t.split(/\n[ \t]*\n+/);
+  else parts = t.split('\n');
+  return parts.map(x => x.replace(/\s*\n\s*/g, ' ').trim()).filter(Boolean);
+}
+function useSteps(list, from) {
+  if (!list.length) return setStatus(`No steps found in ${from}.`, true);
+  seqSteps = list; saveSeqDraft(); $('seqStart').value = '1'; renderSeq();
+  $('seqSaved').value = '';
+  setStatus(`🎞️ ${list.length} step${list.length > 1 ? 's' : ''} loaded from ${from}. Check them, then Run sequence.`);
+}
+$('seqFile').addEventListener('change', async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  if (f.size > 200e3) return setStatus('That file is too big for a list of steps.', true);
+  useSteps(splitSteps(await f.text()), `"${f.name}"`);
+});
+$('seqSplit').onclick = () => { useSteps(splitSteps($('seqPaste').value), 'the text'); if (seqSteps.length) $('seqPasteBox').open = false; };
+const SEQ_HELP = `# SEQUENCE FILE for the Photo Edit page (Seedream mode)
+#
+# HOW TO USE
+#   Write or edit the steps below in Notepad and save. Then on the edit page:
+#   Seedream mode > Sequence > Load from a text file > pick this file > Run sequence.
+#
+# RULES
+# - Each step starts with "Step 1:", "Step 2:" and so on. A step can run over
+#   several lines; it ends where the next "Step N:" begins.
+#   (Also understood: "1." labels, a line of --- between steps, or a blank line between steps.)
+# - Step 1 edits your photo. Every next step edits the previous step's result,
+#   so start later steps with "Continue the same scene:" to keep the people and place.
+# - Change one thing per step: say what changes, then what stays the same
+#   (face, hair, body, pose, room, light).
+# - Your keep boxes from the page (the red lock boxes, e.g. on faces) are added
+#   to every step automatically, so you don't need to write coordinates here.
+# - You can still write positions yourself: Image 1 <bbox>x1 y1 x2 y2</bbox> or
+#   Image 1 <point>x y</point>, on a 0-999 grid (0 0 = top-left, 999 999 = bottom-right).
+# - For a realistic look add: unretouched photo, natural skin texture, same lighting.
+#   Avoid: beautiful, perfect, flawless, 8k, masterpiece.
+# - Variations per step come from the Variations setting on the page; each one is a
+#   separate paid Seedream image. The chain continues from the first variation.
+# - Lines starting with # (like these) are notes and are ignored when loading.
+`;
+$('seqExport').onclick = () => {
+  const steps = seqSteps.some(t => t.trim()) ? seqSteps : ['', '', ''];
+  const text = SEQ_HELP + '\n' + steps.map((t, i) => `Step ${i + 1}: ${t.trim()}`).join('\n\n') + '\n';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  a.download = ($('seqSaved').value || 'sequence') + '.txt';
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
+$('seqSave').onclick = () => {
+  const name = (window.prompt('Name for this sequence:', $('seqSaved').value || '') || '').trim();
+  if (!name) return;
+  const all = seqSavedAll(); all[name] = seqSteps.slice(); store('seqSaved', JSON.stringify(all));
+  renderSeq(); $('seqSaved').value = name; setStatus(`Sequence "${name}" saved on this device.`);
+};
+$('seqSaved').onchange = () => {
+  const s = seqSavedAll()[$('seqSaved').value]; if (!s) return;
+  seqSteps = s.slice(); saveSeqDraft(); renderSeq();
+};
+$('seqDel').onclick = () => {
+  const n = $('seqSaved').value; if (!n) return;
+  const all = seqSavedAll(); delete all[n]; store('seqSaved', JSON.stringify(all)); renderSeq(); setStatus(`Sequence "${n}" deleted.`);
+};
+async function waitCloudJob(jid, label) {
+  const t0 = Date.now();
+  for (let miss = 0; ; ) {
+    if (stopRequested) throw new Error('Stopped.');
+    await sleep(3000);
+    let j;
+    try { const r = await fetch('/rv6m/cloud/job/' + jid, { cache: 'no-store' }); j = await r.json(); miss = 0; }
+    catch (e) { if (++miss > 40) throw new Error('Lost connection to the VM'); continue; }  // brief drops: keep waiting
+    if (j.status === 'done') return j.filename;
+    if (j.status === 'error') throw new Error(j.error || 'Seedream failed');
+    setStatus(`${label} · ${Math.round((Date.now() - t0) / 1000)}s`);
+  }
+}
+$('seqRun').onclick = async () => {
+  const steps = seqSteps.map(t => t.trim()), from = (+$('seqStart').value || 1) - 1;
+  if (!photoIn) return setStatus('Choose a photo first: step ' + (from + 1) + ' edits it.', true);
+  if (!cloudCfg.configured) return setStatus('Seedream needs your Atlas Cloud key on the VM (see the setup note).', true);
+  const todo = steps.map((t, i) => [i, t]).slice(from).filter(([, t]) => t);
+  if (!todo.length) return setStatus('Write at least one step.', true);
+  const n = +$('count').value || 1, total = todo.length * n;
+  if (total > 4 && !confirm(`Run ${todo.length} steps × ${n} variation${n > 1 ? 's' : ''} = ${total} Seedream edits? Each one is billed by Atlas.`)) return;
+  if ($('go').disabled) return setStatus('Wait for the current job to finish first.', true);
+  const keep = $('seqKeep').checked ? marks.filter(m => m.keep).map(m => m.token) : [];
+  const keepText = keep.length ? ' ' + keep.map(t => t[0].toUpperCase() + t.slice(1)).join('. ') + '.' : '';
+  $('go').disabled = $('seqRun').disabled = true; stopRequested = false; $('stop').classList.remove('hidden');
+  $('seqStrip').innerHTML = '';
+  let last = null;
+  try {
+    setStatus('Connecting… Stay on this page for now.');
+    if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then try again.');
+    setStatus('Sending your photo to the VM…');
+    let base = (await photoOnVM('orig')) || await cloudUpload(mainOrig, full, `rv6m_${Date.now()}_seq`);
+    const size = cloudSize();
+    for (const [k, [i, text]] of todo.entries()) {
+      if (stopRequested) break;
+      const prompt = text + keepText, label = `🎞️ Step ${i + 1} (${k + 1} of ${todo.length})`;
+      setStatus(`${label}: sending…`);
+      const jobs = [];
+      for (let v = 0; v < n; v++) {
+        const r = await fetch('/rv6m/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ images: [base], prompt, size, model: cloudModel() }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || 'The VM refused the cloud edit (' + r.status + ')');
+        jobs.push(j.job);
+      }
+      const got = await Promise.allSettled(jobs.map(jid => waitCloudJob(jid, label)));
+      const ok = got.filter(g => g.status === 'fulfilled').map(g => g.value);
+      ok.forEach((f, v) => {
+        const o = { filename: f, subfolder: '', type: 'output' };
+        const fig = document.createElement('figure'), im = document.createElement('img'), cap = document.createElement('figcaption');
+        im.src = viewUrl(o, 512); im.alt = `Step ${i + 1}`; im.onclick = () => { showResult(o); $('result').scrollIntoView({ behavior: 'smooth' }); };
+        cap.textContent = `Step ${i + 1}` + (n > 1 ? ` · ${v + 1}` : '');
+        fig.append(im, cap); $('seqStrip').append(fig);
+      });
+      if (!ok.length) throw new Error(`Step ${i + 1} failed: ${(got.find(g => g.status === 'rejected') || {}).reason?.message || 'no picture came back'}`);
+      last = { filename: ok[0], subfolder: '', type: 'output' };
+      base = `${ok[0]} [output]`;
+      showResult(last);
+    }
+    setStatus(stopRequested ? '🎞️ Stopped. The steps done so far are below the sequence.'
+      : `🎞️ Sequence done: ${todo.length} step${todo.length > 1 ? 's' : ''}. Tap a picture in the strip to open it (Download / Keep editing).`);
+  } catch (err) {
+    setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
+      ? 'Lost connection to the VM. The steps done so far are below; start again at the next step.' : '🎞️ ' + err.message, true);
+  } finally {
+    $('go').disabled = $('seqRun').disabled = false; $('stop').classList.add('hidden');
+    if (typeof loadRecent === 'function') loadRecent();
+  }
+};
+renderSeq();
 
 function drawPts() {
   pctx.clearRect(0, 0, pts.width, pts.height);

@@ -18,9 +18,16 @@ for f in __init__.py web/edit.html web/workflow.json; do
 done
 [ $ok = 1 ] || echo "  (couldn't download all of it; keeping the current page)"
 echo "  page version: $(grep -o "PAGE_BUILD = '[^']*'" "$DEST/web/edit.html" | head -1 | cut -d"'" -f2)${sha:+ (commit ${sha:0:7})}"
-# keep this command itself up to date too
-sudo curl -fsSL "$SRC/edit-restart.sh" -o /usr/local/bin/edit-restart.new 2>/dev/null \
-  && sudo chmod +x /usr/local/bin/edit-restart.new && sudo mv /usr/local/bin/edit-restart.new /usr/local/bin/edit-restart
+# keep this command itself up to date too; when it changed, run the new copy
+# right away (this run is still the old one)
+if sudo curl -fsSL "$SRC/edit-restart.sh" -o /usr/local/bin/edit-restart.new 2>/dev/null; then
+  if cmp -s /usr/local/bin/edit-restart.new /usr/local/bin/edit-restart; then
+    sudo rm -f /usr/local/bin/edit-restart.new
+  else
+    sudo chmod +x /usr/local/bin/edit-restart.new && sudo mv /usr/local/bin/edit-restart.new /usr/local/bin/edit-restart
+    [ -z "$RV6M_UPDATED" ] && { echo "  (edit-restart updated itself: running the new one)"; RV6M_UPDATED=1 exec /usr/local/bin/edit-restart; }
+  fi
+fi
 # HEIC photos from a computer whose browser can't open them are converted on the VM
 "$HOME/ComfyUI/venv/bin/python" -c "import pillow_heif" 2>/dev/null \
   || "$HOME/ComfyUI/venv/bin/pip" install -q pillow-heif >/dev/null 2>&1 \

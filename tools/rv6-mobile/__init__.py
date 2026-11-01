@@ -602,12 +602,35 @@ async def rv6m_cloud_video(request):
     return web.json_response({"job": jid})
 
 
-# Recent cloud results straight from the output folder, so Recent edits shows
-# them even when the page that sent them stopped watching (or another device did)
 # iPhone HEIC photos: Safari on the phone converts them when you pick one, but
 # Chrome/Edge on Windows can't read HEIC at all. The page sends those here and
-# gets a full-quality JPEG back (turned the right way up). Needs pillow-heif,
-# which edit-restart installs.
+# gets a full-quality JPEG back (turned the right way up). Also used for any
+# other photo the browser can't open (Pillow reads most formats). Needs
+# pillow-heif: edit-restart installs it, and if it's still missing it's
+# installed here the first time a HEIC photo comes in.
+_heif_lock = threading.Lock()
+
+
+def _heif_ready():
+    import importlib
+    import subprocess
+    import sys
+    with _heif_lock:
+        try:
+            import pillow_heif
+        except ImportError:
+            logging.info("rv6m: installing pillow-heif for HEIC photos")
+            r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pillow-heif"],
+                               capture_output=True, text=True, timeout=300)
+            importlib.invalidate_caches()
+            try:
+                import pillow_heif
+            except ImportError:
+                raise LookupError("The VM couldn't install its HEIC reader (pillow-heif): "
+                                  + ((r.stderr or r.stdout or "").strip().splitlines() or ["no details"])[-1])
+        pillow_heif.register_heif_opener()
+
+
 @PromptServer.instance.routes.post("/rv6m/heic")
 async def rv6m_heic(request):
     data = await request.read()
@@ -617,10 +640,10 @@ async def rv6m_heic(request):
     def convert():
         from PIL import Image, ImageOps
         try:
-            import pillow_heif
-        except ImportError:
-            raise LookupError("The VM can't read HEIC photos yet: run edit-restart once (it installs pillow-heif).")
-        pillow_heif.register_heif_opener()
+            _heif_ready()
+        except LookupError:
+            if data[4:12] in (b"ftypheic", b"ftypheix", b"ftypmif1", b"ftypmsf1", b"ftyphevc"):
+                raise
         im = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
         out = io.BytesIO()
         im.save(out, "JPEG", quality=95)

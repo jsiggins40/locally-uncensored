@@ -525,7 +525,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-01a';
+const PAGE_BUILD = '2026-11-01b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -548,16 +548,34 @@ const extOf = f => ({ 'image/png': 'png', 'image/webp': 'webp' })[f.type] || 'jp
 // is copied into memory right away; a very large one (or one that can't be read)
 // is replaced by the page's own high-quality copy of the photo.
 // HEIC (iPhone) photos: browsers other than Safari can't open them, so the VM
-// converts them to a full-quality JPEG first (/rv6m/heic)
+// converts them to a full-quality JPEG first (/rv6m/heic). Any other photo this
+// browser can't open (no file type, an odd format) gets the same treatment.
 const isHeic = f => !!f && (/image\/hei[cf]/i.test(f.type || '') || /\.(heic|heif)$/i.test(f.name || ''));
+const opens = f => new Promise(res => {
+  const u = URL.createObjectURL(f), i = new Image();
+  i.onload = () => { URL.revokeObjectURL(u); res(i.naturalWidth > 0); };
+  i.onerror = () => { URL.revokeObjectURL(u); res(false); };
+  i.src = u;
+});
+// Looks inside the file too: a HEIC renamed .jpg (or sent with no name) is still HEIC
+async function heicInside(f) {
+  try {
+    const b = new Uint8Array(await f.slice(0, 12).arrayBuffer()), t = String.fromCharCode(...b.slice(4, 12));
+    return /^ftyp(heic|heix|heim|heis|hevc|hevm|hevs|mif1|msf1)$/.test(t);
+  } catch (e) { return false; }
+}
 async function readable(f) {
-  if (!isHeic(f)) return f;
-  setStatus(`Converting ${f.name || 'the HEIC photo'} to JPEG on the VM…`);
-  const r = await fetch('/rv6m/heic', { method: 'POST', body: f, headers: { 'Content-Type': 'application/octet-stream' } });
+  if (!f) return f;
+  if (!isHeic(f) && !(await heicInside(f)) && (/^image\/(jpeg|png|webp|gif)$/i.test(f.type || '') || await opens(f))) return f;
+  setStatus(`Converting ${f.name || 'the photo'} to JPEG on the VM… (the first HEIC can take a minute)`);
+  let r;
+  try { r = await fetch('/rv6m/heic', { method: 'POST', body: f, headers: { 'Content-Type': 'application/octet-stream' } }); }
+  catch (e) { throw new Error(`Couldn't send ${f.name || 'the photo'} to the VM to convert it (${e.message}).`); }
   if (!r.ok) {
     let msg = ''; try { msg = (await r.json()).error; } catch (e) {}
-    throw new Error(msg || (r.status === 404 ? 'The VM can\'t convert HEIC photos yet: run edit-restart once.' : `The VM couldn't convert that HEIC photo (${r.status}).`));
+    throw new Error(msg || (r.status === 404 ? 'The VM can\'t convert HEIC photos yet: run edit-restart once.' : `The VM couldn't convert that photo (${r.status}).`));
   }
+  setStatus('');
   return new File([await r.blob()], (f.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
 }
 async function toMem(f, canvas) {
@@ -1568,7 +1586,7 @@ $('dlBtn').onclick = () => {
   document.body.appendChild(a); a.click(); a.remove();
 };
 function takeFiles(files, where) {
-  const imgs = [...files].filter(f => /^image\//.test(f.type) || isHeic(f));
+  const imgs = [...files].filter(f => /^image\//.test(f.type) || isHeic(f) || !f.type);
   if (!imgs.length) return false;
   const input = $(where === 'more' && !$('secondBox').classList.contains('hidden') ? 'file2'
                 : where === 'batch' && !$('batchBox').classList.contains('hidden') ? 'fileBatch' : 'file');

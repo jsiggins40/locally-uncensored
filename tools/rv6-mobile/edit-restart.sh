@@ -21,6 +21,10 @@ echo "  page version: $(grep -o "PAGE_BUILD = '[^']*'" "$DEST/web/edit.html" | h
 # keep this command itself up to date too
 sudo curl -fsSL "$SRC/edit-restart.sh" -o /usr/local/bin/edit-restart.new 2>/dev/null \
   && sudo chmod +x /usr/local/bin/edit-restart.new && sudo mv /usr/local/bin/edit-restart.new /usr/local/bin/edit-restart
+# HEIC photos from a computer whose browser can't open them are converted on the VM
+"$HOME/ComfyUI/venv/bin/python" -c "import pillow_heif" 2>/dev/null \
+  || "$HOME/ComfyUI/venv/bin/pip" install -q pillow-heif >/dev/null 2>&1 \
+  || echo "  (couldn't install pillow-heif: HEIC photos won't convert)"
 tmux kill-session -t comfy 2>/dev/null
 tmux new -d -s comfy "cd $HOME/ComfyUI && venv/bin/python main.py --listen 127.0.0.1 --port 8188"
 echo -n "Starting ComfyUI"

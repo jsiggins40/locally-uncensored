@@ -604,6 +604,37 @@ async def rv6m_cloud_video(request):
 
 # Recent cloud results straight from the output folder, so Recent edits shows
 # them even when the page that sent them stopped watching (or another device did)
+# iPhone HEIC photos: Safari on the phone converts them when you pick one, but
+# Chrome/Edge on Windows can't read HEIC at all. The page sends those here and
+# gets a full-quality JPEG back (turned the right way up). Needs pillow-heif,
+# which edit-restart installs.
+@PromptServer.instance.routes.post("/rv6m/heic")
+async def rv6m_heic(request):
+    data = await request.read()
+    if not data or len(data) > 60_000_000:
+        return web.json_response({"error": "no photo, or it's too big"}, status=400)
+
+    def convert():
+        from PIL import Image, ImageOps
+        try:
+            import pillow_heif
+        except ImportError:
+            raise LookupError("The VM can't read HEIC photos yet: run edit-restart once (it installs pillow-heif).")
+        pillow_heif.register_heif_opener()
+        im = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+        out = io.BytesIO()
+        im.save(out, "JPEG", quality=95)
+        return out.getvalue()
+
+    try:
+        jpeg = await asyncio.get_running_loop().run_in_executor(None, convert)
+    except LookupError as e:
+        return web.json_response({"error": str(e)}, status=501)
+    except Exception as e:
+        return web.json_response({"error": f"Couldn't read that photo: {e}"}, status=415)
+    return web.Response(body=jpeg, content_type="image/jpeg")
+
+
 # Recent edits / all edits: straight from the output folder, newest first. ComfyUI's
 # own history is forgotten at every restart; the files stay.
 RECENT_EXT = (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm")

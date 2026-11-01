@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react'
 import { useCreate } from '../../../hooks/useCreate'
 import { useCloudCreate, hasActiveCloudRun } from '../../../hooks/useCloudCreate'
+import { useAtlasCreate, hasActiveAtlasRun, activeAtlasImageModel } from '../../../hooks/useAtlasCreate'
 import { useCloudSession } from '../../../hooks/useCloudSession'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 import { getLoraModels, getVAEModels, checkComfyConnection, refreshComfyModels, bundleForVideoIntent } from '../../../api/comfyui'
@@ -117,6 +118,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   } = useCreate()
   const { cloudAvailable, quota, refreshQuota } = useCloudSession()
   const cloud = useCloudCreate({ onQuotaChange: refreshQuota })
+  const atlas = useAtlasCreate()
   const backend = useCreateStore((s) => s.backend)
   const setBackend = useCreateStore((s) => s.setBackend)
   const setCaps = useCreateStore((s) => s.setCaps)
@@ -509,12 +511,16 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   }, [ensureComfyRunning, fetchModels])
 
   const value: CreateExpValue = {
-    generate: backend === 'cloud' ? cloud.generate : generate,
+    // An Atlas Cloud model picked for Image (api/atlas-images) takes the run
+    // off the local engine. Read at click time, like the store it lives in.
+    generate: backend === 'cloud'
+      ? cloud.generate
+      : () => (activeAtlasImageModel() ? atlas.generate() : generate()),
     // Cancel routes by the backend that STARTED the run, not the current axis:
     // the header switch (or the license probe) can flip local/cloud mid-render,
     // and routing by the live value would abort a null handle while the real
     // run keeps going (a cloud job keeps billing; a local job keeps rendering).
-    cancel: () => (hasActiveCloudRun() ? cloud.cancel() : cancel()),
+    cancel: () => (hasActiveCloudRun() ? cloud.cancel() : hasActiveAtlasRun() ? atlas.cancel() : cancel()),
     enhanceVideo: cloud.enhanceVideo,
     makeVoice: cloud.makeVoice,
     samplerList, schedulerList, loraList, vaeList, refreshModelLists,

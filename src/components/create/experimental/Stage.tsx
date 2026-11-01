@@ -2,6 +2,7 @@ import { useRef, useState, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { UploadCloud, ImagePlus, Scissors, Wand2, Sparkles, X, Loader2, Download, AlertTriangle, Image as ImageIcon, Film } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
+import { useAtlasImagePickActive } from '../../../hooks/useAtlasCreate'
 import { useCreateExp } from './CreateContext'
 import { INTENT_MAP } from './intents'
 import { GeneratingView, ResultView } from './OutputView'
@@ -75,10 +76,12 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
     (meta.requiresModels === 'image' ? mlxMissing.image
       : meta.requiresModels === 'video' ? mlxMissing.video
         : false)
-  const modelsMissing = macMissing || (mlxMissing === null && backend === 'local' && !!meta.requiresModels && (
+  // An Atlas Cloud pick renders on Atlas, so no local model is missing for it.
+  const atlasRun = useAtlasImagePickActive()
+  const modelsMissing = !atlasRun && (macMissing || (mlxMissing === null && backend === 'local' && !!meta.requiresModels && (
     connected === false ||
     (connected === true && modelsLoaded && listForKind[meta.requiresModels].length === 0)
-  ))
+  )))
 
   // A result counts for the current source only if it was generated after the
   // source was loaded — otherwise an older gallery item would hijack the stage.

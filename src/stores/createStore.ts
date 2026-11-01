@@ -266,6 +266,10 @@ interface CreateState {
    *  backend — separate from the persisted local checkpoint names. */
   cloudImageModel: string
   cloudVideoModel: string
+  /** Persisted: an Atlas Cloud model (api/atlas-images) picked for the Image
+   *  intent on the local axis, or null for the local engine. Its own slot so
+   *  useCreate's checkpoint reconciliation never wipes it. */
+  atlasImageModel: string | null
   /** Runtime-only: the model picked inside a 2.5.8 specialized intent
    *  (trainer/lipsync/music/extend/motion). One slot for all — modelForOp
    *  coerces a stale cross-intent pick onto the op's own list. */
@@ -372,6 +376,7 @@ interface CreateState {
   setMask: (img: ImageRef | null) => void
   setBackend: (backend: CreateBackend) => void
   setCloudImageModel: (id: string) => void
+  setAtlasImageModel: (id: string | null) => void
   setCloudVideoModel: (id: string) => void
   setCaps: (caps: Record<'rmbg' | 'inpaint-nodes' | 'dwpose', boolean>) => void
   resetParamsToModelDefaults: () => void
@@ -464,6 +469,7 @@ export const useCreateStore = create<CreateState>()(
       mask: null as ImageRef | null,
       backend: 'local' as CreateBackend,
       cloudImageModel: '',
+      atlasImageModel: null,
       cloudVideoModel: '',
       cloudOpModel: '',
       localOpModel: '',
@@ -708,6 +714,7 @@ export const useCreateStore = create<CreateState>()(
           return patch
         }),
       setCloudImageModel: (cloudImageModel) => set({ cloudImageModel }),
+      setAtlasImageModel: (atlasImageModel) => set({ atlasImageModel }),
       setCloudVideoModel: (cloudVideoModel) => set({ cloudVideoModel }),
       setCaps: (caps) => set({ caps }),
       resetParamsToModelDefaults: () => {
@@ -761,6 +768,7 @@ export const useCreateStore = create<CreateState>()(
         videoBackendInitialized: state.videoBackendInitialized,
         imageModel: state.imageModel,
         imageModelType: state.imageModelType,
+        atlasImageModel: state.atlasImageModel,
         videoModel: state.videoModel,
         sampler: state.sampler,
         scheduler: state.scheduler,

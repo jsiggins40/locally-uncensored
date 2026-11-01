@@ -2,6 +2,7 @@ import { useCallback, useRef, useState, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Sparkles, X, History, SlidersHorizontal, Square, Workflow } from 'lucide-react'
 import { useCreateStore, MODEL_TYPE_DEFAULTS } from '../../../stores/createStore'
+import { useAtlasImagePickActive } from '../../../hooks/useAtlasCreate'
 import { classifyModel } from '../../../api/comfyui'
 import { useCreateExp } from './CreateContext'
 import { intentToJob } from '../../../lib/render/cloud-jobs'
@@ -131,7 +132,9 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   // The hosted endpoints only honour negative_prompt for a few families —
   // hide the toggle (and the collapsed field) where it would be silently
   // dropped, like the other dead knobs on cloud.
-  const negSupported = backend !== 'cloud' || cloudModelById(runModel)?.negative_prompt === true
+  // Atlas Cloud's image API takes no negative prompt either (api/atlas-images).
+  const atlasRun = useAtlasImagePickActive()
+  const negSupported = backend === 'cloud' ? cloudModelById(runModel)?.negative_prompt === true : !atlasRun
   // Per-intent readiness for the 2.5.8 categories (mirrors the submit-time
   // checks of BOTH lanes so the button never invites a doomed run). The
   // local lanes always speak from a portrait (no hosted resync endpoints)

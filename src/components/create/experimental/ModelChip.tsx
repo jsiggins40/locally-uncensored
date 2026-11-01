@@ -5,6 +5,8 @@ import { useUIStore } from '../../../stores/uiStore'
 import { Select, type SelectOption } from '../ui/Select'
 import { TYPE_BADGE } from './badges'
 import { resolveLocalOpPick, videoLaneModels } from '../../../api/comfyui'
+import { useProviderStore } from '../../../stores/providerStore'
+import { ATLAS_IMAGE_MODELS, atlasImageModelById, getAtlasApiKey } from '../../../api/atlas-images'
 
 const CLOUD_BADGE = { label: 'Cloud', color: 'bg-violet-500/15 text-violet-500 dark:text-violet-200' }
 
@@ -13,6 +15,12 @@ const CLOUD_BADGE = { label: 'Cloud', color: 'bg-violet-500/15 text-violet-500 d
 // changing the selection. Value prefix keeps them apart from real checkpoints.
 const TEASER_PREFIX = 'lu-cloud-teaser:'
 const TEASER_ROWS = 4
+
+// Atlas Cloud rows (bring-your-own-key, api/atlas-images): offered on the Image
+// intent once the Atlas Cloud provider has a key. Picking one routes the run
+// to Atlas instead of the local engine; picking a checkpoint routes it back.
+const ATLAS_PREFIX = 'atlas:'
+const ATLAS_BADGE = { label: 'Atlas', color: 'bg-amber-500/15 text-amber-600 dark:text-amber-200' }
 
 // Badge-aware model picker (replaces the raw <select>). Local backend lists
 // the installed checkpoints; the cloud backend lists the hosted catalog
@@ -115,6 +123,10 @@ function LocalModelChip() {
   const teasersEnabled = useSettingsStore((s) => s.settings.cloudTeasersEnabled)
   const setCloudTeaser = useUIStore((s) => s.setCloudTeaser)
   const catalogModels = useCloudCatalogStore((s) => s.models)
+  const atlasImageModel = useCreateStore((s) => s.atlasImageModel)
+  const setAtlasImageModel = useCreateStore((s) => s.setAtlasImageModel)
+  // Subscribed to the slot so the rows appear the moment a key is saved.
+  const atlasReady = useProviderStore((s) => !!s.providers.anthropic && !!getAtlasApiKey())
 
   const isVideo = mode === 'video'
   // The 2.5.8 lanes with their own local model families. Extend is NOT here:
@@ -135,15 +147,24 @@ function LocalModelChip() {
   // Reflect the model the run will really use — a leftover pick the current
   // op can't perform must not show as "selected". Lanes share the submit-side
   // rule (resolveLocalOpPick) so chip, meter and run always agree.
-  const value = laneList
-    ? resolveLocalOpPick(stored, list)
-    : list.some((m) => m.name === stored) ? stored : (list[0]?.name ?? stored)
+  const atlasRows = atlasReady && intent === 'image' && !laneList
+  const atlasPick = atlasRows ? atlasImageModelById(atlasImageModel) : undefined
+  const value = atlasPick
+    ? `${ATLAS_PREFIX}${atlasPick.id}`
+    : laneList
+      ? resolveLocalOpPick(stored, list)
+      : list.some((m) => m.name === stored) ? stored : (list[0]?.name ?? stored)
 
   const options: SelectOption[] = list.map((m) => ({
     value: m.name,
     label: prettyName(m.name),
     badge: TYPE_BADGE[m.type],
   }))
+  if (atlasRows) {
+    for (const m of ATLAS_IMAGE_MODELS) {
+      options.push({ value: `${ATLAS_PREFIX}${m.id}`, label: m.label, sublabel: 'Atlas Cloud, your key', badge: ATLAS_BADGE })
+    }
+  }
   // Discovery rows: a few hosted models of this kind at the list's tail.
   // Picking one opens the Cloud sheet; the local selection stays untouched.
   if (teasersEnabled && !laneList) {
@@ -175,6 +196,11 @@ function LocalModelChip() {
           })
           return
         }
+        if (v.startsWith(ATLAS_PREFIX)) {
+          setAtlasImageModel(v.slice(ATLAS_PREFIX.length))
+          return
+        }
+        if (atlasRows) setAtlasImageModel(null)
         if (laneList) setLocalOpModel(v)
         else if (isVideo) setVideoModel(v)
         else {

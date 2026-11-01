@@ -195,3 +195,88 @@ pub fn read_media_file(path: String) -> Result<String, String> {
         .map_err(|e| format!("read_media_file: {}: {}", canonical.display(), os_error::english(&e)))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
+
+// ── Remote stills (Atlas Cloud Seedream) ────────────────────────────────
+//
+// A hosted image arrives as a URL on the vendor's CDN. The CSP's img-src does
+// not list that host, and vendor links expire, so the bytes are brought home
+// once and kept next to the MLX stills: the gallery then shows them through
+// `read_media_file` like any other local render, and a restart re-reads them
+// from disk instead of chasing a dead link.
+
+/// Upper bound for one downloaded still. A 4K PNG is a few tens of MB; past
+/// this the "image" is not one.
+const REMOTE_IMAGE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// File extension for the image formats a render can come back in, read from
+/// the magic bytes. `None` = not an image, which is refused rather than saved.
+fn image_ext(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+/// Download a finished remote render into the app's image folder and return
+/// the file's path. Public hosts only (same SSRF guard as `fetch_external_bytes`).
+#[tauri::command]
+pub async fn save_remote_image(url: String) -> Result<String, String> {
+    crate::commands::proxy::validate_public_url(&url)?;
+
+    let client = reqwest::Client::builder()
+        .user_agent("LocallyUncensored/2.0")
+        .timeout(std::time::Duration::from_secs(120))
+        .redirect(crate::commands::proxy::ssrf_safe_redirect_policy(10))
+        .build()
+        .map_err(|e| os_error::english(&e))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("save_remote_image: {}", os_error::english(&e)))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}: {}", resp.status().as_u16(), url));
+    }
+    let bytes = resp.bytes().await.map_err(|e| os_error::english(&e))?;
+    if bytes.len() > REMOTE_IMAGE_MAX_BYTES {
+        return Err(format!("save_remote_image: {} bytes is too large for an image", bytes.len()));
+    }
+    let ext = image_ext(&bytes).ok_or_else(|| "save_remote_image: the download is not a PNG, JPEG or WebP image".to_string())?;
+
+    let dir = crate::commands::mlx::images_root();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {}", dir.display(), os_error::english(&e)))?;
+    // Same naming rule as the MLX lane: millisecond stamp + process id, so two
+    // renders landing in the same millisecond never overwrite each other.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("atlas-{stamp}-{}.{ext}", std::process::id()));
+    std::fs::write(&path, &bytes).map_err(|e| format!("write {}: {}", path.display(), os_error::english(&e)))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod remote_image_tests {
+    use super::image_ext;
+
+    #[test]
+    fn recognises_the_formats_a_render_comes_back_in() {
+        assert_eq!(image_ext(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0]), Some("png"));
+        assert_eq!(image_ext(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
+        assert_eq!(image_ext(b"RIFF\x00\x00\x00\x00WEBPVP8 "), Some("webp"));
+    }
+
+    #[test]
+    fn refuses_anything_that_is_not_an_image() {
+        assert_eq!(image_ext(b"<html>error</html>"), None);
+        assert_eq!(image_ext(b"{\"error\":\"expired\"}"), None);
+        assert_eq!(image_ext(b"RIFF\x00\x00\x00\x00WAVE"), None);
+        assert_eq!(image_ext(&[]), None);
+    }
+}

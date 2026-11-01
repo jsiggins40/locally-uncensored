@@ -310,6 +310,7 @@ fn main() {
             commands::media_cmds::video_progress,
             commands::media_cmds::video_cancel,
             commands::media_cmds::read_media_file,
+            commands::media_cmds::save_remote_image,
             // Provider API-key keychain (H5)
             commands::secret::secret_set,
             commands::secret::secret_get,

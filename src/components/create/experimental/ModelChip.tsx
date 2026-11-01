@@ -17,7 +17,8 @@ const TEASER_PREFIX = 'lu-cloud-teaser:'
 const TEASER_ROWS = 4
 
 // Atlas Cloud rows (bring-your-own-key, api/atlas-images): offered on the Image
-// intent once the Atlas Cloud provider has a key. Picking one routes the run
+// and Edit intents once the Atlas Cloud provider has a key. One pick covers
+// both: Edit runs the same model's edit endpoint. Picking one routes the run
 // to Atlas instead of the local engine; picking a checkpoint routes it back.
 const ATLAS_PREFIX = 'atlas:'
 const ATLAS_BADGE = { label: 'Atlas', color: 'bg-amber-500/15 text-amber-600 dark:text-amber-200' }
@@ -147,8 +148,12 @@ function LocalModelChip() {
   // Reflect the model the run will really use — a leftover pick the current
   // op can't perform must not show as "selected". Lanes share the submit-side
   // rule (resolveLocalOpPick) so chip, meter and run always agree.
-  const atlasRows = atlasReady && intent === 'image' && !laneList
-  const atlasPick = atlasRows ? atlasImageModelById(atlasImageModel) : undefined
+  const atlasModels = !atlasReady || laneList ? []
+    : intent === 'image' ? ATLAS_IMAGE_MODELS
+    : intent === 'edit' ? ATLAS_IMAGE_MODELS.filter((m) => m.editId)
+    : []
+  const atlasRows = atlasModels.length > 0
+  const atlasPick = atlasModels.find((m) => m.id === atlasImageModelById(atlasImageModel)?.id)
   const value = atlasPick
     ? `${ATLAS_PREFIX}${atlasPick.id}`
     : laneList
@@ -161,7 +166,7 @@ function LocalModelChip() {
     badge: TYPE_BADGE[m.type],
   }))
   if (atlasRows) {
-    for (const m of ATLAS_IMAGE_MODELS) {
+    for (const m of atlasModels) {
       options.push({ value: `${ATLAS_PREFIX}${m.id}`, label: m.label, sublabel: 'Atlas Cloud, your key', badge: ATLAS_BADGE })
     }
   }

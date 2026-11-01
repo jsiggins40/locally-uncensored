@@ -50,7 +50,10 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
   // so the capability is always ready. Only the local backend gates on the
   // node probe (which never runs without a local ComfyUI and would strand
   // cloud users on a dead "Open Model Manager" card).
-  const capReady = !meta.capability || backend === 'cloud' || !!caps[meta.capability]
+  // An Atlas Cloud pick renders on Atlas: no local model is missing for it and
+  // no ComfyUI node has to be installed.
+  const atlasRun = useAtlasImagePickActive()
+  const capReady = !meta.capability || backend === 'cloud' || atlasRun || !!caps[meta.capability]
   // Local model files missing for this intent (fresh PC): gate the stage on a
   // one-click starter-bundle card. connected === false also gates — the same
   // button installs ComfyUI itself first. connected === null (still probing)
@@ -76,8 +79,6 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
     (meta.requiresModels === 'image' ? mlxMissing.image
       : meta.requiresModels === 'video' ? mlxMissing.video
         : false)
-  // An Atlas Cloud pick renders on Atlas, so no local model is missing for it.
-  const atlasRun = useAtlasImagePickActive()
   const modelsMissing = !atlasRun && (macMissing || (mlxMissing === null && backend === 'local' && !!meta.requiresModels && (
     connected === false ||
     (connected === true && modelsLoaded && listForKind[meta.requiresModels].length === 0)

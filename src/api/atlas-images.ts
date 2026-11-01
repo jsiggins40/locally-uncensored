@@ -1,5 +1,5 @@
 /**
- * Atlas Cloud image generation (Seedream 5.0 Pro), bring-your-own-key.
+ * Atlas Cloud image generation and editing (Seedream 5.0 Pro), bring-your-own-key.
  *
  * Rides the key of the Atlas Cloud chat preset: when the `anthropic` slot points
  * at api.atlascloud.ai, its key also unlocks Atlas's image API. Atlas renders
@@ -18,17 +18,29 @@ export const ATLAS_API_BASE = 'https://api.atlascloud.ai'
 const ATLAS_HOST = 'api.atlascloud.ai'
 
 export interface AtlasImageModel {
+  /** Text-to-image endpoint; also the id the Create pick is stored under. */
   id: string
+  /** The same model's image-edit endpoint, for the Edit intent. */
+  editId?: string
   label: string
 }
 
 /** The models offered in the Create picker. Seedream 5.0 Pro only, by choice. */
 export const ATLAS_IMAGE_MODELS: AtlasImageModel[] = [
-  { id: 'bytedance/seedream-v5.0-pro/text-to-image', label: 'Seedream 5.0 Pro' },
+  { id: 'bytedance/seedream-v5.0-pro/text-to-image', editId: 'bytedance/seedream-v5.0-pro/edit', label: 'Seedream 5.0 Pro' },
 ]
 
 export function atlasImageModelById(id: string | null | undefined): AtlasImageModel | undefined {
   return id ? ATLAS_IMAGE_MODELS.find((m) => m.id === id) : undefined
+}
+
+/** The endpoint a pick runs on for this intent, or null when it has none. */
+export function atlasModelForIntent(pickId: string | null | undefined, intent: string): string | null {
+  const m = atlasImageModelById(pickId)
+  if (!m) return null
+  if (intent === 'image') return m.id
+  if (intent === 'edit') return m.editId ?? null
+  return null
 }
 
 /** The Atlas key, or '' when the anthropic slot is not set up for Atlas Cloud. */
@@ -109,6 +121,8 @@ export interface AtlasImageRequest {
   prompt: string
   width: number
   height: number
+  /** Edit models: URLs of the source image(s), from uploadAtlasImage. */
+  images?: string[]
 }
 
 /**
@@ -118,7 +132,7 @@ export interface AtlasImageRequest {
  * default applies instead of the run failing.
  */
 export async function submitAtlasImage(req: AtlasImageRequest, key: string): Promise<string> {
-  const base = { model: req.model, prompt: req.prompt }
+  const base = { model: req.model, prompt: req.prompt, ...(req.images ? { images: req.images } : {}) }
   const post = (body: object) =>
     atlasRequest('/api/v1/model/generateImage', key, { method: 'POST', body: JSON.stringify(body) })
   let reply: any
@@ -131,6 +145,49 @@ export async function submitAtlasImage(req: AtlasImageRequest, key: string): Pro
   const id = parseSubmitId(reply)
   if (!id) throw new AtlasImageError('Atlas Cloud accepted the render but returned no prediction id.')
   return id
+}
+
+/** The temporary URL from an uploadMedia reply. */
+export function parseUploadUrl(body: any): string | null {
+  const d = body?.data ?? body
+  const url = d?.download_url ?? d?.url ?? d?.file_url ?? body?.url
+  return typeof url === 'string' && url ? url : null
+}
+
+/**
+ * Upload an edit source (a data: URL, as the Create store holds it) to Atlas
+ * and return the URL the edit model reads. Desktop goes through Rust, since the
+ * CSP blocks the host and the generic proxy carries text only.
+ */
+export async function uploadAtlasImage(dataUrl: string, key: string): Promise<string> {
+  const m = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(dataUrl)
+  if (!m || !m[2]) throw new AtlasImageError('The source image could not be read for upload.')
+  const mime = m[1] || 'image/png'
+  const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'png'
+  const filename = `source.${ext}`
+  let text: string
+  if (isTauri()) {
+    try {
+      text = await backendCall<string>('atlas_upload_media', { apiKey: key, filename, mime, dataB64: m[3] })
+    } catch (err) {
+      const hit = /^HTTP (\d{3}): ([\s\S]*)$/.exec(String(err))
+      throw new AtlasImageError(hit ? explainAtlasStatus(Number(hit[1]), hit[2]) : String(err), hit ? Number(hit[1]) : undefined)
+    }
+  } else {
+    const form = new FormData()
+    form.append('file', new Blob([base64ToBytes(m[3])], { type: mime }), filename)
+    const res = await fetch(`${ATLAS_API_BASE}/api/v1/model/uploadMedia`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}` },
+      body: form,
+    })
+    text = await res.text()
+    if (!res.ok) throw new AtlasImageError(explainAtlasStatus(res.status, text), res.status)
+  }
+  let url: string | null = null
+  try { url = parseUploadUrl(JSON.parse(text)) } catch { /* handled below */ }
+  if (!url) throw new AtlasImageError('Atlas Cloud accepted the upload but returned no file URL.')
+  return url
 }
 
 const POLL_INTERVAL_MS = 2000
@@ -181,9 +238,13 @@ function mimeFor(filename: string): string {
   return 'image/png'
 }
 
-function base64ToBlobUrl(b64: string, mime: string): string {
+function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
   const binary = atob(b64)
   const bytes = new Uint8Array(binary.length)
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return URL.createObjectURL(new Blob([bytes], { type: mime }))
+  return bytes
+}
+
+function base64ToBlobUrl(b64: string, mime: string): string {
+  return URL.createObjectURL(new Blob([base64ToBytes(b64)], { type: mime }))
 }

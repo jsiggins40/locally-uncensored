@@ -1,6 +1,7 @@
 import { uploadImage } from '../../../api/comfyui'
 import { useCreateStore } from '../../../stores/createStore'
 import type { ImageRef } from '../../../stores/createStore'
+import { getAtlasApiKey } from '../../../api/atlas-images'
 
 function readDataUrl(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -63,8 +64,12 @@ export async function loadImageRef(file: File): Promise<ImageRef> {
     const blob = await (await fetch(url)).blob()
     upload = new File([blob], file.name.replace(/\.[^.]+$/, '') + '.png', { type: 'image/png' })
   }
-  const backend = useCreateStore.getState().backend
-  const filename = backend === 'cloud' ? '' : await uploadImage(upload)
+  const { backend, atlasImageModel } = useCreateStore.getState()
+  // An Atlas Cloud pick uploads the data URL itself, and ComfyUI may not even
+  // be running. CreateContext backfills the filename once a local model is
+  // picked again, the same way it does after a switch from the cloud.
+  const skipComfy = backend === 'cloud' || (!!atlasImageModel && !!getAtlasApiKey())
+  const filename = skipComfy ? '' : await uploadImage(upload)
   return { filename, url, width, height }
 }
 

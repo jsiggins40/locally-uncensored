@@ -12,6 +12,9 @@ import {
   submitAtlasImage,
   waitForAtlasImage,
   getAtlasApiKey,
+  atlasModelForIntent,
+  parseUploadUrl,
+  uploadAtlasImage,
   ATLAS_IMAGE_MODELS,
 } from '../atlas-images'
 import { useProviderStore } from '../../stores/providerStore'
@@ -27,6 +30,46 @@ afterEach(() => vi.unstubAllGlobals())
 describe('ATLAS_IMAGE_MODELS', () => {
   it('offers Seedream 5.0 Pro only', () => {
     expect(ATLAS_IMAGE_MODELS.map((m) => m.id)).toEqual(['bytedance/seedream-v5.0-pro/text-to-image'])
+  })
+})
+
+describe('atlasModelForIntent', () => {
+  it('maps one pick to its text-to-image and edit endpoints', () => {
+    const pick = 'bytedance/seedream-v5.0-pro/text-to-image'
+    expect(atlasModelForIntent(pick, 'image')).toBe(pick)
+    expect(atlasModelForIntent(pick, 'edit')).toBe('bytedance/seedream-v5.0-pro/edit')
+    expect(atlasModelForIntent(pick, 'video')).toBeNull()
+    expect(atlasModelForIntent('something-else', 'image')).toBeNull()
+    expect(atlasModelForIntent(null, 'image')).toBeNull()
+  })
+})
+
+describe('parseUploadUrl', () => {
+  it('reads the URL spellings an upload reply may use', () => {
+    expect(parseUploadUrl({ data: { download_url: 'https://a/1.png' } })).toBe('https://a/1.png')
+    expect(parseUploadUrl({ data: { url: 'https://a/2.png' } })).toBe('https://a/2.png')
+    expect(parseUploadUrl({ url: 'https://a/3.png' })).toBe('https://a/3.png')
+    expect(parseUploadUrl({ data: {} })).toBeNull()
+  })
+})
+
+describe('uploadAtlasImage', () => {
+  it('sends the decoded image as multipart field "file" and returns its URL', async () => {
+    const calls: any[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: any) => {
+      calls.push({ url, init })
+      return reply(200, { data: { download_url: 'https://tmp.example/s.jpg' } })
+    }))
+    const url = await uploadAtlasImage('data:image/jpeg;base64,/9j/4AAQ', 'k')
+    expect(url).toBe('https://tmp.example/s.jpg')
+    const file = (calls[0].init.body as FormData).get('file') as File
+    expect(file.name).toBe('source.jpg')
+    expect(file.type).toBe('image/jpeg')
+    expect(new Uint8Array(await file.arrayBuffer()).slice(0, 3)).toEqual(new Uint8Array([0xff, 0xd8, 0xff]))
+  })
+
+  it('refuses something that is not a base64 data URL', async () => {
+    await expect(uploadAtlasImage('blob:abc', 'k')).rejects.toThrow(/could not be read/)
   })
 })
 

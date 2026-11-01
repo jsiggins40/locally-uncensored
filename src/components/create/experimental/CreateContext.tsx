@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react'
 import { useCreate } from '../../../hooks/useCreate'
 import { useCloudCreate, hasActiveCloudRun } from '../../../hooks/useCloudCreate'
-import { useAtlasCreate, hasActiveAtlasRun, activeAtlasImageModel } from '../../../hooks/useAtlasCreate'
+import { useAtlasCreate, hasActiveAtlasRun, activeAtlasImageModel, useAtlasImagePickActive } from '../../../hooks/useAtlasCreate'
 import { useCloudSession } from '../../../hooks/useCloudSession'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 import { getLoraModels, getVAEModels, checkComfyConnection, refreshComfyModels, bundleForVideoIntent } from '../../../api/comfyui'
@@ -119,6 +119,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   const { cloudAvailable, quota, refreshQuota } = useCloudSession()
   const cloud = useCloudCreate({ onQuotaChange: refreshQuota })
   const atlas = useAtlasCreate()
+  const atlasRun = useAtlasImagePickActive()
   const backend = useCreateStore((s) => s.backend)
   const setBackend = useCreateStore((s) => s.setBackend)
   const setCaps = useCreateStore((s) => s.setCaps)
@@ -134,10 +135,11 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     if (!cloudAvailable && backend === 'cloud') setBackend('local')
   }, [cloudAvailable, backend, setBackend])
 
-  // Inputs picked while on cloud skip the ComfyUI staging (filename '') —
-  // backfill it when the user switches to local so edit/animate keep working.
+  // Inputs picked while on cloud (or with an Atlas Cloud pick) skip the
+  // ComfyUI staging (filename '') — backfill it when the run goes back to the
+  // local engine so edit/animate keep working.
   useEffect(() => {
-    if (backend !== 'local' || connected !== true) return
+    if (backend !== 'local' || connected !== true || atlasRun) return
     const s = useCreateStore.getState()
     if (s.source && !s.source.filename) {
       ensureLocalFilename(s.source, 'source.png')
@@ -149,7 +151,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
         .then((ref) => useCreateStore.getState().setMask(ref))
         .catch(() => { /* next generate surfaces the error */ })
     }
-  }, [backend, connected])
+  }, [backend, connected, atlasRun])
 
   // Bootstrap the backend exactly like the old CreateView mount did. On macOS
   // skip the ComfyUI probe entirely — hard rule: Mac local media is MLX-only

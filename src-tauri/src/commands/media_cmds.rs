@@ -261,6 +261,60 @@ pub async fn save_remote_image(url: String) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Atlas Cloud's upload endpoint. Fixed here, not passed in: this command
+/// carries a user file and their key, so it must not be aimable elsewhere.
+const ATLAS_UPLOAD_URL: &str = "https://api.atlascloud.ai/api/v1/model/uploadMedia";
+
+/// Upper bound for one uploaded edit source.
+const ATLAS_UPLOAD_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// Upload an edit source image to Atlas Cloud (multipart, field `file`) and
+/// return Atlas's JSON reply, which carries the temporary URL the edit model
+/// reads. The webview cannot send this itself: the CSP blocks the host, and
+/// the generic proxy only forwards text bodies. Non-2xx answers come back as
+/// `HTTP <status>: <body>`, the same shape `proxy_localhost` uses.
+#[tauri::command]
+pub async fn atlas_upload_media(
+    api_key: String,
+    filename: String,
+    mime: String,
+    data_b64: String,
+) -> Result<String, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("atlas_upload_media: decode: {e}"))?;
+    if bytes.len() > ATLAS_UPLOAD_MAX_BYTES {
+        return Err(format!("atlas_upload_media: {} bytes is too large to upload", bytes.len()));
+    }
+    if image_ext(&bytes).is_none() {
+        return Err("atlas_upload_media: the source is not a PNG, JPEG or WebP image".to_string());
+    }
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(filename)
+        .mime_str(&mime)
+        .map_err(|e| format!("atlas_upload_media: {}", os_error::english(&e)))?;
+    let form = reqwest::multipart::Form::new().part("file", part);
+
+    let client = reqwest::Client::builder()
+        .user_agent("LocallyUncensored/2.0")
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| os_error::english(&e))?;
+    let resp = client
+        .post(ATLAS_UPLOAD_URL)
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("atlas_upload_media: {}", os_error::english(&e)))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| os_error::english(&e))?;
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status.as_u16(), text));
+    }
+    Ok(text)
+}
+
 #[cfg(test)]
 mod remote_image_tests {
     use super::image_ext;

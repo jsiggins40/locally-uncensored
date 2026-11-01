@@ -1,4 +1,4 @@
-// Atlas Cloud twin of useCreate's generate/cancel for the Image intent, picked
+// Atlas Cloud twin of useCreate's generate/cancel for the Image and Edit intents, picked
 // per model (createStore.atlasImageModel) rather than per backend axis: the
 // global Local/Cloud switch stays about LU Cloud, and an Atlas render needs
 // neither ComfyUI nor an LU account, only the user's own Atlas key. Store
@@ -10,8 +10,10 @@ import { useCreateStore } from '../stores/createStore'
 import { useProviderStore } from '../stores/providerStore'
 import {
   atlasImageModelById,
+  atlasModelForIntent,
   getAtlasApiKey,
   submitAtlasImage,
+  uploadAtlasImage,
   waitForAtlasImage,
   fetchAtlasResult,
   AtlasImageError,
@@ -23,11 +25,11 @@ let activeAbort: AbortController | null = null
 /** True while an Atlas render this session started is still in flight. */
 export const hasActiveAtlasRun = (): boolean => activeAbort !== null
 
-/** The Atlas model the next Image run goes to, or null for the local engine. */
+/** The Atlas endpoint the next Image/Edit run goes to, or null for the local engine. */
 export function activeAtlasImageModel(): string | null {
   const s = useCreateStore.getState()
-  if (s.backend !== 'local' || s.intent() !== 'image' || !getAtlasApiKey()) return null
-  return atlasImageModelById(s.atlasImageModel)?.id ?? null
+  if (s.backend !== 'local' || !getAtlasApiKey()) return null
+  return atlasModelForIntent(s.atlasImageModel, s.intent())
 }
 
 /** Reactive twin of activeAtlasImageModel for render-time gates (Stage's
@@ -37,7 +39,7 @@ export function useAtlasImagePickActive(): boolean {
   const intent = useCreateStore((s) => s.intent())
   const atlasImageModel = useCreateStore((s) => s.atlasImageModel)
   const hasKey = useProviderStore((s) => !!s.providers.anthropic && !!getAtlasApiKey())
-  return backend === 'local' && intent === 'image' && hasKey && !!atlasImageModelById(atlasImageModel)
+  return backend === 'local' && hasKey && atlasModelForIntent(atlasImageModel, intent) !== null
 }
 
 /** One Atlas Image run from the current Create state (exported for tests). */
@@ -47,7 +49,9 @@ export async function runAtlasImage(): Promise<void> {
   s.setError(null)
 
   const model = atlasImageModelById(s.atlasImageModel)
-  if (!model) return
+  const intent = s.intent()
+  const endpoint = atlasModelForIntent(s.atlasImageModel, intent)
+  if (!model || !endpoint) return
   const key = getAtlasApiKey()
   if (!key) {
     s.setError('Add your Atlas Cloud key first: Settings, AI Backends, Add Provider, Atlas Cloud.')
@@ -56,6 +60,11 @@ export async function runAtlasImage(): Promise<void> {
   const prompt = s.prompt.trim()
   if (!prompt) {
     s.setError('Please enter a prompt.')
+    return
+  }
+  const source = intent === 'edit' ? s.source : null
+  if (intent === 'edit' && !source) {
+    s.setError('Add a source image first.')
     return
   }
   // The app's own non-negotiable gate, the same one the local and LU Cloud
@@ -69,10 +78,15 @@ export async function runAtlasImage(): Promise<void> {
   activeAbort = ac
   s.setIsGenerating(true)
   s.setProgressPhase('queued')
-  s.setProgress(5, 'Sending to Atlas Cloud…')
+  s.setProgress(5, source ? 'Uploading the source image…' : 'Sending to Atlas Cloud…')
 
   try {
-    const id = await submitAtlasImage({ model: model.id, prompt, width: s.width, height: s.height }, key)
+    // An edit keeps the source's size; a new image takes the picked one.
+    const width = source?.width || s.width
+    const height = source?.height || s.height
+    const images = source ? [await uploadAtlasImage(source.url, key)] : undefined
+    if (ac.signal.aborted) throw new AtlasImageError('aborted')
+    const id = await submitAtlasImage({ model: endpoint, prompt, width, height, images }, key)
     const url = await waitForAtlasImage(id, key, {
       signal: ac.signal,
       onTick: (sec) => {
@@ -101,13 +115,13 @@ export async function runAtlasImage(): Promise<void> {
       cfgScale: 0,
       sampler: '',
       scheduler: '',
-      width: s.width,
-      height: s.height,
+      width,
+      height,
       batchSize: 1,
       createdAt: Date.now(),
       dataUrl: saved.dataUrl,
       localPath: saved.localPath,
-      intent: 'image',
+      intent,
     })
   } catch (err) {
     // Stopping the poll is not an error. Atlas has no documented cancel, so

@@ -80,6 +80,7 @@ const STYLE = `
 #lf-sheet .lift-chip .x { position:absolute; top:-6px; right:-6px; width:22px; height:22px; border-radius:50%; padding:0; font-size:12px; line-height:22px; background:#444; }
 #lf-sheet .checker { background-image:conic-gradient(#3a3a3c 25%, #2a2a2c 0 50%, #3a3a3c 0 75%, #2a2a2c 0); background-size:16px 16px; }
 #lf-compose-wrap { position:relative; display:grid; place-items:center; border-radius:10px; overflow:hidden; background:#2a2a2c; padding:6px; }
+#lf-compose-wrap.over { outline:3px dashed var(--accent,#4f8cff); outline-offset:-3px; }
 #lf-compose { display:block; max-width:100%; max-height:58vh; width:auto; height:auto; touch-action:none; }
 #lf-compose-empty { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; padding:16px; text-align:center; }
 #lf-compose-empty span { background:rgba(0,0,0,.6); color:#fff; font-size:14px; border-radius:10px; padding:10px 12px; }
@@ -124,7 +125,7 @@ const MARKUP = `
         <button type="button" id="lf-btn-all" style="flex:0 1 auto">👥 Everyone</button>
       </div>
       <div id="lf-status" role="status" aria-live="polite"></div>
-      <div class="hint" style="margin-top:4px">Tap a person: the whole person lifts. <b>➕ Add</b> then tap more people to lift them together; <b>➖ Remove</b> then tap a stray bit to drop it. Tapping anything else (a dog, a bag) lifts that.</div>
+      <div class="hint" style="margin-top:4px">Tap a person: the whole person lifts. On a computer you can then drag them straight onto the new picture. <b>➕ Add</b> then tap more people to lift them together; <b>➖ Remove</b> then tap a stray bit to drop it. Tapping anything else (a dog, a bag) lifts that.</div>
       <div id="lf-sel-actions">
         <div class="lf-row"><button type="button" class="primary" id="lf-btn-use" style="margin:0">✂️ Add to the new picture</button></div>
         <div class="lf-row" style="margin-top:6px"><button type="button" id="lf-btn-save">⬇️ Save cut-out</button><button type="button" id="lf-btn-clear">Clear</button></div>
@@ -948,8 +949,9 @@ async function addToTray(cut) {
   const chip = document.createElement('div');
   chip.className = 'lift-chip checker';
   chip.dataset.id = item.id;
-  chip.title = 'Add to the new image again';
+  chip.title = 'Click, or drag it onto the new picture, to add it again';
   chip.tabIndex = 0;
+  chip.draggable = true;
   chip.setAttribute('role', 'button');
   chip.innerHTML = `<img alt="Lifted subject ${item.id}" src="${item.url}"><button type="button" class="x" aria-label="Remove from tray">&times;</button>`;
   el.tray.appendChild(chip);
@@ -1490,6 +1492,70 @@ function exportCanvas(opaque) {
   return c;
 }
 
+
+// ── Drag and drop onto the new picture (laptop) ──────────────────────────
+// Drag the glowing person straight off the photo, or a cut-out from the row
+// under it, and let go on the new picture: it lands where you let go.
+let dragging = null;                       // { cut, fromSel }
+const dragImg = makeCanvas(1, 1);
+dragImg.style.cssText = 'position:fixed;left:-10000px;top:0;pointer-events:none';
+sheet.appendChild(dragImg);
+
+function startDrag(e, cut, fromSel) {
+  dragging = { cut, fromSel };
+  e.dataTransfer.effectAllowed = 'copy';
+  e.dataTransfer.setData('text/plain', 'lifted person');
+  const k = Math.min(1, 180 / Math.max(cut.w, cut.h));
+  dragImg.width = Math.max(1, Math.round(cut.w * k));
+  dragImg.height = Math.max(1, Math.round(cut.h * k));
+  dragImg.getContext('2d').drawImage(cut.canvas, 0, 0, dragImg.width, dragImg.height);
+  try { e.dataTransfer.setDragImage(dragImg, dragImg.width / 2, dragImg.height / 2); } catch {}
+}
+
+el.base.draggable = true;
+el.base.addEventListener('dragstart', (e) => {
+  // Only a drag that starts on the lifted person; anything else isn't a drag
+  const r = el.base.getBoundingClientRect();
+  const x = Math.floor(((e.clientX - r.left) / r.width) * src.w);
+  const y = Math.floor(((e.clientY - r.top) / r.height) * src.h);
+  const cut = sel && !working && x >= 0 && y >= 0 && x < src.w && y < src.h && sel[y * src.w + x] > 0.5 && currentCutout();
+  if (!cut) { e.preventDefault(); return; }
+  startDrag(e, { ...cut }, true);
+});
+el.tray.addEventListener('dragstart', (e) => {
+  const chip = e.target.closest?.('.lift-chip');
+  const item = chip && tray.find((t) => t.id === +chip.dataset.id);
+  if (!item) { e.preventDefault(); return; }
+  startDrag(e, item.cut, false);
+});
+document.addEventListener('dragend', () => { dragging = null; el.composeWrap.classList.remove('over'); });
+el.composeWrap.addEventListener('dragover', (e) => {
+  if (!dragging) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  el.composeWrap.classList.add('over');
+});
+el.composeWrap.addEventListener('dragleave', (e) => {
+  if (!el.composeWrap.contains(e.relatedTarget)) el.composeWrap.classList.remove('over');
+});
+el.composeWrap.addEventListener('drop', async (e) => {
+  if (!dragging) return;
+  e.preventDefault();
+  e.stopPropagation();                     // not a photo to lift from
+  el.composeWrap.classList.remove('over');
+  const { cut, fromSel } = dragging;
+  dragging = null;
+  const r = el.compose.getBoundingClientRect();
+  const L = addLayer(cut);                 // sizes the canvas on the first person
+  L.x = Math.min(comp.W, Math.max(0, ((e.clientX - r.left) / r.width) * comp.W));
+  L.y = Math.min(comp.H, Math.max(0, ((e.clientY - r.top) / r.height) * comp.H));
+  renderCompose();
+  if (fromSel) {
+    clearSelection();
+    setStatus('Added to the new picture. Tap another person, or open another photo to add people from it.');
+    await addToTray(cut);
+  }
+});
 
 // ── Wiring ───────────────────────────────────────────────────────────────
 

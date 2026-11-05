@@ -1236,7 +1236,13 @@ function toCanvasPoint(e) {
   return { x: ((e.clientX - r.left) / r.width) * comp.W, y: ((e.clientY - r.top) / r.height) * comp.H };
 }
 
+// Opaque pixels first (so you can reach someone standing behind), then
+// anywhere in a person's box: thin arms and legs are hard to hit with a finger.
 function hitLayer(p) {
+  return hitLayerPass(p, true) || hitLayerPass(p, false);
+}
+
+function hitLayerPass(p, opaqueOnly) {
   for (let i = comp.layers.length - 1; i >= 0; i--) {
     const L = comp.layers[i];
     const dx = p.x - L.x;
@@ -1249,9 +1255,7 @@ function hitLayer(p) {
     const ix = Math.floor(lx + L.cut.w / 2);
     const iy = Math.floor(ly + L.cut.h / 2);
     if (ix < 0 || iy < 0 || ix >= L.cut.w || iy >= L.cut.h) continue;
-    // The selected layer can be grabbed anywhere in its box; others need a hit
-    // on an opaque pixel so you can reach a layer that sits behind.
-    if (L === comp.selected || itemAlpha(L.cut)[iy * L.cut.w + ix] > 24) return L;
+    if (!opaqueOnly || L === comp.selected || itemAlpha(L.cut)[iy * L.cut.w + ix] > 24) return L;
   }
   return null;
 }
@@ -1293,8 +1297,16 @@ el.compose.addEventListener('pointerdown', (e) => {
     }
   }
   const hit = hitLayer(p);
-  selectLayer(hit);
-  gesture = hit ? { type: 'move', L: hit, dx: p.x - hit.x, dy: p.y - hit.y } : null;
+  if (hit) {
+    selectLayer(hit);
+    gesture = { type: 'move', L: hit, dx: p.x - hit.x, dy: p.y - hit.y };
+  } else if (L) {
+    // Empty space: a drag still moves the selected person (on a small phone
+    // screen they're hard to hit); a plain tap deselects.
+    gesture = { type: 'move', L, dx: p.x - L.x, dy: p.y - L.y, start: p, tapOff: true };
+  } else {
+    gesture = null;
+  }
 });
 
 el.compose.addEventListener('pointermove', (e) => {
@@ -1310,6 +1322,7 @@ el.compose.addEventListener('pointermove', (e) => {
   if (!gesture) return;
   const { L } = gesture;
   if (gesture.type === 'move') {
+    if (gesture.tapOff && Math.hypot(p.x - gesture.start.x, p.y - gesture.start.y) > 8 * pxRatio()) gesture.tapOff = false;
     L.x = p.x - gesture.dx;
     L.y = p.y - gesture.dy;
   } else if (gesture.type === 'handle') {
@@ -1329,8 +1342,20 @@ el.compose.addEventListener('pointermove', (e) => {
   renderCompose();
 });
 
+// iOS Safari can start scrolling the sheet under a finger on the picture and
+// then cancel the drag; blocking the touch's default keeps the drag going.
+for (const t of ['touchstart', 'touchmove']) {
+  el.compose.addEventListener(t, (e) => { if (e.cancelable) e.preventDefault(); }, { passive: false });
+}
+
 function endPointer(e) {
   pointers.delete(e.pointerId);
+  if (e.type === 'pointerup' && pointers.size === 0 && gesture?.tapOff) {
+    // Undo the tiny wobble of a tap, then deselect
+    gesture.L.x = gesture.start.x - gesture.dx;
+    gesture.L.y = gesture.start.y - gesture.dy;
+    selectLayer(null);
+  }
   if (pointers.size === 1 && gesture?.type === 'pinch') {
     // Lifting one finger of a pinch continues as a drag with the other.
     const [p] = [...pointers.values()];

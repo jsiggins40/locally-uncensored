@@ -189,6 +189,7 @@
   </label>
   <button id="pasteBtn" style="flex:none">📋 Paste photo</button>
   </div>
+  <button id="liftBtn" style="width:100%;margin-top:8px">✂️ Lift people into a new picture</button>
   <div id="modelBox">
   <label for="model">Model</label>
   <select id="model"><option>Loading…</option></select>
@@ -527,7 +528,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-05b';
+const PAGE_BUILD = '2026-11-05c';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -1692,7 +1693,7 @@ addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; doc
 addEventListener('dragover', e => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
 addEventListener('drop', e => {
   dragDepth = 0; document.body.classList.remove('dragging');
-  if (!e.dataTransfer?.files?.length) return;
+  if (!e.dataTransfer?.files?.length || liftOpen()) return;  // ✂️ Lift takes its own drops
   e.preventDefault();
   const t = e.target instanceof Element ? e.target : null;
   if (!takeFiles(e.dataTransfer.files, t?.closest('#secondBox') ? 'more' : t?.closest('#batchBox') ? 'batch' : 'main'))
@@ -1717,6 +1718,7 @@ $('pasteBtn').onclick = async () => {
   }
 };
 addEventListener('paste', e => {
+  if (liftOpen()) return;  // ✂️ Lift takes its own pastes
   const files = [...(e.clipboardData?.files || [])];
   if (!files.some(f => /^image\//.test(f.type))) return;  // ordinary text paste
   e.preventDefault(); takeFiles(files, 'main');
@@ -1803,6 +1805,7 @@ for (const b of document.querySelectorAll('button.step')) {
 // Size the working canvases from the photo (kept at up to 2048 px in `full`) to the
 // chosen output size. keepMask rescales an existing selection instead of clearing it.
 let photoIn = false;  // canvases start at 300x150 before any photo
+let photoRev = 0;     // counts photo changes (✂️ Lift follows the photo)
 // Computer (wide window): size the photo so all of it fits the window height
 function fitStage() {
   const st = $('stage');
@@ -1879,7 +1882,7 @@ function loadIntoCanvas(src, stillWanted) {
       const fs = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
       full.width = Math.round(img.naturalWidth * fs); full.height = Math.round(img.naturalHeight * fs);
       full.getContext('2d').drawImage(img, 0, 0, full.width, full.height);
-      mainOrig = null; photoIn = true;
+      mainOrig = null; photoIn = true; photoRev++;
       clearMarks(true);  // positions belonged to the previous photo
       photoT = 0; photoSaving = null;  // the VM's copy is the old photo until savePhoto runs
       fitToRes(false);
@@ -1911,6 +1914,49 @@ $('file').addEventListener('change', async e => {
   catch (err) { setStatus(err.message, true); }
   finally { URL.revokeObjectURL(url); e.target.value = ''; }
 });
+
+// ---- ✂️ Lift (lift.js): tap people to cut them out of one or more photos and
+// arrange them into a new picture, which comes back here as the photo (for
+// ☁️ Seedream when the VM has an Atlas key) or as an extra photo. Runs in the
+// browser; its models are served from the VM (edit-restart puts them there).
+const liftOpen = () => { const s = document.getElementById('lf-sheet'); return !!s && !s.hidden; };
+$('liftBtn').onclick = async () => {
+  let lift;
+  try { lift = await import('./lift.js?v=' + PAGE_BUILD); }
+  catch (e) { return setStatus(`Couldn't open ✂️ Lift: run edit-restart on the VM. (${e.message})`, true); }
+  await cloudReady;
+  lift.openLift({
+    photo: photoIn ? full : null, photoKey: photoRev, readable, onUse: liftUse,
+    useHint: cloudCfg.configured
+      ? '"Use as the photo" switches to ☁️ Seedream: then say what to change, e.g. "put them on a beach at sunset, natural light".'
+      : '"Use as the photo" makes it the photo for the edit modes.',
+  });
+};
+async function liftUse(blob, as) {
+  if (as === 'more') {
+    if (cloudCfg.configured && mode !== 'cloud') setMode('cloud');
+    if (more.length >= maxMore()) return setStatus(`There's no room for another photo here (${maxMore() + 1} in total). Remove one first.`, true);
+    genMore++;
+    try { const c = await readPhoto(blob); c.orig = blob; more.push(c); renderMore(); }
+    catch (err) { return setStatus(err.message, true); }
+    return setStatus(`The new picture is picture ${more.length + 1}.`);
+  }
+  genPhoto++;
+  const url = URL.createObjectURL(blob);
+  try {
+    await loadIntoCanvas(url); mainOrig = blob; savePhoto();
+    // Same as choosing a new photo: extra / batch photos belonged to the old one
+    const dropped = more.length + batch.length;
+    if (more.length) { genMore++; more.length = 0; renderMore(); }
+    if (batch.length) { genBatch++; batch.length = 0; renderBatch(); }
+    setMode(cloudCfg.configured ? 'cloud' : qwen ? 'instruct' : 'mask');
+    scrollTo({ top: 0 });
+    setStatus((cloudCfg.configured ? 'Your new picture is the photo. Say what Seedream should change, e.g. the place, the light, the clothes.'
+      : 'Your new picture is the photo. Now say what to change.')
+      + (dropped ? `\nThe ${dropped} extra/batch photo${dropped > 1 ? 's' : ''} from before ${dropped > 1 ? 'were' : 'was'} removed.` : ''));
+  } catch (err) { setStatus(err.message, true); }
+  finally { URL.revokeObjectURL(url); }
+}
 
 function pos(e) {
   const r = mask.getBoundingClientRect();

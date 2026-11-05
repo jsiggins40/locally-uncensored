@@ -13,6 +13,7 @@ mkdir -p "$DEST/web"
 curl -fsSL "$SRC/__init__.py"   -o "$DEST/__init__.py"
 curl -fsSL "$SRC/edit.html"     -o "$DEST/web/edit.html"
 curl -fsSL "$SRC/workflow.json" -o "$DEST/web/workflow.json"
+curl -fsSL "$SRC/lift.js"       -o "$DEST/web/lift.js"   # ✂️ Lift (edit-restart adds its models)
 
 echo "== Restarting ComfyUI"
 tmux kill-session -t comfy 2>/dev/null || true

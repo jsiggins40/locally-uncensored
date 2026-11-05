@@ -13,11 +13,36 @@ sha=$(curl -fsSL --max-time 15 https://api.github.com/repos/jsiggins40/locally-u
 [ -n "$sha" ] && SRC="https://raw.githubusercontent.com/jsiggins40/locally-uncensored/$sha/tools/rv6-mobile"
 mkdir -p "$DEST/web"
 ok=1
-for f in __init__.py web/edit.html web/workflow.json; do
+for f in __init__.py web/edit.html web/workflow.json web/lift.js; do
   curl -fsSL "$SRC/${f#web/}" -o "$DEST/$f.new" && mv "$DEST/$f.new" "$DEST/$f" || { ok=0; rm -f "$DEST/$f.new"; }
 done
 [ $ok = 1 ] || echo "  (couldn't download all of it; keeping the current page)"
 echo "  page version: $(grep -o "PAGE_BUILD = '[^']*'" "$DEST/web/edit.html" | head -1 | cut -d"'" -f2)${sha:+ (commit ${sha:0:7})}"
+# ✂️ Lift's models and runtime (about 50 MB, once): served from the VM, so lifting
+# doesn't depend on outside sites. Without them the page loads them from the
+# internet instead.
+LIFT="$DEST/web/lift"; LIFT_V=1.1.1
+if [ "$(cat "$LIFT/VERSION" 2>/dev/null)" != "$LIFT_V" ]; then
+  echo "Getting the ✂️ Lift models (once, about 50 MB)"
+  tmp=$(mktemp -d)
+  GCS=https://storage.googleapis.com/mediapipe-models
+  if curl -fsSL "https://registry.npmjs.org/@mediapipe/tasks-vision/-/tasks-vision-$LIFT_V.tgz" -o "$tmp/mp.tgz" \
+     && tar -xzf "$tmp/mp.tgz" -C "$tmp" package/vision_bundle.mjs package/wasm \
+     && curl -fsSL "$GCS/image_segmenter/deeplab_v3/float32/1/deeplab_v3.tflite" -o "$tmp/deeplab_v3.tflite" \
+     && curl -fsSL "$GCS/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite" -o "$tmp/magic_touch.tflite"; then
+    # .js rather than .mjs: every server sends .js as JavaScript, which import() needs
+    rm -rf "$LIFT.new" && mkdir -p "$LIFT.new/wasm" \
+      && cp "$tmp/package/vision_bundle.mjs" "$LIFT.new/vision_bundle.js" \
+      && cp "$tmp"/package/wasm/* "$LIFT.new/wasm/" \
+      && cp "$tmp"/*.tflite "$LIFT.new/" \
+      && echo "$LIFT_V" > "$LIFT.new/VERSION" \
+      && rm -rf "$LIFT" && mv "$LIFT.new" "$LIFT" \
+      || echo "  (couldn't install them; ✂️ Lift will load them from the internet)"
+  else
+    echo "  (couldn't download them; ✂️ Lift will load them from the internet)"
+  fi
+  rm -rf "$tmp"
+fi
 # keep this command itself up to date too; when it changed, run the new copy
 # right away (this run is still the old one)
 if sudo curl -fsSL "$SRC/edit-restart.sh" -o /usr/local/bin/edit-restart.new 2>/dev/null; then

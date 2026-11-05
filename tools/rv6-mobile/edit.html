@@ -343,7 +343,8 @@
   </div>
   <div id="editModelBox" class="hidden">
     <label>Edit model</label>
-    <div class="seg"><button id="emQwen">Qwen 2511 + LoRA</button><button id="emAio">⚡ Rapid AIO NSFW</button><button id="emQ21" class="hidden">🆕 Qwen 2.1</button></div>
+    <div class="seg"><button id="emQwen">Qwen 2511 + LoRA</button><button id="emAio">⚡ Rapid AIO NSFW</button><button id="emQ21" class="hidden">🆕 Qwen 2.1</button><button id="emKrea" class="hidden">Krea 2</button></div>
+    <div class="seg hidden" id="kreaPickRow" style="margin-top:6px"><button id="kpGeneral">✏️ Edit</button><button id="kpIdentity">🧍 Restage person</button></div>
     <div class="hint" id="emHint"></div>
   </div>
   <div id="q21Box" class="hidden">
@@ -526,7 +527,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-05a';
+const PAGE_BUILD = '2026-11-05b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -677,8 +678,12 @@ let q21 = null, createModel = recall('createModel') || 'q21', q21Pick = recall('
 // Krea 2 Turbo (add-krea2.sh): another Create model, 8 steps at CFG 1
 let krea = null;
 const kreaActive = () => !!krea && mode === 'create' && (createModel === 'krea' || (!create && !q21));
+// Krea 2 editing: Describe edit only, one photo (Selected area uses the Qwen editors)
+let kreaPick = recall('kreaPick') || 'general';
+const kreaEdit = () => !!(krea && krea.edit) && mode === 'instruct' && editModel === 'krea';
+const kreaLora = () => krea.edit[kreaPick === 'identity' && krea.edit.identity ? 'identity' : 'general'] || krea.edit.identity;
 const q21Active = () => !!q21 && (mode === 'create' ? (createModel === 'q21' || !create) && !kreaActive()
-  : (mode === 'instruct' || qwenMask()) && (editModel === 'q21' || !qwen));
+  : (mode === 'instruct' || qwenMask()) && !kreaEdit() && (editModel === 'q21' || !qwen || (editModel === 'krea' && !aioCkpt)));
 const q21Turbo = () => !!(q21 && q21.turbo && q21Pick === 'turbo');
 const q21Unet = () => (q21Pick === 'noct' && q21.noct) || (q21Turbo() && q21.turbo.unet) || q21.unet || q21.noct;
 // Qwen-Image 2.1 Turbo: 8 steps at CFG 1 on the schedule it was distilled for
@@ -720,7 +725,7 @@ function setMode(m) {
   const masked = m === 'mask', cloud = m === 'cloud', q = usesQwen(), inst = q, fx = fixMask();
   $('engineBox').classList.toggle('hidden', !(masked && fill && qwen));
   $('engChange').classList.toggle('on', masked && !fx); $('engFix').classList.toggle('on', fx);
-  $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus) || refVid() || startVid()));
+  $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus && !kreaEdit()) || refVid() || startVid()));
   $('batchBox').classList.toggle('hidden', !cloud); renderBatch();
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   $('markBox').classList.toggle('hidden', !cloud); $('marks').classList.toggle('hidden', !cloud);
@@ -731,15 +736,15 @@ function setMode(m) {
   $('res').previousElementSibling.classList.toggle('hidden', cloud || cr || vid);
   shapeUI();
   $('resHint').classList.toggle('hidden', cloud || cr || vid);
-  $('neg').closest('details').classList.toggle('hidden', cloud || fx || vid || kreaActive());
+  $('neg').closest('details').classList.toggle('hidden', cloud || fx || vid || kreaActive() || kreaEdit());
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !speedLora());
   const encOwner = q21Active() ? q21 : cr ? create : qwen;
-  $('encBox').classList.toggle('hidden', !inst || kreaActive() || !(encOwner && encOwner.clipAbl));
+  $('encBox').classList.toggle('hidden', !inst || kreaActive() || kreaEdit() || !(encOwner && encOwner.clipAbl));
   applyEncoder();
-  $('editModelBox').classList.toggle('hidden', !((aioCkpt || q21) && qwen && (m === 'instruct' || (masked && !fx))));
+  $('editModelBox').classList.toggle('hidden', !((((aioCkpt || q21) && qwen) || (krea && krea.edit && m === 'instruct')) && (m === 'instruct' || (masked && !fx))));
   applyEditModel(); applyQ21();
-  $('loraBox').classList.toggle('hidden', !inst || aioActive() || q21Active() || kreaActive() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
+  $('loraBox').classList.toggle('hidden', !inst || aioActive() || q21Active() || kreaActive() || kreaEdit() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
   $('fluxLoraBox').classList.toggle('hidden', !fx || !fill.loras.length);
   const [hint, label, ph] = MODE_TEXT[fx ? 'fmask' : m === 'mask' && q ? 'qmask' : m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label;
@@ -806,10 +811,10 @@ async function info(node) {
   try { const r = await fetch('/api/object_info/' + node); return r.ok ? await r.json() : {}; } catch (e) { return {}; }
 }
 (async () => {
-  const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache, svi, svr, msig] = await Promise.all(
+  const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache, svi, svr, msig, k2edit] = await Promise.all(
     ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit',
      'FluxKontextMultiReferenceLatentMethod', 'DualCLIPLoader', 'TextEncodeQwenImage21', 'QwenImage21Cache', 'WanImageToVideoSVIPro',
-     'SeedVR2Conditioning', 'ManualSigmas'].map(info));
+     'SeedVR2Conditioning', 'ManualSigmas', 'Krea2EditGroundedEncode'].map(info));
   const f = {
     unet: optionsOf(unet, 'UNETLoader', 'unet_name').filter(n => /fill/i.test(n) && /flux|onereward/i.test(n))
             .sort((a, b) => /onereward/i.test(a) - /onereward/i.test(b) || /fp8/i.test(b) - /fp8/i.test(a)).pop(),
@@ -909,8 +914,12 @@ async function info(node) {
   const kVae = vaes.filter(n => /krea/i.test(n)).sort().pop() || vaes.filter(n => /qwen_image_vae/i.test(n)).sort().pop();
   const clipTypes = (((clip.CLIPLoader || {}).input || {}).required || {}).type;
   if (kUnet && kClip && kVae && JSON.stringify(clipTypes || '').includes('krea2')) {
-    krea = { unet: kUnet, clip: kClip, vae: kVae };
+    krea = { unet: kUnet, clip: kClip, vae: kVae, edit: null };
     $('modeCreate').classList.remove('hidden');
+    // ✏️ Krea 2 editing (add-krea2-edit.sh): the krea2edit nodes + General / Identity Edit LoRAs
+    const kl = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name');
+    const kGen = kl.filter(n => /krea2.*general.?edit/i.test(n)).sort().pop(), kId = kl.filter(n => /krea2.*identity.?edit/i.test(n)).sort().pop();
+    if (k2edit.Krea2EditGroundedEncode && (kGen || kId)) { krea.edit = { general: kGen || null, identity: kId || null }; $('emKrea').classList.remove('hidden'); }
   }
   $('createModelBox').classList.toggle('hidden', [create, q21, krea].filter(Boolean).length < 2);
   $('cmQ2512').classList.toggle('hidden', !create); $('cmQ21').classList.toggle('hidden', !q21); $('cmKrea').classList.toggle('hidden', !krea);
@@ -1024,7 +1033,7 @@ let quality = recall('quality') === '1';
 // on unsoftened. Same choice for Describe edit, Change and Create.
 let encoder = recall('encoder') || 'abl';
 const activeClip = m => encoder === 'abl' && m.clipAbl ? m.clipAbl : m.clip;
-const ablActive = () => { if (kreaActive()) return false; const m = q21Active() ? q21 : mode === 'create' ? create : qwen; return !!(m && m.clipAbl && encoder === 'abl'); };
+const ablActive = () => { if (kreaActive() || kreaEdit()) return false; const m = q21Active() ? q21 : mode === 'create' ? create : qwen; return !!(m && m.clipAbl && encoder === 'abl'); };
 function applyEncoder() {
   $('encStd').classList.toggle('on', encoder !== 'abl'); $('encAbl').classList.toggle('on', encoder === 'abl');
   $('encHint').textContent = encoder === 'abl'
@@ -1038,16 +1047,31 @@ $('encAbl').onclick = () => { encoder = 'abl'; store('encoder', encoder); applyE
 // checkpoint; 4 (Fast) or 8 (Quality) steps at CFG 1. Only with a Qwen edit model too
 // (it uses the same Plus encoder node). Chosen per device.
 let editModel = recall('editModel') || 'aio';
-const aioActive = () => !!(aioCkpt && qwen) && editModel === 'aio' && (mode === 'instruct' || qwenMask());
+const aioActive = () => !!(aioCkpt && qwen) && (editModel === 'aio' || (editModel === 'krea' && !kreaEdit())) && (mode === 'instruct' || qwenMask());
 function applyEditModel() {
   if (editModel === 'q21' && !q21) editModel = aioCkpt ? 'aio' : 'qwen';
   if (editModel === 'aio' && !aioCkpt) editModel = 'qwen';
-  $('emQwen').classList.toggle('on', editModel === 'qwen'); $('emAio').classList.toggle('on', editModel === 'aio');
-  $('emQ21').classList.toggle('on', editModel === 'q21'); $('emAio').classList.toggle('hidden', !aioCkpt);
-  $('emHint').textContent = editModel === 'aio'
+  if (editModel === 'krea' && !(krea && krea.edit)) editModel = aioCkpt ? 'aio' : q21 ? 'q21' : 'qwen';
+  const ke = kreaEdit();
+  $('emKrea').classList.toggle('on', ke); $('emKrea').classList.toggle('hidden', !(krea && krea.edit) || mode !== 'instruct');
+  $('kreaPickRow').classList.toggle('hidden', !ke || !(krea.edit.general && krea.edit.identity));
+  $('kpGeneral').classList.toggle('on', ke && kreaLora() === krea.edit.general); $('kpIdentity').classList.toggle('on', ke && kreaLora() === krea.edit.identity);
+  if (ke) {
+    $('emQwen').classList.remove('on'); $('emAio').classList.remove('on'); $('emQ21').classList.remove('on'); $('emAio').classList.toggle('hidden', !aioCkpt);
+    $('emHint').textContent = kreaLora() === krea.edit.identity
+      ? 'Krea 2 Restage person: keeps who the person is while you change the pose, setting or outfit. One photo, 8 steps.'
+      : 'Krea 2 Edit: fast (8 steps), one photo. Good at recolouring, adding things, changing clothes and restyling; poor at removing things.';
+    setVal($('steps'), 8); setVal($('cfg'), 1);
+    return;
+  }
+  // Krea chosen but in Selected area: the editor that runs instead is the one lit up
+  const em = editModel === 'krea' ? (aioCkpt ? 'aio' : q21 ? 'q21' : 'qwen') : editModel;
+  $('emQwen').classList.toggle('on', em === 'qwen'); $('emAio').classList.toggle('on', em === 'aio');
+  $('emQ21').classList.toggle('on', em === 'q21'); $('emAio').classList.toggle('hidden', !aioCkpt);
+  $('emHint').textContent = (editModel === 'krea' ? 'Krea 2 edits in Describe edit only; Selected area uses this one. ' : '') + (em === 'aio'
     ? 'Rapid AIO: NSFW and speed-up built in, so no LoRA menu. Fast = 4 steps, Quality = 8.'
-    : editModel === 'q21' ? 'Qwen 2.1: newest Qwen, far less censored. Up to 10 photos. 25 steps; the 2511 LoRAs don\'t apply.'
-    : 'Qwen 2511 with your LoRA menu (Scottzilla NSFW etc.).';
+    : em === 'q21' ? 'Qwen 2.1: newest Qwen, far less censored. Up to 10 photos. 25 steps; the 2511 LoRAs don\'t apply.'
+    : 'Qwen 2511 with your LoRA menu (Scottzilla NSFW etc.).');
 }
 function applyQ21() {
   const kr = kreaActive();
@@ -1077,14 +1101,17 @@ $('cmKrea').onclick = () => { createModel = 'krea'; store('createModel', createM
 $('q21Noct').onclick = () => { q21Pick = 'noct'; store('q21Pick', q21Pick); applyQ21(); };
 $('q21Off').onclick = () => { q21Pick = 'official'; store('q21Pick', q21Pick); applyQ21(); };
 $('q21Turbo').onclick = () => { q21Pick = 'turbo'; store('q21Pick', q21Pick); applyQ21(); };
+$('emKrea').onclick = () => { editModel = 'krea'; store('editModel', editModel); setMode(mode); };
+$('kpGeneral').onclick = () => { kreaPick = 'general'; store('kreaPick', kreaPick); applyEditModel(); };
+$('kpIdentity').onclick = () => { kreaPick = 'identity'; store('kreaPick', kreaPick); applyEditModel(); };
 $('emQwen').onclick = () => { editModel = 'qwen'; store('editModel', editModel); setMode(mode); };
 $('emAio').onclick = () => { editModel = 'aio'; store('editModel', editModel); setMode(mode); };
-const speedLora = () => q21Active() || kreaActive() ? false : aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
+const speedLora = () => q21Active() || kreaActive() || kreaEdit() ? false : aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
 function fastActive() { return !!speedLora() && !quality; }
 function applySpeed() {
   const cr = mode === 'create';
   if (q21Active()) { setVal($('steps'), q21Turbo() ? 8 : 25); setVal($('cfg'), 1); return; }  // Qwen's own 2.1 settings
-  if (kreaActive()) { setVal($('steps'), 8); setVal($('cfg'), 1); return; }  // Krea 2 Turbo: 8 steps, CFG 1
+  if (kreaActive() || kreaEdit()) { setVal($('steps'), 8); setVal($('cfg'), 1); return; }  // Krea 2 Turbo: 8 steps, CFG 1
   if (!(cr ? create : qwen)) return;
   $('fastBtn').classList.toggle('on', fastActive()); $('qualBtn').classList.toggle('on', !fastActive());
   if (aioActive()) {
@@ -1517,6 +1544,34 @@ function buildKreaWorkflow(text, seed, steps, w, h) {
     '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
   };
+}
+// Krea 2 editing (comfyui-krea2edit): the photo goes in twice, as clean picture tokens
+// (Krea2EditModelPatch: appearance) and to the text encoder with the instruction
+// (Krea2EditGroundedEncode: what's where). The negative is the same photo with an
+// empty instruction, the unconditional the LoRAs were trained with.
+function buildKreaEditWorkflow(imgName, text, seed, steps, w, h) {
+  return {
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: krea.unet, weight_dtype: 'default' } },
+    '18': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: kreaLora(), strength_model: 1 } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: krea.clip, type: 'krea2' } },
+    '13': { class_type: 'VAELoader', inputs: { vae_name: krea.vae } },
+    '5': { class_type: 'LoadImage', inputs: { image: imgName } },
+    '6': { class_type: 'EmptyLatentImage', inputs: { width: w, height: h, batch_size: 1 } },
+    '10': { class_type: 'VAEEncode', inputs: { pixels: ['5', 0], vae: ['13', 0] } },
+    '20': { class_type: 'Krea2EditModelPatch', inputs: { model: ['18', 0], source_latent: ['10', 0], vae: ['13', 0], source_image: ['5', 0], target_latent: ['6', 0] } },
+    '3': { class_type: 'Krea2EditGroundedEncode', inputs: { clip: ['2', 0], prompt: text, image: ['5', 0] } },
+    '4': { class_type: 'Krea2EditGroundedEncode', inputs: { clip: ['2', 0], prompt: '', image: ['5', 0] } },
+    '7': { class_type: 'KSampler', inputs: { model: ['20', 0], positive: ['3', 0], negative: ['4', 0], latent_image: ['6', 0],
+                                              seed, steps, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
+  };
+}
+// The krea2edit LoRAs were trained at up to 2 MP; bigger outputs repeat things
+function kreaEditDims() {
+  let [w, h] = editOutDims() || [base.width, base.height];
+  const s = Math.min(1, Math.sqrt(2e6 / (w * h)));
+  return [Math.max(256, Math.round(w * s / 16) * 16), Math.max(256, Math.round(h * s / 16) * 16)];
 }
 function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, maskName = null, outDims = null) {
   const edit = imgNames.length > 0, cfg = q21Cfg();
@@ -2423,7 +2478,7 @@ $('go').onclick = async () => {
   if (mode !== 'create' && $('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
   if (mode === 'mask' && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
   if (!$('prompt').value.trim() && !fixMask()) return setStatus(usesQwen() ? 'Type what you want changed first.' : 'Type a prompt or tap some tags first.', true);
-  if (mode === 'instruct' && !qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
+  if (mode === 'instruct' && !qwen && !q21Active() && !kreaEdit()) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
   $('go').disabled = true; stopRequested = false; currentJobs = [];
   $('stop').classList.remove('hidden');
   store('workPrompt', $('prompt').value);
@@ -2440,6 +2495,9 @@ $('go').onclick = async () => {
     if (mode === 'video') {
       if (!photoIn) throw new Error('Choose a photo first: the video starts from it.');
       p = buildVideoWorkflow(imgName, $('prompt').value.trim(), seed);
+    } else if (kreaEdit()) {
+      const [w, h] = kreaEditDims();
+      p = buildKreaEditWorkflow(imgName, $('prompt').value.trim(), seed, +$('steps').value || 8, w, h);
     } else if (kreaActive()) {
       const [w, h] = createDims();
       p = buildKreaWorkflow($('prompt').value.trim(), seed, +$('steps').value || 8, w, h);
@@ -2783,6 +2841,7 @@ async function waitForJobs(ids, t0) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
         const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
           : kreaActive() ? `Krea 2 Turbo · ${$('steps').value} steps · ${createDims().join('×')}`
+          : kreaEdit() ? `Krea 2 ${kreaLora() === krea.edit.identity ? 'Restage' : 'Edit'} · ${$('steps').value} steps · ${kreaEditDims().join('×')}`
           : q21Active() ? `Qwen 2.1${q21Turbo() ? ' Turbo' : q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
             (mode === 'create' ? createDims().join('×') : (editOutDims() || [base.width, base.height]).join('×')) + (ablActive() ? ' · 🔓 encoder' : '') +
             (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')

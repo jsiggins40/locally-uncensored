@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Subject Lift: Cut People Out of Photos, Privately</title>
+<meta name="description" content="Tap a person in a photo to lift them out, like on the iPhone, then drop them into a new image. Runs entirely in your browser: your photos are never uploaded.">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="canonical" href="https://locallyuncensored.com/lift/">
+<meta property="og:title" content="Subject Lift: Cut People Out of Photos, Privately">
+<meta property="og:description" content="Tap a person to lift them out of a photo and build a new image. Runs entirely in your browser: nothing is uploaded.">
+<meta property="og:url" content="https://locallyuncensored.com/lift/">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://locallyuncensored.com/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebApplication","name":"Subject Lift","description":"Tap a person in a photo to lift them out and drop them into a new image. Runs entirely in the browser.","url":"https://locallyuncensored.com/lift/","applicationCategory":"MultimediaApplication","operatingSystem":"Any","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"isPartOf":{"@type":"WebSite","name":"Locally Uncensored","url":"https://locallyuncensored.com/"}}
+</script>
+<link rel="icon" href="../favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+<style>
+/* Subject Lift: page-local styles. Colours come from the lu.css tokens, so the
+   dark/light theme switch in the nav works here too. */
+.lift-wrap{max-width:1320px;margin:0 auto;padding:32px 16px 48px}
+.lift-head h1{font-family:var(--display);font-size:clamp(1.8rem,4vw,2.6rem);font-weight:700;letter-spacing:-.02em;margin:0 0 .4rem;color:var(--fg)}
+.lift-head p{color:var(--fg-50);margin:0 0 1.4rem;max-width:62ch;line-height:1.55}
+.lift-head .pill{display:inline-flex;align-items:center;gap:.4rem;font-size:.78rem;color:var(--green);border:1px solid var(--line-strong);border-radius:999px;padding:.2rem .65rem;margin-bottom:.9rem}
+.lift-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:980px){.lift-grid{grid-template-columns:minmax(0,1fr)}}
+.lift-panel{background:var(--panel);border:1px solid var(--line-subtle);border-radius:var(--radius-xl);padding:14px;min-width:0}
+.lift-panel h2{font-family:var(--display);font-size:1.05rem;font-weight:600;margin:0;color:var(--fg);display:flex;align-items:center;gap:.5rem}
+.lift-panel h2 .n{display:inline-grid;place-items:center;width:1.5rem;height:1.5rem;border-radius:50%;background:var(--accent);color:#fff;font-size:.8rem}
+.lift-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 12px}
+.lift-bar .grow{flex:1}
+.lift-btn{appearance:none;border:1px solid var(--line-strong);background:var(--raised);color:var(--fg);font:500 .85rem var(--sans);padding:.45rem .8rem;border-radius:var(--radius-md);cursor:pointer;display:inline-flex;align-items:center;gap:.35rem;line-height:1.2;white-space:nowrap}
+.lift-btn:hover:not(:disabled){border-color:var(--accent)}
+.lift-btn:disabled{opacity:.45;cursor:not-allowed}
+.lift-btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.lift-btn.danger:hover:not(:disabled){border-color:#ef4444;color:#ef4444}
+.lift-btn:focus-visible,.lift-seg button:focus-visible,.lift-drop:focus-visible{outline:2px solid var(--accent-soft);outline-offset:2px}
+.lift-seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:var(--radius-md);overflow:hidden}
+.lift-seg button{appearance:none;border:0;background:transparent;color:var(--fg-70);font:500 .8rem var(--sans);padding:.42rem .7rem;cursor:pointer}
+.lift-seg button[aria-pressed="true"]{background:var(--fill-strong);color:var(--fg)}
+.lift-drop{position:relative;border:1.5px dashed var(--line-strong);border-radius:var(--radius-lg);min-height:340px;display:grid;place-items:center;text-align:center;color:var(--fg-50);cursor:pointer;padding:24px;transition:border-color .15s,background .15s}
+.lift-drop:hover,.lift-drop.over{border-color:var(--accent);background:var(--fill-faint)}
+.lift-drop strong{display:block;color:var(--fg);font-size:1.05rem;margin-bottom:.3rem}
+.lift-stage{position:relative;display:grid;place-items:center;background:var(--fill-faint);border-radius:var(--radius-lg);overflow:hidden;min-height:200px;touch-action:manipulation}
+.lift-stage.over{outline:2px dashed var(--accent);outline-offset:-4px}
+.lift-photo{position:relative;line-height:0}
+.lift-photo canvas{display:block;max-width:100%;max-height:68vh;width:auto;height:auto}
+.lift-photo #base{cursor:crosshair;transition:filter .35s var(--ease)}
+.lift-photo.has-sel #base{filter:brightness(.42) saturate(.6)}
+.lift-photo #overlay{position:absolute;inset:0;width:100%;height:100%;max-height:none;pointer-events:none;filter:drop-shadow(0 0 2px rgba(255,255,255,.95)) drop-shadow(0 0 14px rgba(255,255,255,.45));transition:transform .35s var(--ease)}
+.lift-photo.has-sel #overlay{transform:translateY(-3px) scale(1.006)}
+.lift-busy{position:absolute;inset:0;display:none;place-items:center;background:rgba(0,0,0,.35);color:#fff;font:500 .9rem var(--sans);z-index:2}
+.lift-busy.on{display:grid}
+.lift-spin{width:28px;height:28px;border-radius:50%;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:liftspin .8s linear infinite;margin:0 auto 10px}
+@keyframes liftspin{to{transform:rotate(360deg)}}
+.lift-tip{font-size:.8rem;color:var(--fg-50);margin:10px 0 0;line-height:1.5}
+.lift-tip kbd{font:500 .72rem var(--mono);border:1px solid var(--line-strong);border-radius:4px;padding:0 .3rem}
+.lift-status{font-size:.8rem;color:var(--fg-50);min-height:1.2em}
+.lift-status.err{color:#ef4444}
+.lift-actions{display:none;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
+.lift-actions.on{display:flex}
+.lift-refine{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;margin-top:10px;font-size:.8rem;color:var(--fg-70)}
+.lift-refine label,.lift-props label{display:flex;align-items:center;gap:.5rem}
+input[type=range].lift-range{accent-color:var(--accent);width:120px}
+.lift-tray{display:flex;gap:8px;overflow-x:auto;padding:4px 2px 6px;margin-top:12px;min-height:84px}
+.lift-tray:empty::before{content:"Lifted subjects collect here.";color:var(--fg-30);font-size:.8rem;align-self:center}
+.lift-chip{position:relative;flex:0 0 auto;width:76px;height:76px;border-radius:var(--radius-md);border:1px solid var(--line-strong);cursor:pointer;padding:3px;background-color:var(--raised)}
+.lift-chip img{width:100%;height:100%;object-fit:contain;display:block}
+.lift-chip:hover{border-color:var(--accent)}
+.lift-chip .x{position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:1px solid var(--line-strong);background:var(--overlay);color:var(--fg-70);font-size:12px;line-height:18px;text-align:center;padding:0;cursor:pointer}
+.checker{background-image:conic-gradient(var(--fill-strong) 25%,transparent 0 50%,var(--fill-strong) 0 75%,transparent 0);background-size:14px 14px}
+.lift-compose{position:relative;display:grid;place-items:center;border-radius:var(--radius-lg);overflow:hidden;background:var(--fill-faint);padding:8px}
+.lift-compose canvas{display:block;max-width:100%;max-height:62vh;width:auto;height:auto;touch-action:none;box-shadow:0 1px 18px rgba(0,0,0,.35)}
+.lift-empty{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none;padding:16px}
+.lift-empty span{background:rgba(0,0,0,.55);color:#fff;font-size:.85rem;line-height:1.5;text-align:center;border-radius:var(--radius-md);padding:.6rem .9rem;backdrop-filter:blur(4px)}
+.lift-props{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin-top:12px;font-size:.8rem;color:var(--fg-70)}
+.lift-props select,.lift-props input[type=color]{background:var(--raised);color:var(--fg);border:1px solid var(--line-strong);border-radius:var(--radius-sm);font:.8rem var(--sans);padding:.3rem .4rem}
+.lift-props input[type=color]{padding:0;width:34px;height:28px}
+.lift-sep{height:1px;background:var(--line-subtle);margin:12px 0}
+.lift-layer{display:none}
+.lift-layer.on{display:flex}
+.lift-wrap [hidden]{display:none!important}
+.lift-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.lift-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);background:var(--overlay);color:var(--fg);border:1px solid var(--line-strong);border-radius:var(--radius-md);padding:.55rem .9rem;font-size:.85rem;opacity:0;pointer-events:none;transition:.25s var(--ease);z-index:50}
+.lift-toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.lift-faq{max-width:760px;margin:40px 0 0;color:var(--fg-70);font-size:.92rem;line-height:1.6}
+.lift-faq h3{color:var(--fg);font-size:1rem;margin:1.2rem 0 .3rem}
+</style>
+</head>
+<body>
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1000+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">430+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+
+<main class="lift-wrap">
+  <header class="lift-head">
+    <span class="pill">&#9679; Runs in your browser &middot; nothing is uploaded</span>
+    <h1>Subject Lift</h1>
+    <p>Tap a person to lift them out of a photo, the way you can on an iPhone. Then drop them into a new image: change the background, combine people from different photos, add a sticker outline, and save it.</p>
+  </header>
+
+  <div class="lift-grid">
+    <!-- ── 1. Lift ─────────────────────────────────────── -->
+    <section class="lift-panel" aria-labelledby="lift-h">
+      <div class="lift-bar">
+        <h2 id="lift-h"><span class="n">1</span> Lift</h2>
+        <span class="grow"></span>
+        <button class="lift-btn" id="btn-open" type="button">Open photo</button>
+        <input type="file" id="file" accept="image/*" class="lift-sr" tabindex="-1">
+      </div>
+
+      <div class="lift-drop" id="drop" tabindex="0" role="button" aria-label="Choose a photo">
+        <div>
+          <strong>Drop a photo here</strong>
+          or click to choose one, or paste with <kbd>Ctrl</kbd>/<kbd>&#8984;</kbd>+<kbd>V</kbd>.<br>
+          <span style="font-size:.8rem">JPG, PNG or WebP. The AI models (about 9&nbsp;MB) download once, then run on your device.</span>
+        </div>
+      </div>
+
+      <div class="lift-stage" id="stage" hidden>
+        <div class="lift-photo" id="photo">
+          <canvas id="base" aria-label="Photo: tap a person to lift them"></canvas>
+          <canvas id="overlay" aria-hidden="true"></canvas>
+        </div>
+        <div class="lift-busy" id="busy"><div><div class="lift-spin"></div><span id="busy-text">Working…</span></div></div>
+      </div>
+
+      <div id="lift-tools" hidden>
+        <div class="lift-bar" style="margin:12px 0 0">
+          <div class="lift-seg" role="group" aria-label="Tap mode">
+            <button type="button" data-mode="new" aria-pressed="true" title="Each tap starts a new selection">New</button>
+            <button type="button" data-mode="add" aria-pressed="false" title="Add to the selection (or hold Shift)">Add</button>
+            <button type="button" data-mode="sub" aria-pressed="false" title="Remove from the selection (or hold Alt)">Remove</button>
+          </div>
+          <button class="lift-btn" id="btn-all" type="button">Select all people</button>
+          <span class="grow"></span>
+          <span class="lift-status" id="status" role="status" aria-live="polite"></span>
+        </div>
+        <p class="lift-tip">Tap a person to lift the whole person. Tap anything else (a pet, a bag, a cup) to lift that object. Use <b>Add</b> (<kbd>Shift</kbd>+tap) to lift several people together, or <b>Remove</b> (<kbd>Alt</kbd>+tap) to drop a part.</p>
+
+        <div class="lift-actions" id="sel-actions">
+          <button class="lift-btn primary" id="btn-use" type="button">Add to new image &rarr;</button>
+          <button class="lift-btn" id="btn-copy" type="button">Copy</button>
+          <button class="lift-btn" id="btn-save" type="button">Save PNG</button>
+          <button class="lift-btn" id="btn-clear" type="button">Clear</button>
+          <div class="lift-refine">
+            <label>Edge softness <input class="lift-range" type="range" id="feather" min="0" max="8" step="0.5" value="1"></label>
+            <label>Shrink &harr; grow <input class="lift-range" type="range" id="grow" min="-0.3" max="0.3" step="0.02" value="0"></label>
+          </div>
+        </div>
+
+        <div class="lift-tray" id="tray" aria-label="Lifted subjects"></div>
+      </div>
+    </section>
+
+    <!-- ── 2. Create ───────────────────────────────────── -->
+    <section class="lift-panel" aria-labelledby="create-h">
+      <div class="lift-bar">
+        <h2 id="create-h"><span class="n">2</span> New image</h2>
+        <span class="grow"></span>
+        <button class="lift-btn" id="btn-export-copy" type="button" disabled>Copy</button>
+        <button class="lift-btn primary" id="btn-export" type="button" disabled>Download</button>
+      </div>
+
+      <div class="lift-compose checker" id="compose-wrap">
+        <canvas id="compose" width="1080" height="1080" aria-label="New image canvas: drag subjects to move them, drag the round handle to resize and rotate"></canvas>
+        <div class="lift-empty" id="compose-empty"><span>Lifted subjects appear here.<br>Drag to move &middot; round handle to resize and rotate.</span></div>
+      </div>
+
+      <div class="lift-props">
+        <label>Size
+          <select id="size">
+            <option value="photo">Same as photo</option>
+            <option value="1080x1080">Square 1080</option>
+            <option value="1080x1350">Portrait 4:5</option>
+            <option value="1080x1920">Story 9:16</option>
+            <option value="1920x1080">Wide 16:9</option>
+          </select>
+        </label>
+        <label>Background
+          <select id="bg">
+            <option value="gradient">Gradient</option>
+            <option value="color">Solid colour</option>
+            <option value="none">Transparent</option>
+            <option value="photo">Original photo</option>
+            <option value="photo-blur">Original photo, blurred</option>
+            <option value="upload">My own photo…</option>
+          </select>
+        </label>
+        <label id="bg-color-l">Colour <input type="color" id="bg-color" value="#7c3aed"></label>
+        <label id="bg-color2-l">to <input type="color" id="bg-color2" value="#0ea5e9"></label>
+        <input type="file" id="bg-file" accept="image/*" class="lift-sr" tabindex="-1">
+        <label>Format
+          <select id="fmt"><option value="png">PNG</option><option value="jpeg">JPG</option></select>
+        </label>
+      </div>
+
+      <div class="lift-sep"></div>
+
+      <div class="lift-props lift-layer" id="layer-props" style="margin-top:0">
+        <label>Size <input class="lift-range" type="range" id="l-scale" min="0.05" max="4" step="0.01"></label>
+        <label>Rotate <input class="lift-range" type="range" id="l-rot" min="-180" max="180" step="1"></label>
+        <label><input type="checkbox" id="l-shadow"> Shadow</label>
+        <label><input type="checkbox" id="l-sticker"> Sticker outline</label>
+        <span style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="lift-btn" type="button" id="l-flip">Flip</button>
+          <button class="lift-btn" type="button" id="l-up" title="Bring forward">Forward</button>
+          <button class="lift-btn" type="button" id="l-down" title="Send backward">Back</button>
+          <button class="lift-btn" type="button" id="l-dup">Duplicate</button>
+          <button class="lift-btn danger" type="button" id="l-del">Delete</button>
+        </span>
+      </div>
+      <p class="lift-tip" id="layer-hint">Click a subject on the canvas to edit it. <kbd>Del</kbd> removes it, arrow keys nudge it.</p>
+    </section>
+  </div>
+
+  <section class="lift-faq">
+    <h3>Are my photos uploaded anywhere?</h3>
+    <p>No. The page downloads two small AI models from Google's open-source MediaPipe project and runs them inside your browser. Your photo is never sent to a server, and nothing is saved after you close the tab.</p>
+    <h3>How does a tap know what to lift?</h3>
+    <p>A tap-guided model (MediaPipe Magic Touch) outlines the subject under your finger. A second model checks whether that subject is a person: if you tapped just a face or a shirt, it lifts the whole person, and it trims stray bits of background. <b>Select all people</b> finds everyone first and lifts each one the same way. If two people touch, they may lift together: switch to <b>Remove</b> and tap the one you don't want.</p>
+    <h3>Want this offline, with full image generation?</h3>
+    <p><a href="/">Locally Uncensored</a> is a free desktop app that runs chat, image and video generation on your own hardware, including background removal and inpainting.</p>
+  </section>
+</main>
+
+<div class="lift-toast" id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="./lift.js"></script>
+</body>
+</html>

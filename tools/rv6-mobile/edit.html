@@ -205,7 +205,8 @@
     </select>
     <div id="createModelBox" class="hidden">
       <label>Create model</label>
-      <div class="seg"><button id="cmQ2512">Qwen 2512</button><button id="cmQ21">🆕 Qwen 2.1</button></div>
+      <div class="seg"><button id="cmQ2512">Qwen 2512</button><button id="cmQ21">🆕 Qwen 2.1</button><button id="cmKrea" class="hidden">Krea 2 Turbo</button></div>
+      <div class="hint hidden" id="kreaHint">Krea 2 Turbo: 12B, made for 8 steps (a few seconds a picture). Natural, photographic look. Text-to-image only; it doesn't edit photos.</div>
     </div>
     <label for="createSize">Size</label>
     <select id="createSize">
@@ -525,7 +526,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-01b';
+const PAGE_BUILD = '2026-11-05a';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -673,7 +674,10 @@ let create = null;
 // and Heretic (abliterated) text encoder. Added by add-qwen21.sh.
 let video = null, upscaler = null, jobNote = '';
 let q21 = null, createModel = recall('createModel') || 'q21', q21Pick = recall('q21Pick') || 'noct';
-const q21Active = () => !!q21 && (mode === 'create' ? (createModel === 'q21' || !create)
+// Krea 2 Turbo (add-krea2.sh): another Create model, 8 steps at CFG 1
+let krea = null;
+const kreaActive = () => !!krea && mode === 'create' && (createModel === 'krea' || (!create && !q21));
+const q21Active = () => !!q21 && (mode === 'create' ? (createModel === 'q21' || !create) && !kreaActive()
   : (mode === 'instruct' || qwenMask()) && (editModel === 'q21' || !qwen));
 const q21Turbo = () => !!(q21 && q21.turbo && q21Pick === 'turbo');
 const q21Unet = () => (q21Pick === 'noct' && q21.noct) || (q21Turbo() && q21.turbo.unet) || q21.unet || q21.noct;
@@ -727,15 +731,15 @@ function setMode(m) {
   $('res').previousElementSibling.classList.toggle('hidden', cloud || cr || vid);
   shapeUI();
   $('resHint').classList.toggle('hidden', cloud || cr || vid);
-  $('neg').closest('details').classList.toggle('hidden', cloud || fx || vid);
+  $('neg').closest('details').classList.toggle('hidden', cloud || fx || vid || kreaActive());
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !speedLora());
   const encOwner = q21Active() ? q21 : cr ? create : qwen;
-  $('encBox').classList.toggle('hidden', !inst || !(encOwner && encOwner.clipAbl));
+  $('encBox').classList.toggle('hidden', !inst || kreaActive() || !(encOwner && encOwner.clipAbl));
   applyEncoder();
   $('editModelBox').classList.toggle('hidden', !((aioCkpt || q21) && qwen && (m === 'instruct' || (masked && !fx))));
   applyEditModel(); applyQ21();
-  $('loraBox').classList.toggle('hidden', !inst || aioActive() || q21Active() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
+  $('loraBox').classList.toggle('hidden', !inst || aioActive() || q21Active() || kreaActive() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
   $('fluxLoraBox').classList.toggle('hidden', !fx || !fill.loras.length);
   const [hint, label, ph] = MODE_TEXT[fx ? 'fmask' : m === 'mask' && q ? 'qmask' : m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label;
@@ -899,6 +903,17 @@ async function info(node) {
     $('emQ21').classList.remove('hidden');
     $('createModelBox').classList.toggle('hidden', !create);
   }
+  const kUnet = units.filter(n => /krea/i.test(n) && /turbo/i.test(n)).sort(bf16Last).pop();
+  const kClip = clips.filter(n => /krea|qwen3.?vl.?4b/i.test(n)).sort(bf16Last).pop();
+  const vaes = optionsOf(vae, 'VAELoader', 'vae_name');
+  const kVae = vaes.filter(n => /krea/i.test(n)).sort().pop() || vaes.filter(n => /qwen_image_vae/i.test(n)).sort().pop();
+  const clipTypes = (((clip.CLIPLoader || {}).input || {}).required || {}).type;
+  if (kUnet && kClip && kVae && JSON.stringify(clipTypes || '').includes('krea2')) {
+    krea = { unet: kUnet, clip: kClip, vae: kVae };
+    $('modeCreate').classList.remove('hidden');
+  }
+  $('createModelBox').classList.toggle('hidden', [create, q21, krea].filter(Boolean).length < 2);
+  $('cmQ2512').classList.toggle('hidden', !create); $('cmQ21').classList.toggle('hidden', !q21); $('cmKrea').classList.toggle('hidden', !krea);
   if (fill) {
     fill.loras = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name')
       .filter(n => /flux/i.test((meta[n] || {}).baseModel || '') || (!meta[n] && /flux/i.test(n) && !/fill|lightning/i.test(n)))
@@ -910,7 +925,7 @@ async function info(node) {
   let saved = recall('mode') || mode;
   if (saved === 'cloud' && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'whole' && !allModels.length) saved = 'instruct';
-  if (saved === 'create' && !create && !q21) saved = qwen ? 'instruct' : 'mask';
+  if (saved === 'create' && !create && !q21 && !krea) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'video' && !video && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
   if (saved === 'mask' && !qwen && !fill && !allModels.length) saved = 'instruct';
   setMode(saved);  // (re-)run now that the models are known
@@ -1009,7 +1024,7 @@ let quality = recall('quality') === '1';
 // on unsoftened. Same choice for Describe edit, Change and Create.
 let encoder = recall('encoder') || 'abl';
 const activeClip = m => encoder === 'abl' && m.clipAbl ? m.clipAbl : m.clip;
-const ablActive = () => { const m = q21Active() ? q21 : mode === 'create' ? create : qwen; return !!(m && m.clipAbl && encoder === 'abl'); };
+const ablActive = () => { if (kreaActive()) return false; const m = q21Active() ? q21 : mode === 'create' ? create : qwen; return !!(m && m.clipAbl && encoder === 'abl'); };
 function applyEncoder() {
   $('encStd').classList.toggle('on', encoder !== 'abl'); $('encAbl').classList.toggle('on', encoder === 'abl');
   $('encHint').textContent = encoder === 'abl'
@@ -1035,7 +1050,10 @@ function applyEditModel() {
     : 'Qwen 2511 with your LoRA menu (Scottzilla NSFW etc.).';
 }
 function applyQ21() {
-  $('cmQ2512').classList.toggle('on', createModel !== 'q21'); $('cmQ21').classList.toggle('on', createModel === 'q21');
+  const kr = kreaActive();
+  $('cmQ2512').classList.toggle('on', !kr && createModel !== 'q21'); $('cmQ21').classList.toggle('on', !kr && createModel === 'q21');
+  $('cmKrea').classList.toggle('on', kr); $('kreaHint').classList.toggle('hidden', !kr);
+  if (kr) { setVal($('steps'), 8); setVal($('cfg'), 1); }
   const on = q21Active();
   $('q21Box').classList.toggle('hidden', !on);
   if (!on) return;
@@ -1055,16 +1073,18 @@ function applyQ21() {
 $('emQ21').onclick = () => { editModel = 'q21'; store('editModel', editModel); setMode(mode); };
 $('cmQ2512').onclick = () => { createModel = '2512'; store('createModel', createModel); setMode(mode); };
 $('cmQ21').onclick = () => { createModel = 'q21'; store('createModel', createModel); setMode(mode); };
+$('cmKrea').onclick = () => { createModel = 'krea'; store('createModel', createModel); setMode(mode); };
 $('q21Noct').onclick = () => { q21Pick = 'noct'; store('q21Pick', q21Pick); applyQ21(); };
 $('q21Off').onclick = () => { q21Pick = 'official'; store('q21Pick', q21Pick); applyQ21(); };
 $('q21Turbo').onclick = () => { q21Pick = 'turbo'; store('q21Pick', q21Pick); applyQ21(); };
 $('emQwen').onclick = () => { editModel = 'qwen'; store('editModel', editModel); setMode(mode); };
 $('emAio').onclick = () => { editModel = 'aio'; store('editModel', editModel); setMode(mode); };
-const speedLora = () => q21Active() ? false : aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
+const speedLora = () => q21Active() || kreaActive() ? false : aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
 function fastActive() { return !!speedLora() && !quality; }
 function applySpeed() {
   const cr = mode === 'create';
   if (q21Active()) { setVal($('steps'), q21Turbo() ? 8 : 25); setVal($('cfg'), 1); return; }  // Qwen's own 2.1 settings
+  if (kreaActive()) { setVal($('steps'), 8); setVal($('cfg'), 1); return; }  // Krea 2 Turbo: 8 steps, CFG 1
   if (!(cr ? create : qwen)) return;
   $('fastBtn').classList.toggle('on', fastActive()); $('qualBtn').classList.toggle('on', !fastActive());
   if (aioActive()) {
@@ -1482,6 +1502,22 @@ const q21Cfg = () => q21Turbo() ? 1 : +$('q21cfg').value || 1;
 function showQ21Cfg() { setVal($('q21cfg'), +(recall(q21Key()) || (q21Unet() === q21.noct ? 3 : 1))); }
 $('q21cfg').addEventListener('input', () => store(q21Key(), $('q21cfg').value));
 for (const b of document.querySelectorAll('button.step[data-for=q21cfg]')) b.addEventListener('pointerup', () => store(q21Key(), $('q21cfg').value));
+// Krea 2 Turbo: ComfyUI's own nodes (CLIPLoader type "krea2" = its Qwen3-VL-4B
+// encoder); 8 steps at CFG 1, so the negative is just an empty conditioning
+function buildKreaWorkflow(text, seed, steps, w, h) {
+  return {
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: krea.unet, weight_dtype: 'default' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: krea.clip, type: 'krea2' } },
+    '13': { class_type: 'VAELoader', inputs: { vae_name: krea.vae } },
+    '3': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text } },
+    '4': { class_type: 'ConditioningZeroOut', inputs: { conditioning: ['3', 0] } },
+    '6': { class_type: 'EmptyLatentImage', inputs: { width: w, height: h, batch_size: 1 } },
+    '7': { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['3', 0], negative: ['4', 0], latent_image: ['6', 0],
+                                              seed, steps, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
+  };
+}
 function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, maskName = null, outDims = null) {
   const edit = imgNames.length > 0, cfg = q21Cfg();
   const p = {
@@ -2404,6 +2440,9 @@ $('go').onclick = async () => {
     if (mode === 'video') {
       if (!photoIn) throw new Error('Choose a photo first: the video starts from it.');
       p = buildVideoWorkflow(imgName, $('prompt').value.trim(), seed);
+    } else if (kreaActive()) {
+      const [w, h] = createDims();
+      p = buildKreaWorkflow($('prompt').value.trim(), seed, +$('steps').value || 8, w, h);
     } else if (q21Active()) {
       const names = [];
       if (mode === 'instruct') for (const [i, c] of usedMore().entries()) names.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
@@ -2743,6 +2782,7 @@ async function waitForJobs(ids, t0) {
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
         const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
+          : kreaActive() ? `Krea 2 Turbo · ${$('steps').value} steps · ${createDims().join('×')}`
           : q21Active() ? `Qwen 2.1${q21Turbo() ? ' Turbo' : q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
             (mode === 'create' ? createDims().join('×') : (editOutDims() || [base.width, base.height]).join('×')) + (ablActive() ? ' · 🔓 encoder' : '') +
             (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')

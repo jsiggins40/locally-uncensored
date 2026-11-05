@@ -1511,9 +1511,11 @@ el.use.addEventListener('click', async () => {
   const cut = currentCutout();
   if (!cut) return;
   const frozen = { ...cut };          // later edge tweaks don't change this one
-  await addToTray(frozen);
-  addLayer(frozen);
+  // Clear and place it right away: a quick tap on the next person must not be
+  // wiped by a clear that lands after the tray thumbnail is saved
   clearSelection();
+  addLayer(frozen);
+  await addToTray(frozen);
   setStatus('Added to the new picture (below). Tap another person, or open another photo to add people from it.');
   toast('✂️ Added to the new picture');
 });

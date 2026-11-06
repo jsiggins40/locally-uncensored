@@ -761,7 +761,7 @@ function samImage() {
     const fd = new FormData();
     fd.append('image', await canvasToBlob(src.canvas, 'image/jpeg', 0.92), `rv6m_lift_${Date.now().toString(36)}.jpg`);
     fd.append('overwrite', 'true');
-    const r = await fetch('/upload/image', { method: 'POST', body: fd });
+    const r = await fetch('/api/upload/image', { method: 'POST', body: fd });
     if (!r.ok) throw Object.assign(new Error(`upload failed (${r.status})`), { permanent: r.status === 404 });
     const j = await r.json();
     const name = j.subfolder ? `${j.subfolder}/${j.name}` : j.name;

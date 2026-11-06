@@ -315,6 +315,27 @@ def _pro_size(size):
     return min(PRO_SIZES, key=lambda p: abs(math.log(int(p.split("*")[0]) / int(p.split("*")[1])) - r))
 
 
+# Seedream 5.5 (Atlas API reference, Nov 2026): 32 sizes, the same eight shapes in
+# four tiers. Its 2K tier is the same as 5.0 Pro's (PRO_SIZES).
+V55_SIZES = ["2880*2880", "3264*2448", "2448*3264", "3840*2160", "2160*3840", "3504*2336", "2336*3504", "4368*1872",
+             *PRO_SIZES,
+             "1536*1536", "1792*1344", "1344*1792", "2048*1152", "1152*2048", "1872*1248", "1248*1872", "2352*1008",
+             "1024*1024", "1152*864", "864*1152", "1424*800", "800*1424", "1248*832", "832*1248", "1568*672"]
+
+
+def _v55_size(size):
+    """size as is when it is one of Seedream 5.5's presets, else the 2K preset closest in shape."""
+    import math
+    if str(size) in V55_SIZES:
+        return str(size)
+    try:
+        w, h = (int(x) for x in str(size).lower().replace("x", "*").split("*"))
+        r = math.log(w / h)
+    except Exception:
+        return "2048*2048"
+    return min(PRO_SIZES, key=lambda p: abs(math.log(int(p.split("*")[0]) / int(p.split("*")[1])) - r))
+
+
 SEEDREAM_THINKING = os.environ.get("RV6M_SEEDREAM_THINKING", "disabled")      # enabled | disabled
 SEEDREAM_OPTIMIZE = os.environ.get("RV6M_SEEDREAM_OPTIMIZE", "fast")          # standard | fast
 
@@ -333,7 +354,13 @@ def _cloud(names, prompt, size, model):
         mime = "image/png" if low.endswith(".png") else "image/webp" if low.endswith(".webp") else "image/jpeg"
         images.append(f"data:{mime};base64," + base64.b64encode(open(path, "rb").read()).decode())
     body = {"model": model, "prompt": prompt, "images": images, "enable_base64_output": False}
-    if "pro" in model.lower():
+    if "seedream-v5.5" in model.lower():
+        # Seedream 5.5: the photos go in "reference_images", size is one of its 32
+        # presets, and it has no thinking / prompt optimization settings. JPEG keeps
+        # results small and opaque, like the other modes.
+        del body["images"]
+        body.update(reference_images=images, size=_v55_size(size), output_format="jpeg", background="opaque")
+    elif "pro" in model.lower():
         # Seedream 5.0 Pro (Atlas's API reference): size must be one of its presets
         # (there is no "resolution" field; anything else falls back to a square
         # 2048*2048). Pick the 2K preset closest to picture 1's shape. Prompt
@@ -343,7 +370,7 @@ def _cloud(names, prompt, size, model):
                     prompt_optimization_mode=SEEDREAM_OPTIMIZE)
     else:
         body["size"] = size
-    sent = {k: v for k, v in body.items() if k != "images"}
+    sent = {k: v for k, v in body.items() if k not in ("images", "reference_images")}
     sent["images"] = [f"{n} ({len(i) * 3 // 4 // 1024} KB)" for n, i in zip(names, images)]
     data = _atlas_job("/generateImage", key, body, sent, 300)
     ext = ".jpg" if data[:3] == b"\xff\xd8\xff" else ".webp" if data[8:12] == b"WEBP" else ".png"

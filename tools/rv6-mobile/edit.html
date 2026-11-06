@@ -404,33 +404,18 @@
 
 <div id="cloudBox" class="panel hidden" style="padding:10px 12px">
   <div class="hint" id="cloudHint"></div>
-  <label for="cloudSizeSel">Output size</label>
-  <select id="cloudSizeSel">
-    <option value="">Auto (match my photo's shape)</option>
-    <optgroup label="2K">
-      <option value="2048*2048">Square · 2048×2048</option>
-      <option value="1776*2368">Portrait 3:4 · 1776×2368</option>
-      <option value="2368*1776">Landscape 4:3 · 2368×1776</option>
-      <option value="1664*2496">Portrait 2:3 · 1664×2496</option>
-      <option value="2496*1664">Landscape 3:2 · 2496×1664</option>
-      <option value="1584*2816">Portrait 9:16 (phone) · 1584×2816</option>
-      <option value="2816*1584">Landscape 16:9 · 2816×1584</option>
-      <option value="3136*1344">Ultra-wide 21:9 · 3136×1344</option>
-    </optgroup>
-    <optgroup label="1.5K (cheaper)">
-      <option value="1536*1536">Square · 1536×1536</option>
-      <option value="1328*1776">Portrait 3:4 · 1328×1776</option>
-      <option value="1776*1328">Landscape 4:3 · 1776×1328</option>
-      <option value="1152*2048">Portrait 9:16 · 1152×2048</option>
-      <option value="2048*1152">Landscape 16:9 · 2048×1152</option>
-      <option value="1024*1024">Small square · 1024×1024</option>
-    </optgroup>
+  <label for="cloudModelSel">Model</label>
+  <select id="cloudModelSel">
+    <option value="bytedance/seedream-v5.5/edit">Seedream 5.5 Edit (newest)</option>
+    <option value="bytedance/seedream-v5.0-pro/edit">Seedream 5.0 Pro Edit</option>
   </select>
+  <label for="cloudSizeSel">Output size</label>
+  <select id="cloudSizeSel"></select>
   <div class="hint" id="cloudSizeHint"></div>
   <details style="margin-top:6px">
-    <summary class="hint">Cloud model</summary>
+    <summary class="hint">Other Atlas model</summary>
     <input id="cloudModel" style="width:100%;margin-top:6px" autocapitalize="off" autocorrect="off" spellcheck="false">
-    <div class="hint">Atlas Cloud model name. Leave empty for Seedream 5.0 Pro Edit.</div>
+    <div class="hint">Any other Atlas Cloud model name, e.g. bytedance/seedream-v4.7/edit. Leave empty to use the Model chosen above.</div>
   </details>
 </div>
 <div id="videoBox" class="panel hidden" style="padding:10px 12px">
@@ -528,7 +513,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-06a';
+const PAGE_BUILD = '2026-11-06b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -694,7 +679,7 @@ const usesQwen = () => mode === 'instruct' || mode === 'create' || qwenMask();
 const MODE_TEXT = {
   video: ['Turns the photo into a video. Say what happens and how the camera moves; the person and scene come from the photo. Long videos are made 5 seconds at a time and joined seamlessly.',
           'What should happen in the video?', 'e.g. she turns to the camera and smiles, slow push-in'],
-  cloud: ['Seedream 5.0 Pro on Atlas Cloud: describe the change like in ✨ Describe edit. 2K results, up to 10 photos, paid per image. Photos are sent to Atlas.',
+  cloud: ['Seedream on Atlas Cloud: describe the change like in ✨ Describe edit. Up to 10 photos, paid per image. Photos are sent to Atlas.',
           'What should change?', 'e.g. change the background to a beach at sunset'],
   create: ['Describe a new picture and Qwen-Image 2512 makes it from scratch, no photo needed. Use "Keep editing this result" afterwards to edit it like any photo.',
            'Describe the picture', 'e.g. photo of a woman on a beach at golden hour, natural light, 35mm'],
@@ -785,16 +770,23 @@ $('engFix').onclick = () => { engine = 'fix'; store('maskEngine', engine); setMo
 
 // Seedream on Atlas Cloud: the button only shows once the VM has a key
 let cloudCfg = { configured: false, model: '' };
-const cloudModel = () => $('cloudModel').value.trim() || cloudCfg.model;
+// Seedream 5.5 Edit (newest) or 5.0 Pro Edit; a name typed under "Other Atlas model" wins
+const cloudModel = () => $('cloudModel').value.trim() || $('cloudModelSel').value || cloudCfg.model;
+$('cloudModelSel').value = recall('cloudModelSel') || 'bytedance/seedream-v5.5/edit';
+if ($('cloudModelSel').selectedIndex < 0) $('cloudModelSel').value = 'bytedance/seedream-v5.5/edit';
+$('cloudModelSel').addEventListener('change', () => { store('cloudModelSel', $('cloudModelSel').value); cloudSizeOptions(); cloudModelHint(); });
+function cloudModelHint() {
+  $('cloudHint').textContent = 'Runs on Atlas Cloud (' + cloudModel().replace(/^bytedance\//, '') + '), not on your GPU. Each variation is a separate paid image.';
+}
 $('cloudModel').value = recall('cloudModel') || '';
-$('cloudModel').addEventListener('change', () => store('cloudModel', $('cloudModel').value.trim()));
+$('cloudModel').addEventListener('change', () => { store('cloudModel', $('cloudModel').value.trim()); cloudSizeOptions(); cloudModelHint(); });
 const cloudReady = fetch('/rv6m/cloud/status').then(r => r.ok ? r.json() : null).then(c => {
   if (!c) return;
   cloudCfg = c;
   $('modeCloud').classList.toggle('hidden', !c.configured);
   if (c.configured) $('modeVideo').classList.remove('hidden');
-  $('cloudModel').placeholder = c.model;
-  $('cloudHint').textContent = 'Runs on Atlas Cloud (' + c.model.replace(/^bytedance\//, '') + '), not on your GPU. Each variation is a separate paid image.';
+  $('cloudModel').placeholder = 'e.g. bytedance/seedream-v4.7/edit';
+  cloudModelHint();
 }).catch(() => {});
 
 function onModelChange() {
@@ -2621,25 +2613,59 @@ $('go').onclick = async () => {
   }
 };
 
-// Seedream wants about 4 megapixels or more; keep the photo's shape, sides in multiples of 16
-// Seedream 5.0 Pro only makes these sizes (Atlas API reference); Auto = the 2K one closest to the photo
+// Seedream only makes fixed sizes (Atlas API references); Auto = the 2K one closest
+// to the photo's shape. The 2K presets are the same for 5.0 Pro and 5.5.
 const PRO_2K = ['2048*2048', '2368*1776', '1776*2368', '2816*1584', '1584*2816', '2496*1664', '1664*2496', '3136*1344'];
+const SIZE_NAMES = ['Square', 'Landscape 4:3', 'Portrait 3:4', 'Landscape 16:9', 'Portrait 9:16 (phone)', 'Landscape 3:2', 'Portrait 2:3', 'Ultra-wide 21:9'];
+const SEEDREAM_SIZES = {
+  // 5.5: 32 sizes in four tiers, same shapes in the same order as PRO_2K
+  v55: [
+    ['3K / 4K (about 8 MP, priciest)', ['2880*2880', '3264*2448', '2448*3264', '3840*2160', '2160*3840', '3504*2336', '2336*3504', '4368*1872']],
+    ['2K', PRO_2K],
+    ['1.5K (cheaper)', ['1536*1536', '1792*1344', '1344*1792', '2048*1152', '1152*2048', '1872*1248', '1248*1872', '2352*1008']],
+    ['1K (cheapest)', ['1024*1024', '1152*864', '864*1152', '1424*800', '800*1424', '1248*832', '832*1248', '1568*672']],
+  ],
+  pro: [
+    ['2K', PRO_2K],
+    ['1.5K (cheaper)', ['1536*1536', '1776*1328', '1328*1776', '2048*1152', '1152*2048', '1024*1024']],
+  ],
+};
+const seedreamKind = () => /seedream-v5\.5/i.test(cloudModel()) ? 'v55' : /pro/i.test(cloudModel()) ? 'pro' : '';
+function cloudSizeOptions() {
+  const sel = $('cloudSizeSel'), want = recall('cloudSize') || sel.value || '', kind = seedreamKind();
+  sel.innerHTML = '';
+  sel.add(new Option(kind ? "Auto (match my photo's shape)" : 'Auto (about 4 MP in my photo\'s shape)', ''));
+  for (const [label, sizes] of SEEDREAM_SIZES[kind] || []) {
+    const g = document.createElement('optgroup'); g.label = label;
+    sizes.forEach(sz => {
+      const [w, h] = sz.split('*').map(Number), i = PRO_2K.findIndex(p => { const [a, b] = p.split('*').map(Number); return Math.abs(Math.log(a / b) - Math.log(w / h)) < 0.03; });
+      g.append(new Option(`${i >= 0 ? SIZE_NAMES[i] : w === h ? 'Square' : w > h ? 'Landscape' : 'Portrait'} · ${w}×${h}`, sz));
+    });
+    sel.append(g);
+  }
+  sel.value = want;
+  if (sel.selectedIndex < 0) sel.value = '';
+  cloudSizeHint();
+}
 function autoProSize(c = full) {
   const r = Math.log((c.width / c.height) || 1), ratio = p => { const [w, h] = p.split('*').map(Number); return Math.log(w / h); };
   return PRO_2K.reduce((a, b) => Math.abs(ratio(b) - r) < Math.abs(ratio(a) - r) ? b : a);
 }
 function cloudSizeHint() {
-  const v = $('cloudSizeSel').value, sz = v || (photoIn ? autoProSize() : '');
+  const v = $('cloudSizeSel').value, kind = seedreamKind(), sz = v || (photoIn && kind ? autoProSize() : '');
+  const mp = sz ? +sz.split('*')[0] * +sz.split('*')[1] / 1e6 : 0;
+  const tier = mp > 4.63 ? '3K' : mp > 2.61 ? '2K' : '1.5K';
+  // Atlas price lists (Nov 2026); 5.5 also charges for every photo sent, the first included
+  const price = kind === 'v55' ? { '3K': '$0.0525', '2K': '$0.027', '1.5K': '$0.0195' }[tier] + ' + $0.0075 per photo' : '';
   $('cloudSizeHint').textContent = (v ? '' : photoIn ? 'Auto: ' : 'Auto picks the size closest to your photo once you choose one. ') +
-    (sz ? sz.replace('*', '×') + (/^(1024|1152|1328|1536|1776\*1328|2048\*1152)/.test(sz) && +sz.split('*')[0] * +sz.split('*')[1] <= 2.61e6 ? ' (1.5K price tier)' : ' (2K price tier)') : '') +
+    (sz && kind ? sz.replace('*', '×') + ` (${tier} price tier${price ? ': ' + price : ''})` : '') +
     (v && photoIn && Math.abs(Math.log(+v.split('*')[0] / +v.split('*')[1]) - Math.log(full.width / full.height)) > 0.06
       ? '. A different shape from your photo: the edit may crop or extend it.' : '');
 }
-$('cloudSizeSel').value = recall('cloudSize') || '';
-if ($('cloudSizeSel').selectedIndex < 0) $('cloudSizeSel').value = '';
 $('cloudSizeSel').addEventListener('change', () => { store('cloudSize', $('cloudSizeSel').value); cloudSizeHint(); });
+cloudSizeOptions();
 function cloudSize(c = full) {
-  if (/pro/i.test(cloudModel())) return $('cloudSizeSel').value || autoProSize(c);
+  if (seedreamKind()) return $('cloudSizeSel').value || autoProSize(c);
   const r = c.width / c.height, area = 2048 * 2048;
   const clamp = v => Math.min(4096, Math.max(1024, Math.round(v / 16) * 16));
   return clamp(Math.sqrt(area * r)) + '*' + clamp(Math.sqrt(area / r));

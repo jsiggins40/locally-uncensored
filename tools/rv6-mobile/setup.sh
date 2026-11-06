@@ -5,7 +5,12 @@
 # the Qwen Edit Plus NSFW LoRA and Tailscale. Safe to re-run: finished steps
 # are skipped. Run it inside tmux so a dropped connection doesn't stop it:
 #   tmux new -s setup "bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/setup.sh); bash"
+# Just ✂️ Lift (+ ☁️ Seedream if you give an Atlas key), none of the big edit,
+# create or video models (about 150 GB less): add "lift" after setup.sh:
+#   tmux new -s setup "bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/setup.sh) lift; bash"
 set -euo pipefail
+LIFT_ONLY=""
+if [ "${1:-}" = lift ] || [ -n "${RV6M_LIFT_ONLY:-}" ]; then LIFT_ONLY=1; fi
 
 SRC="https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile"
 COMFY="$HOME/ComfyUI"
@@ -70,6 +75,10 @@ fi
 step "4/7 Edit page (restarts ComfyUI, tests tap-to-select)"
 RV6M_NO_PROMPT=1 bash <(curl -fsSL "$SRC/install.sh") || echo "(page installer reported a problem above; continuing)"
 
+if [ -n "$LIFT_ONLY" ]; then
+  step "5/7 Lift only: skipping the edit, create and video models"
+  echo "(run setup.sh again without 'lift' any time to add them)"
+else
 step "5/7 Qwen-Image-Edit, newest version + its Lightning LoRA (20-45 GB download)"
 free_gb=$(df --output=avail -BG "$(readlink -f "$COMFY/models")" | tail -1 | tr -dc 0-9)
 have_edit=$(ls models/diffusion_models/ 2>/dev/null | grep -i qwen_image_edit || true)
@@ -115,6 +124,7 @@ fi
 
 step "6d/7 🔓 Abliterated text encoder for Qwen (about 16 GB)"
 bash <(curl -fsSL "$SRC/add-abliterated-encoder.sh") || echo "(Abliterated encoder install failed; the standard one still works)"
+fi
 
 # Optional: Seedream 5.0 edits through Atlas Cloud (the key stays on the VM)
 if [ ! -s "$HOME/.atlascloud_key" ]; then
@@ -147,13 +157,20 @@ fi
 sudo tailscale serve --bg 8188 >/dev/null
 # `edit-restart`: gets the latest page and restarts ComfyUI in one command
 sudo curl -fsSL "$SRC/edit-restart.sh" -o /usr/local/bin/edit-restart && sudo chmod +x /usr/local/bin/edit-restart || true
+# Lift's models and runtime come with edit-restart (served from this VM)
+if [ -n "$LIFT_ONLY" ]; then step "Lift's models"; edit-restart || true; fi
 HOST=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
 
 echo
 echo "=============================================================="
 echo " ALL DONE. On your phone (Tailscale app connected) open:"
 echo "   https://$HOST/extensions/rv6_mobile/edit.html"
+if [ -n "$LIFT_ONLY" ]; then
+echo " Choose photo, then ✂️ Lift people into a new picture: tap people to"
+echo " lift them, arrange them, then Use as the photo for ☁️ Seedream."
+else
 echo " ✨ Describe edit: say what to change. Selected area: tap/paint a spot,"
 echo " say what to do with it, and only that spot changes."
+fi
 echo " Later: type  edit-restart  to get page updates or bring it back up."
 echo "=============================================================="

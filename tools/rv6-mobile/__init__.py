@@ -1,6 +1,7 @@
 # Serves web/edit.html at /extensions/rv6_mobile/edit.html, on the same
 # origin as the ComfyUI API, and adds POST /rv6m/segment: tap-to-select
-# masks from Segment Anything (SAM) for the edit page. Adds no nodes.
+# masks from Segment Anything (SAM) for the edit page ("pick": "largest" gives
+# the whole tapped person, for ✂️ Lift). Adds no nodes.
 import asyncio
 import io
 import logging
@@ -33,7 +34,7 @@ def _load():
     return _sam["model"], _sam["processor"], _sam["device"]
 
 
-def _segment(name, points, labels, grow):
+def _segment(name, points, labels, grow, pick="best"):
     import numpy as np
     import torch
     from PIL import Image
@@ -56,7 +57,16 @@ def _segment(name, points, labels, grow):
                         image_embeddings=emb, multimask_output=True)
             masks = processor.image_processor.post_process_masks(out.pred_masks.cpu(), orig.cpu(), reshaped.cpu())
             scores = out.iou_scores[0, 0]
-            m = masks[0][0, int(scores.argmax())].float()
+            if pick == "largest":
+                # ✂️ Lift: SAM's three answers are part / bigger part / whole thing;
+                # the largest is the whole person (and only that person), unless it
+                # spills over most of the photo
+                areas = [float(masks[0][0, i].float().mean()) for i in range(masks[0].shape[1])]
+                order = sorted(range(len(areas)), key=lambda i: -areas[i])
+                i = next((i for i in order if areas[i] <= 0.6), order[-1])
+                m = masks[0][0, i].float()
+            else:
+                m = masks[0][0, int(scores.argmax())].float()
             if grow > 0:
                 k = 2 * grow + 1
                 m = torch.nn.functional.max_pool2d(m[None, None], k, stride=1, padding=grow)[0, 0]
@@ -77,7 +87,7 @@ async def rv6m_segment(request):
         if not points or len(points) != len(labels):
             return web.json_response({"error": "need at least one point"}, status=400)
         png = await asyncio.get_running_loop().run_in_executor(
-            None, _segment, body["image"], points, labels, int(body.get("grow", 8)))
+            None, _segment, body["image"], points, labels, int(body.get("grow", 8)), str(body.get("pick", "best")))
         return web.Response(body=png, content_type="image/png")
     except Exception as e:
         logging.exception("[rv6_mobile] segment failed")

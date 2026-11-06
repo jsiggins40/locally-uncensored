@@ -539,6 +539,7 @@ async function openImage(img) {
   el.stage.hidden = false;
   el.tools.hidden = false;
 
+  if (sam.ok) samImage().catch(() => {});   // send it to the VM now: the first tap won't wait
   await prepare();
 }
 
@@ -665,10 +666,13 @@ function trimTo(region, support, px, py, fallback) {
   return at ? isolateAt(gated, w, h, at.x, at.y) : gated;
 }
 
+let lastWasPerson = false;
+
 // Lift whatever is under (px, py).
 function regionAtPx(px, py) {
   const { w, h } = src;
   const big = Math.max(w, h);
+  lastWasPerson = false;
   const raw = touchMask(px, py);
   if (raw[py * w + px] <= 0.5) return raw;
   let region = isolateAt(raw, w, h, px, py);
@@ -679,6 +683,7 @@ function regionAtPx(px, py) {
   // counts as a person tap if there is a person right next to the finger.
   const isPerson = overlapShare(wide.person, region) >= 0.4 || nearMax(wide.person, px, py, Math.round(big / 60)) > 0.5;
 
+  lastWasPerson = isPerson;
   if (isPerson) {
     // Tapped part of a person (face, shirt): tap again on the person's most
     // solid point and merge, so the whole person lifts.
@@ -733,10 +738,88 @@ function maskAnd(a, b) {
   return out;
 }
 
-function regionAt(nx, ny) {
-  const px = Math.min(src.w - 1, Math.max(0, Math.floor(nx * src.w)));
-  const py = Math.min(src.h - 1, Math.max(0, Math.floor(ny * src.h)));
-  return solidify(fillSmallHoles(regionAtPx(px, py), src.w, src.h));
+// A tap's lift: the outline from the browser models, then SAM on the VM keeps
+// only the tapped person when people touch or overlap.
+async function liftAt(px, py) {
+  const r = fillSmallHoles(regionAtPx(px, py), src.w, src.h);
+  return solidify(await separate(r, px, py, lastWasPerson));
+}
+
+// ── SAM on the VM: tells touching people apart ───────────────────────────
+// Magic Touch and DeepLab see "person here", not "which person": people who
+// touch or overlap come out as one. SAM (Segment Anything, already on the VM
+// for Selected area) outlines the one object under the finger; its largest
+// answer is the whole tapped person. The photo goes to the VM once per photo.
+const sam = { ok: true, forId: -1, name: null, pending: null };
+
+function samImage() {
+  if (sam.forId === src.id) return sam.name ? Promise.resolve(sam.name) : sam.pending;
+  const id = src.id;
+  sam.forId = id;
+  sam.name = null;
+  sam.pending = (async () => {
+    const fd = new FormData();
+    fd.append('image', await canvasToBlob(src.canvas, 'image/jpeg', 0.92), `rv6m_lift_${Date.now().toString(36)}.jpg`);
+    fd.append('overwrite', 'true');
+    const r = await fetch('/upload/image', { method: 'POST', body: fd });
+    if (!r.ok) throw Object.assign(new Error(`upload failed (${r.status})`), { permanent: r.status === 404 });
+    const j = await r.json();
+    const name = j.subfolder ? `${j.subfolder}/${j.name}` : j.name;
+    if (sam.forId === id) sam.name = name;
+    return name;
+  })();
+  sam.pending.catch(() => { if (sam.forId === id) sam.forId = -1; });
+  return sam.pending;
+}
+
+async function samMask(px, py) {
+  const name = await samImage();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 120000);   // the first use loads SAM on the VM
+  try {
+    const r = await fetch('/rv6m/segment', {
+      method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: name, points: [[px + 0.5, py + 0.5]], labels: [1], grow: 0, pick: 'largest' }),
+    });
+    if (!r.ok) throw Object.assign(new Error(`SAM failed (${r.status})`), { permanent: r.status === 404 });
+    const bmp = await createImageBitmap(await r.blob());
+    const c = makeCanvas(src.w, src.h);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0, src.w, src.h);
+    if (bmp.close) bmp.close();
+    const d = ctx.getImageData(0, 0, src.w, src.h).data;
+    const m = new Float32Array(src.w * src.h);
+    for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3] > 127 ? 1 : 0;
+    return m;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Keep the browser outline only where SAM agrees it's the tapped one (soft
+// edges stay), and fill in what SAM is sure of but the outline missed. If SAM
+// grabbed something much bigger than the tap (a table under a cup), only trim.
+async function separate(r, px, py, isPerson) {
+  if (!sam.ok) return r;
+  let S;
+  try {
+    S = await samMask(px, py);
+  } catch (err) {
+    if (err.permanent) sam.ok = false;      // this VM has no SAM: don't keep asking
+    console.warn('[lift] SAM unavailable, keeping the browser outline:', err.message);
+    return r;
+  }
+  const { w, h } = src;
+  const sArea = maskArea(S);
+  if (S[py * w + px] < 0.5 || sArea < MIN_PIXELS) return r;
+  const fill = isPerson || sArea <= 1.6 * maskArea(r);
+  const b = boxBlur(S, w, h, Math.max(2, Math.round(Math.max(w, h) / 300)));
+  const out = new Float32Array(r.length);
+  for (let i = 0; i < out.length; i++) {
+    const kept = Math.min(r[i], clamp01(b[i] * 3));
+    out[i] = fill ? Math.max(kept, clamp01((b[i] - 0.85) / 0.15)) : kept;
+  }
+  return out;
 }
 
 // Magic Touch is sometimes only half sure inside the subject (hands, dark
@@ -784,7 +867,9 @@ async function onTap(e) {
   setBusy('Lifting…');
   await nextFrame();
   try {
-    const region = regionAt(nx, ny);
+    const px = Math.min(src.w - 1, Math.max(0, Math.floor(nx * src.w)));
+    const py = Math.min(src.h - 1, Math.max(0, Math.floor(ny * src.h)));
+    const region = await liftAt(px, py);
     if (maskArea(region) < MIN_PIXELS) {
       setStatus('Nothing to lift there. Try tapping closer to the middle of the subject.');
       return;
@@ -824,7 +909,7 @@ async function selectAllPeople() {
     let count = 0;
     for (const s of seeds) {
       if (all[s.y * w + s.x] > 0.5) continue;      // already covered by an earlier lift
-      let r = solidify(fillSmallHoles(regionAtPx(s.x, s.y), w, h));
+      let r = await liftAt(s.x, s.y);
       if (maskArea(r) < MIN_PIXELS) r = s.soft;
       for (let i = 0; i < all.length; i++) if (r[i] > all[i]) all[i] = r[i];
       count++;

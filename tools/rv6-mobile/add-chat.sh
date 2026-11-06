@@ -306,6 +306,11 @@ else
   env+=(ENABLE_OPENAI_API=False)
 fi
 if systemctl is-active --quiet ollama 2>/dev/null; then env+=(ENABLE_OLLAMA_API=True OLLAMA_BASE_URL=http://127.0.0.1:11434); else env+=(ENABLE_OLLAMA_API=False); fi
+# Web search (add-search.sh): SearXNG on this VM for the chat's "Web Search"
+if [ -x "$HOME/.local/bin/search-start" ]; then
+  "$HOME/.local/bin/search-start" || true
+  env+=(ENABLE_WEB_SEARCH=True WEB_SEARCH_ENGINE=searxng SEARXNG_QUERY_URL=http://127.0.0.1:8888/search WEB_SEARCH_RESULT_COUNT=5)
+fi
 tmux kill-session -t chat 2>/dev/null || true
 tmux new -d -s chat "env ${env[*]} open-webui serve --host 127.0.0.1 --port 8080"
 SH

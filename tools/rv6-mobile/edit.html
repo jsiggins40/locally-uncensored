@@ -406,8 +406,8 @@
   <div class="hint" id="cloudHint"></div>
   <label for="cloudModelSel">Model</label>
   <select id="cloudModelSel">
-    <option value="bytedance/seedream-v5.5/edit">Seedream 5.5 Edit (newest)</option>
     <option value="bytedance/seedream-v5.0-pro/edit">Seedream 5.0 Pro Edit</option>
+    <option value="bytedance/seedream-v5.5/edit">Seedream 5.5 Edit (newest)</option>
   </select>
   <label for="cloudSizeSel">Output size</label>
   <select id="cloudSizeSel"></select>
@@ -513,7 +513,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-06b';
+const PAGE_BUILD = '2026-11-06c';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -770,10 +770,10 @@ $('engFix').onclick = () => { engine = 'fix'; store('maskEngine', engine); setMo
 
 // Seedream on Atlas Cloud: the button only shows once the VM has a key
 let cloudCfg = { configured: false, model: '' };
-// Seedream 5.5 Edit (newest) or 5.0 Pro Edit; a name typed under "Other Atlas model" wins
+// Seedream 5.0 Pro Edit (default) or 5.5 Edit; a name typed under "Other Atlas model" wins
 const cloudModel = () => $('cloudModel').value.trim() || $('cloudModelSel').value || cloudCfg.model;
-$('cloudModelSel').value = recall('cloudModelSel') || 'bytedance/seedream-v5.5/edit';
-if ($('cloudModelSel').selectedIndex < 0) $('cloudModelSel').value = 'bytedance/seedream-v5.5/edit';
+$('cloudModelSel').value = recall('cloudModelSel') || 'bytedance/seedream-v5.0-pro/edit';
+if ($('cloudModelSel').selectedIndex < 0) $('cloudModelSel').value = 'bytedance/seedream-v5.0-pro/edit';
 $('cloudModelSel').addEventListener('change', () => { store('cloudModelSel', $('cloudModelSel').value); cloudSizeOptions(); cloudModelHint(); });
 function cloudModelHint() {
   $('cloudHint').textContent = 'Runs on Atlas Cloud (' + cloudModel().replace(/^bytedance\//, '') + '), not on your GPU. Each variation is a separate paid image.';

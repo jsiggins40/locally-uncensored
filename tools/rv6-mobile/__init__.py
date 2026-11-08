@@ -340,7 +340,7 @@ SEEDREAM_THINKING = os.environ.get("RV6M_SEEDREAM_THINKING", "disabled")      # 
 SEEDREAM_OPTIMIZE = os.environ.get("RV6M_SEEDREAM_OPTIMIZE", "fast")          # standard | fast
 
 
-def _cloud(names, prompt, size, model):
+def _cloud(names, prompt, size, model, transparent=False):
     import base64
     import time
     import urllib.request
@@ -370,6 +370,10 @@ def _cloud(names, prompt, size, model):
                     prompt_optimization_mode=SEEDREAM_OPTIMIZE)
     else:
         body["size"] = size
+    if transparent and "seedream-v5" in model.lower():
+        # ✂️ Lift's ↻ Turn: picture 1 is a cut-out PNG; ask for one back (5.0 Pro
+        # does this for exactly one PNG with transparency, 5.5 for 1-10 photos)
+        body.update(output_format="png", background="transparent")
     sent = {k: v for k, v in body.items() if k not in ("images", "reference_images")}
     sent["images"] = [f"{n} ({len(i) * 3 // 4 // 1024} KB)" for n, i in zip(names, images)]
     data = _atlas_job("/generateImage", key, body, sent, 300)
@@ -609,7 +613,7 @@ async def rv6m_cloud(request):
     jid = uuid.uuid4().hex
     _jobs[jid] = {"status": "running"}
     asyncio.ensure_future(_run_cloud(jid, _cloud, names, body["prompt"], str(body.get("size") or "2048*2048"),
-                                     body.get("model") or CLOUD_MODEL))
+                                     body.get("model") or CLOUD_MODEL, bool(body.get("transparent"))))
     return web.json_response({"job": jid})
 
 

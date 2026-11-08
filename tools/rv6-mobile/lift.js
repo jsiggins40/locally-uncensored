@@ -195,6 +195,18 @@ const MARKUP = `
       </div>
       <div class="lf-sl" id="lf-brush-row" hidden><span>Brush size</span><input type="range" id="lf-brush" min="6" max="120" step="1" value="36"></div>
       <div class="hint" id="lf-depth-hint" hidden style="margin-top:4px"></div>
+      <div id="lf-turn-box" hidden>
+        <div class="lf-h" style="margin:12px 0 0;font-size:14px">↻ Turn: Seedream redraws them from another angle</div>
+        <div class="lf-row" style="margin-top:6px">
+          <button type="button" data-turn="q-left">↖ ¾ left</button>
+          <button type="button" data-turn="side-left">← Side</button>
+          <button type="button" data-turn="front">● Front</button>
+          <button type="button" data-turn="side-right">Side →</button>
+          <button type="button" data-turn="q-right">¾ right ↗</button>
+          <button type="button" data-turn="back">↺ Back</button>
+        </div>
+        <div class="hint" id="lf-turn-hint" style="margin-top:4px">One paid Seedream image (about $0.04). The original stays in the row under the photo.</div>
+      </div>
     </div>
     <div class="hint" style="margin-top:8px">Tap a person in the new picture to move, resize, flip or delete them.</div>
     <div class="lf-row"><button type="button" id="lf-items-open">🛋️ Add furniture &amp; decor</button></div>
@@ -248,6 +260,7 @@ const el = {
   main: $('main'), close: $('close'), useMain: $('use-main'), useMore: $('use-more'),
   download: $('download'), useHint: $('use-hint'),
   brushRow: $('brush-row'), brush: $('brush'), depthHint: $('depth-hint'),
+  turnBox: $('turn-box'), turnHint: $('turn-hint'),
   itemsOpen: $('items-open'), items: $('items'), itemsClose: $('items-close'), itemsCats: $('items-cats'),
   itemsSearch: $('items-search'), itemsStatus: $('items-status'), itemsGrid: $('items-grid'),
 };
@@ -1406,6 +1419,7 @@ function renderCompose() {
 function selectLayer(L) {
   comp.selected = L;
   if (!L) setDepthMode('');
+  el.turnBox.hidden = !(L && opts.turn);
   el.layerProps.classList.toggle('on', !!L);
   if (L) {
     el.lScale.value = L.scale;
@@ -1870,6 +1884,85 @@ el.itemsClose.addEventListener('click', () => { el.items.hidden = true; });
 el.items.addEventListener('click', (e) => { if (e.target === el.items) el.items.hidden = true; });
 let itemSearchTimer = 0;
 el.itemsSearch.addEventListener('input', () => { clearTimeout(itemSearchTimer); itemSearchTimer = setTimeout(showItems, 150); });
+
+// ── ↻ Turn (Seedream, through the edit page) ────────────────────────────
+// Directions are as you see the picture. A flipped layer is sent unflipped,
+// so its left and right swap.
+const TURN_TEXT = {
+  'q-left': 'turned about 45 degrees so they face towards the left side of the picture (a three-quarter view)',
+  'side-left': 'turned 90 degrees so they face the left side of the picture, seen in profile',
+  'q-right': 'turned about 45 degrees so they face towards the right side of the picture (a three-quarter view)',
+  'side-right': 'turned 90 degrees so they face the right side of the picture, seen in profile',
+  front: 'turned to face the camera straight on',
+  back: 'turned around, seen from behind with their back to the camera',
+};
+const MIRROR = { 'q-left': 'q-right', 'q-right': 'q-left', 'side-left': 'side-right', 'side-right': 'side-left' };
+let turning = false;
+
+async function turnLayer(L, dir) {
+  if (!opts.turn || turning) return;
+  turning = true;
+  const buttons = el.turnBox.querySelectorAll('button');
+  buttons.forEach((b) => { b.disabled = true; });
+  el.turnHint.textContent = '↻ Seedream is redrawing… (usually 20-60 s; keep this page open)';
+  try {
+    const way = TURN_TEXT[L.flip ? (MIRROR[dir] || dir) : dir];
+    const who = L.cut.item ? `this exact same ${L.cut.item.name.toLowerCase()}` : 'this exact same person';
+    const prompt = `Show ${who} ${way}. Keep ${L.cut.item ? 'its shape, materials, colours and details' :
+      'their identity, face, hair, skin, body shape, clothes and accessories'} exactly the same, with the same lighting and photo quality. ` +
+      `Keep the same pose and the same framing as the input (do not add or crop ${L.cut.item ? 'parts' : 'body parts'}). ` +
+      `Only the ${L.cut.item ? 'object' : 'person'}, on a fully transparent background.`;
+    const png = await canvasToBlob(L.cut.canvas, 'image/png');
+    const k = Math.sqrt((2048 * 2048) / (L.cut.w * L.cut.h));
+    const blob = await opts.turn(png, prompt, Math.round(L.cut.w * k), Math.round(L.cut.h * k));
+    const bmp = await createImageBitmap(blob);
+    const c = makeCanvas(bmp.width, bmp.height);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0);
+    if (bmp.close) bmp.close();
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    let clear = 0, x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+    for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+      const a = d[(y * c.width + x) * 4 + 3];
+      if (a < 16) { clear++; continue; }
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    if (clear < c.width * c.height * 0.05 || x1 < 0) {
+      // Came back without transparency: open it to lift the turned version
+      srcFromMain = false;
+      await openImage(c);
+      setStatus('Seedream sent it back without a see-through background: tap the person to lift the turned version.');
+      toast('↻ Tap the turned person to lift them');
+      sheet.scrollTop = 0;
+      return;
+    }
+    const cw = x1 - x0 + 1, ch = y1 - y0 + 1;
+    const t = makeCanvas(cw, ch);
+    t.getContext('2d').drawImage(c, x0, y0, cw, ch, 0, 0, cw, ch);
+    const cut = { canvas: t, x0: 0, y0: 0, w: cw, h: ch, srcW: cw, srcH: ch, item: L.cut.item };
+    // Same height, standing on the same spot
+    const shownH = L.cut.h * L.scale, bottom = L.y + shownH / 2;
+    L.cut = cut;
+    L.scale = shownH / ch;
+    L.y = bottom - shownH / 2;
+    L.flip = false;
+    L.front = L.back = null; L.parts = null; L.maskV = (L.maskV || 0) + 1;   // the old depth marks don't fit the new pixels
+    if (!cut.item) await addToTray(cut);
+    selectLayer(L);
+    toast('↻ Turned');
+  } catch (err) {
+    console.error(err);
+    toast(`↻ Turn failed: ${err.message}`);
+  } finally {
+    turning = false;
+    buttons.forEach((b) => { b.disabled = false; });
+    el.turnHint.textContent = 'One paid Seedream image (about $0.04). The original stays in the row under the photo.';
+    renderCompose();
+  }
+}
+el.turnBox.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+  if (comp.selected) turnLayer(comp.selected, b.dataset.turn);
+}));
 
 // ── Drag and drop onto the new picture (laptop) ──────────────────────────
 // Drag the glowing person straight off the photo, or a cut-out from the row

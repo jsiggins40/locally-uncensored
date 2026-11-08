@@ -513,7 +513,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-08a';
+const PAGE_BUILD = '2026-11-08b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -1919,11 +1919,26 @@ $('liftBtn').onclick = async () => {
   await cloudReady;
   lift.openLift({
     photo: photoIn ? full : null, photoKey: photoRev, readable, onUse: liftUse,
+    turn: cloudCfg.configured ? liftTurn : null,
     useHint: cloudCfg.configured
       ? '"Use as the photo" switches to ☁️ Seedream: then say what to change, e.g. "put them on a beach at sunset, natural light".'
       : '"Use as the photo" makes it the photo for the edit modes.',
   });
 };
+// ↻ Turn in ✂️ Lift: Seedream redraws one lifted person (or item) from another
+// angle on a transparent background; Lift swaps it in
+async function liftTurn(png, prompt, w, h) {
+  if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected.');
+  const name = await upload(png, `rv6m_${Date.now()}_turn.png`);
+  const r = await fetch('/rv6m/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ images: [name], prompt, size: `${w}*${h}`, model: cloudModel(), transparent: true }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'The VM refused the Seedream request (' + r.status + ')');
+  const filename = await waitCloudJob(j.job, '↻ Turning');
+  const out = await fetch(pngUrl({ filename, type: 'output' }), { cache: 'no-store' });
+  if (!out.ok) throw new Error('Couldn\'t fetch the result (' + out.status + ')');
+  return out.blob();
+}
 async function liftUse(blob, as) {
   if (as === 'more') {
     if (cloudCfg.configured && mode !== 'cloud') setMode('cloud');

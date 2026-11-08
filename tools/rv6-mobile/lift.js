@@ -91,6 +91,15 @@ const STYLE = `
 #lf-layer-props.on { display:block; }
 #lf-sheet .lf-checks { display:flex; gap:16px; margin-top:8px; color:var(--text,#eee); font-size:15px; }
 #lf-sheet .lf-checks input { width:20px; height:20px; vertical-align:-4px; margin-right:6px; }
+#lf-items { position:fixed; inset:0; z-index:1002; background:rgba(0,0,0,.6); display:flex; align-items:flex-end; justify-content:center; }
+#lf-items[hidden] { display:none !important; }
+#lf-sheet .lf-items-box { background:var(--panel,#1c1c1e); width:100%; max-width:900px; max-height:88vh; overflow:auto; border-radius:14px 14px 0 0; padding:12px 14px 20px; }
+#lf-sheet .lf-chips { display:flex; gap:6px; overflow-x:auto; padding-bottom:6px; }
+#lf-sheet .lf-chips button { flex:0 0 auto; padding:8px 12px; border-radius:18px; font-size:14px; }
+#lf-items-search { width:100%; font:inherit; color:var(--text,#eee); background:#2a2a2c; border:1px solid #3a3a3c; border-radius:10px; padding:10px; margin-top:6px; }
+#lf-items-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:8px; }
+#lf-items-grid button { padding:4px; border-radius:10px; background:#2a2a2c; display:flex; flex-direction:column; align-items:center; gap:4px; font-size:11px; color:var(--muted,#999); }
+#lf-items-grid img { width:100%; aspect-ratio:1; object-fit:contain; display:block; }
 #lf-toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#333; color:#fff; border-radius:10px; padding:10px 14px; font-size:14px;
   opacity:0; pointer-events:none; transition:opacity .25s; z-index:1001; max-width:90vw; text-align:center; }
 #lf-toast.on { opacity:1; }
@@ -177,8 +186,18 @@ const MARKUP = `
         <button type="button" id="lf-l-dup">Copy</button>
         <button type="button" id="lf-l-del">🗑️</button>
       </div>
+      <div class="lf-h" style="margin:12px 0 0;font-size:14px">Depth: paint which parts are in front</div>
+      <div class="lf-seg" data-group="depth" style="margin-top:6px">
+        <button type="button" data-depth="" class="on">✋ Move</button>
+        <button type="button" data-depth="front">⬆️ In front</button>
+        <button type="button" data-depth="back">⬇️ Behind</button>
+        <button type="button" data-depth="clear">🧽 Normal</button>
+      </div>
+      <div class="lf-sl" id="lf-brush-row" hidden><span>Brush size</span><input type="range" id="lf-brush" min="6" max="120" step="1" value="36"></div>
+      <div class="hint" id="lf-depth-hint" hidden style="margin-top:4px"></div>
     </div>
     <div class="hint" style="margin-top:8px">Tap a person in the new picture to move, resize, flip or delete them.</div>
+    <div class="lf-row"><button type="button" id="lf-items-open">🛋️ Add furniture &amp; decor</button></div>
     <div class="lf-row" style="margin-top:12px">
       <button type="button" class="primary" id="lf-use-main" disabled style="margin:0">☁️ Use as the photo</button>
     </div>
@@ -189,6 +208,16 @@ const MARKUP = `
     <div class="hint" id="lf-use-hint" style="margin-top:6px"></div>
   </div>
 </div>
+</div>
+<div id="lf-items" hidden>
+  <div class="lf-items-box">
+    <div class="lf-top" style="margin:0 0 8px"><h2 style="font-size:17px">🛋️ Furniture &amp; decor</h2><button type="button" id="lf-items-close">✕ Close</button></div>
+    <div class="lf-chips" id="lf-items-cats"></div>
+    <input id="lf-items-search" type="search" placeholder="Search, e.g. sofa, lamp, round table" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div id="lf-items-status" class="hint" style="margin:6px 0"></div>
+    <div id="lf-items-grid"></div>
+    <div class="hint" style="margin-top:8px">Free 3D-scanned models from Poly Haven (CC0: free for any use). Tap one to add it; it goes behind your people, sized to them.</div>
+  </div>
 </div>
 <div id="lf-toast" role="status" aria-live="polite"></div>
 `;
@@ -218,6 +247,9 @@ const el = {
   lDup: $('l-dup'), lDel: $('l-del'), toast: $('toast'),
   main: $('main'), close: $('close'), useMain: $('use-main'), useMore: $('use-more'),
   download: $('download'), useHint: $('use-hint'),
+  brushRow: $('brush-row'), brush: $('brush'), depthHint: $('depth-hint'),
+  itemsOpen: $('items-open'), items: $('items'), itemsClose: $('items-close'), itemsCats: $('items-cats'),
+  itemsSearch: $('items-search'), itemsStatus: $('items-status'), itemsGrid: $('items-grid'),
 };
 
 // ── Small utilities ──────────────────────────────────────────────────────
@@ -1213,25 +1245,89 @@ function drawBackground(ctx, forJpeg) {
   }
 }
 
-function drawLayer(ctx, L) {
+// ── Depth: parts of a layer painted "in front" are drawn over every layer,
+// parts painted "behind" under every layer; the rest keeps the layer order.
+// Masks live in the layer's own pixels, so a rough stroke keeps exact edges.
+function layerPart(L, part) {
+  if (!L.front && !L.back) return part === 'base' ? L.cut.canvas : null;
+  if (!L.parts || L.parts.v !== L.maskV) {
+    const { cut } = L;
+    // Brush edges are soft; a soft split would leave a faint seam where the
+    // two parts meet. Hard-edged masks split the person's own pixels cleanly
+    // (the person keeps their own soft outline).
+    const hard = (m) => {
+      if (!m) return null;
+      const c = makeCanvas(m.width, m.height);
+      const x = c.getContext('2d');
+      x.drawImage(m, 0, 0);
+      const id = x.getImageData(0, 0, c.width, c.height);
+      for (let i = 3; i < id.data.length; i += 4) id.data[i] = id.data[i] > 127 ? 255 : 0;
+      x.putImageData(id, 0, 0);
+      return c;
+    };
+    const fm = hard(L.front), bm = hard(L.back);
+    const piece = (keep, drop) => {
+      const c = makeCanvas(cut.w, cut.h);
+      const x = c.getContext('2d');
+      x.drawImage(cut.canvas, 0, 0);
+      x.globalCompositeOperation = keep ? 'destination-in' : 'destination-out';
+      if (keep) x.drawImage(keep, 0, 0);
+      else for (const m of drop) if (m) x.drawImage(m, 0, 0);
+      return c;
+    };
+    const tint = (part, color) => {
+      if (!part) return null;
+      const c = makeCanvas(cut.w, cut.h);
+      const x = c.getContext('2d');
+      x.drawImage(part, 0, 0);
+      x.globalCompositeOperation = 'source-in';
+      x.fillStyle = color;
+      x.fillRect(0, 0, cut.w, cut.h);
+      return c;
+    };
+    const front = fm ? piece(fm) : null;
+    const back = bm ? piece(bm) : null;
+    L.parts = { v: L.maskV, base: piece(null, [fm, bm]), front, back,
+                frontTint: tint(front, 'rgba(52,211,153,0.55)'), backTint: tint(back, 'rgba(96,165,250,0.6)') };
+  }
+  return L.parts[part];
+}
+
+function drawLayer(ctx, L, part = 'base') {
   const { cut } = L;
+  const img = layerPart(L, part);
+  if (!img) return;
   ctx.save();
   ctx.translate(L.x, L.y);
   ctx.rotate(L.rot);
   ctx.scale(L.flip ? -L.scale : L.scale, L.scale);
-  if (L.shadow) {
+  if (L.shadow && part === 'base') {
     const size = Math.max(cut.w, cut.h) * L.scale;
     ctx.shadowColor = 'rgba(0,0,0,0.45)';
     ctx.shadowBlur = size * 0.05;
     ctx.shadowOffsetY = size * 0.025;
   }
-  if (L.sticker) {
+  if (L.sticker && part === 'base') {
     const s = stickerFor(cut);
     ctx.drawImage(s.canvas, -cut.w / 2 - s.r, -cut.h / 2 - s.r);
     ctx.shadowColor = 'transparent';
   }
-  ctx.drawImage(cut.canvas, -cut.w / 2, -cut.h / 2);
+  ctx.drawImage(img, -cut.w / 2, -cut.h / 2);
   ctx.restore();
+}
+
+// While painting depth, show the painted parts of the selected layer tinted
+function drawDepthTint(ctx, L) {
+  for (const k of ['backTint', 'frontTint']) {
+    const t = layerPart(L, k);
+    if (!t) continue;
+    ctx.save();
+    ctx.translate(L.x, L.y);
+    ctx.rotate(L.rot);
+    ctx.scale(L.flip ? -L.scale : L.scale, L.scale);
+    ctx.drawImage(t, -L.cut.w / 2, -L.cut.h / 2);
+    ctx.restore();
+  }
 }
 
 // Canvas pixels per CSS pixel, so handles stay finger-sized at any zoom.
@@ -1288,7 +1384,8 @@ function drawSelectionUI(ctx, L) {
 function render(ctx, { ui = false, forJpeg = false } = {}) {
   ctx.clearRect(0, 0, comp.W, comp.H);
   drawBackground(ctx, forJpeg);
-  for (const L of comp.layers) drawLayer(ctx, L);
+  for (const part of ['back', 'base', 'front']) for (const L of comp.layers) drawLayer(ctx, L, part);
+  if (ui && comp.selected && depthMode) drawDepthTint(ctx, comp.selected);
   if (ui && comp.selected) drawSelectionUI(ctx, comp.selected);
 }
 
@@ -1308,6 +1405,7 @@ function renderCompose() {
 
 function selectLayer(L) {
   comp.selected = L;
+  if (!L) setDepthMode('');
   el.layerProps.classList.toggle('on', !!L);
   if (L) {
     el.lScale.value = L.scale;
@@ -1372,6 +1470,11 @@ el.compose.addEventListener('pointerdown', (e) => {
   if (pointers.size >= 2) { beginGesture(); return; }
 
   const L = comp.selected;
+  if (L && depthMode) {
+    gesture = { type: 'paint', L, last: p };
+    paintDepth(L, p, p);
+    return;
+  }
   if (L) {
     const hp = handlePos(L);
     if (Math.hypot(p.x - hp.x, p.y - hp.y) <= 18 * pxRatio()) {
@@ -1408,6 +1511,12 @@ el.compose.addEventListener('pointermove', (e) => {
   pointers.set(e.pointerId, p);
   if (!gesture) return;
   const { L } = gesture;
+  if (gesture.type === 'paint') {
+    paintDepth(L, gesture.last, p);
+    gesture.last = p;
+    renderCompose();
+    return;
+  }
   if (gesture.type === 'move') {
     if (gesture.tapOff && Math.hypot(p.x - gesture.start.x, p.y - gesture.start.y) > 8 * pxRatio()) gesture.tapOff = false;
     L.x = p.x - gesture.dx;
@@ -1497,7 +1606,9 @@ el.lDel.addEventListener('click', () => { if (comp.selected) deleteLayer(comp.se
 el.lDup.addEventListener('click', () => {
   const L = comp.selected;
   if (!L) return;
-  const C = { ...L, id: ++layerId, x: L.x + comp.W * 0.05, y: L.y + comp.H * 0.03 };
+  const copy = (m) => { if (!m) return null; const c = makeCanvas(m.width, m.height); c.getContext('2d').drawImage(m, 0, 0); return c; };
+  const C = { ...L, id: ++layerId, x: L.x + comp.W * 0.05, y: L.y + comp.H * 0.03,
+              front: copy(L.front), back: copy(L.back), parts: null, maskV: 0 };
   comp.layers.push(C);
   selectLayer(C);
 });
@@ -1577,6 +1688,188 @@ function exportCanvas(opaque) {
   return c;
 }
 
+
+// ── Depth brush ──────────────────────────────────────────────────────────
+let depthMode = '';            // '' (move) | 'front' | 'back' | 'clear'
+const DEPTH_HINTS = {
+  front: 'Paint roughly over the part that should be in front (e.g. a leg). Only this person\'s own pixels change. Green = in front.',
+  back: 'Paint roughly over the part that should go behind everyone else (e.g. an arm). Blue = behind.',
+  clear: 'Paint over a green or blue part to put it back to normal.',
+};
+const depthButtons = sheet.querySelectorAll('.lf-seg[data-group=depth] button');
+function setDepthMode(m) {
+  depthMode = m;
+  depthButtons.forEach((b) => b.classList.toggle('on', b.dataset.depth === m));
+  el.brushRow.hidden = !m;
+  el.depthHint.hidden = !m;
+  el.depthHint.textContent = DEPTH_HINTS[m] || '';
+  el.compose.style.cursor = m ? 'crosshair' : 'default';
+  renderCompose();
+}
+depthButtons.forEach((b) => b.addEventListener('click', () => setDepthMode(b.dataset.depth)));
+
+// Canvas point -> the layer's own pixel coordinates
+function toLayer(L, p) {
+  const dx = p.x - L.x, dy = p.y - L.y;
+  const c = Math.cos(-L.rot), s = Math.sin(-L.rot);
+  let lx = (dx * c - dy * s) / L.scale;
+  const ly = (dx * s + dy * c) / L.scale;
+  if (L.flip) lx = -lx;
+  return { x: lx + L.cut.w / 2, y: ly + L.cut.h / 2 };
+}
+
+function paintDepth(L, a, b) {
+  const { w, h } = L.cut;
+  if (depthMode !== 'clear') {
+    if (depthMode === 'front' && !L.front) L.front = makeCanvas(w, h);
+    if (depthMode === 'back' && !L.back) L.back = makeCanvas(w, h);
+  }
+  const r = (+el.brush.value * pxRatio()) / L.scale;   // brush is in screen pixels
+  const A = toLayer(L, a), B = toLayer(L, b);
+  const stroke = (m, erase) => {
+    if (!m) return;
+    const x = m.getContext('2d');
+    x.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+    x.strokeStyle = x.fillStyle = '#fff';
+    x.lineCap = x.lineJoin = 'round';
+    x.lineWidth = r * 2;
+    x.beginPath(); x.moveTo(A.x, A.y); x.lineTo(B.x, B.y); x.stroke();
+    x.beginPath(); x.arc(B.x, B.y, r, 0, Math.PI * 2); x.fill();
+  };
+  // A pixel is in front, behind or normal, never two at once
+  stroke(L.front, depthMode !== 'front');
+  stroke(L.back, depthMode !== 'back');
+  L.maskV = (L.maskV || 0) + 1;
+}
+
+// ── Furniture & decor (Poly Haven, CC0) ─────────────────────────────────
+// Free 3D-scanned models; their previews are photo-real renders on a
+// transparent background, served with CORS, so they load straight into the
+// picture. Each model lists its real size, used to size it next to people.
+const PH_API = 'https://api.polyhaven.com/assets?t=models&categories=';
+const ITEM_CATS = [
+  ['Sofas & chairs', 'seating'], ['Tables', 'table'], ['Beds', 'bed'], ['Storage', 'shelves'],
+  ['Lamps', 'lighting'], ['Plants', 'plants'], ['Decor', 'decorative'],
+];
+const itemCache = {};           // category -> [{ id, name, tags, thumb, full, heightMm }]
+let itemCat = ITEM_CATS[0][1];
+
+async function loadItems(cat) {
+  if (itemCache[cat]) return itemCache[cat];
+  const r = await fetch(PH_API + encodeURIComponent(cat));
+  if (!r.ok) throw new Error(`Poly Haven answered ${r.status}`);
+  const d = await r.json();
+  itemCache[cat] = Object.entries(d)
+    .map(([id, v]) => {
+      const ver = (String(v.thumbnail_url || '').match(/[?&]v=([^&]+)/) || [])[1] || '';
+      return {
+        id, name: v.name || id, tags: (v.tags || []).join(' ').toLowerCase(),
+        thumb: `https://cdn.polyhaven.com/asset_img/thumbs/${id}.png?width=256&height=256&format=webp${ver ? '&v=' + ver : ''}`,
+        full: `https://cdn.polyhaven.com/asset_img/thumbs/${id}.png?width=1024&height=1024${ver ? '&v=' + ver : ''}`,
+        heightMm: Array.isArray(v.dimensions) && v.dimensions[2] > 0 ? v.dimensions[2] : 0,
+        downloads: v.download_count || 0,
+      };
+    })
+    .sort((a, b) => b.downloads - a.downloads);
+  return itemCache[cat];
+}
+
+function renderItemCats() {
+  el.itemsCats.innerHTML = '';
+  for (const [label, cat] of ITEM_CATS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.classList.toggle('on', cat === itemCat);
+    b.addEventListener('click', () => { itemCat = cat; el.itemsSearch.value = ''; renderItemCats(); showItems(); });
+    el.itemsCats.appendChild(b);
+  }
+}
+
+async function showItems() {
+  const cat = itemCat;
+  el.itemsGrid.innerHTML = '';
+  el.itemsStatus.textContent = 'Loading…';
+  let list;
+  try {
+    list = await loadItems(cat);
+  } catch (err) {
+    el.itemsStatus.textContent = `Couldn't reach Poly Haven (${err.message}). Check the internet connection and try again.`;
+    return;
+  }
+  if (cat !== itemCat) return;
+  const q = el.itemsSearch.value.trim().toLowerCase();
+  const shown = q ? list.filter((it) => it.name.toLowerCase().includes(q) || it.tags.includes(q)) : list;
+  el.itemsStatus.textContent = shown.length ? `${shown.length} item${shown.length > 1 ? 's' : ''}` : 'Nothing matches that here: try another tab.';
+  for (const it of shown) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.title = it.name;
+    b.innerHTML = `<img alt="" loading="lazy" src="${it.thumb}"><span></span>`;
+    b.querySelector('span').textContent = it.name;
+    b.addEventListener('click', () => addItem(it));
+    el.itemsGrid.appendChild(b);
+  }
+}
+
+async function addItem(it) {
+  el.itemsStatus.textContent = `Adding ${it.name}…`;
+  try {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';           // keeps the picture exportable
+    img.src = it.full;
+    await img.decode();
+    const c = makeCanvas(img.naturalWidth, img.naturalHeight);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    // Trim the transparent margin so the box hugs the item
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+    for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+      if (d[(y * c.width + x) * 4 + 3] > 8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    }
+    if (x1 < 0) throw new Error('empty picture');
+    const cw = x1 - x0 + 1, ch = y1 - y0 + 1;
+    const t = makeCanvas(cw, ch);
+    t.getContext('2d').drawImage(c, x0, y0, cw, ch, 0, 0, cw, ch);
+    const cut = { canvas: t, x0: 0, y0: 0, w: cw, h: ch, srcW: cw, srcH: ch, item: it };
+    addItemLayer(cut, it);
+    el.items.hidden = true;
+    toast(`🛋️ Added ${it.name}`);
+  } catch (err) {
+    console.error(err);
+    el.itemsStatus.textContent = `Couldn't load ${it.name}. Try again or pick another.`;
+  }
+}
+
+// Sized next to the people already in the picture (a person ≈ 1.7 m), else by
+// its own real height; it goes behind the people.
+function addItemLayer(cut, it) {
+  if (!comp.sized) applySizeSelect();
+  const people = comp.layers.filter((L) => !L.cut.item);
+  const personPx = Math.max(0, ...people.map((L) => L.cut.h * L.scale));
+  const hMm = it.heightMm || 900;
+  let targetH = personPx ? personPx * (hMm / 1700) : comp.H * Math.min(0.85, Math.max(0.15, hMm / 2200));
+  targetH = Math.min(targetH, comp.H * 0.95);
+  const scale = Math.max(0.03, targetH / cut.h);
+  const x = comp.W / 2 + (comp.layers.length % 3 - 1) * comp.W * 0.12;
+  const y = comp.H * 0.96 - (cut.h * scale) / 2;
+  const L = { id: ++layerId, cut, x, y, scale, rot: 0, flip: false, shadow: false, sticker: false };
+  comp.layers.unshift(L);                   // behind everyone; Forward brings it in front
+  selectLayer(L);
+  renderCompose();
+  return L;
+}
+
+el.itemsOpen.addEventListener('click', () => {
+  el.items.hidden = false;
+  renderItemCats();
+  showItems();
+});
+el.itemsClose.addEventListener('click', () => { el.items.hidden = true; });
+el.items.addEventListener('click', (e) => { if (e.target === el.items) el.items.hidden = true; });
+let itemSearchTimer = 0;
+el.itemsSearch.addEventListener('input', () => { clearTimeout(itemSearchTimer); itemSearchTimer = setTimeout(showItems, 150); });
 
 // ── Drag and drop onto the new picture (laptop) ──────────────────────────
 // Drag the glowing person straight off the photo, or a cut-out from the row
@@ -1668,9 +1961,10 @@ el.base.addEventListener('click', onTap);
 el.all.addEventListener('click', selectAllPeople);
 el.clear.addEventListener('click', () => { clearSelection(); setStatus('Tap a person to lift them.'); });
 
-sheet.querySelectorAll('.lf-seg button').forEach((b) => b.addEventListener('click', () => {
+const tapButtons = sheet.querySelectorAll('.lf-seg[role=group] button');
+tapButtons.forEach((b) => b.addEventListener('click', () => {
   tapMode = b.dataset.mode;
-  sheet.querySelectorAll('.lf-seg button').forEach((x) => x.classList.toggle('on', x === b));
+  tapButtons.forEach((x) => x.classList.toggle('on', x === b));
 }));
 
 let refineTimer = 0;

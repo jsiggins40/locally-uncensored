@@ -4,9 +4,12 @@
 # pictures, with its Qwen3.5-9B text encoder and the FLUX.2 small VAE. ComfyUI
 # runs it with its own nodes (no custom nodes). Also gets an uncensored LoRA for
 # explicit photographic content (axiomofmind/Moss-image-nsfw-uncensored-lora),
-# checked against its published SHA-256. Tests a picture on the GPU, then updates
-# the page: "MOSS-Image" appears under Create model, with a 🔞 Uncensored switch.
-# About 18 GB. Skip the LoRA with:  MOSS_NO_NSFW=1 bash <(curl ...)
+# checked against its published SHA-256, and two edit LoRAs for Describe edit:
+# akhaliq's MOSS-Image-Edit-HQ (armV5, the one its author recommends) and chinoll's
+# Moss-Image-Edit (Comfy's own). Tests a picture and an edit on the GPU, then updates
+# the page: "MOSS-Image" under Create model, "MOSS Edit" under Edit model, and a
+# Safe / Uncensored / Uncensored + LoRA control. About 19 GB.
+# Skip the uncensored LoRA with:  MOSS_NO_NSFW=1 bash <(curl ...)
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-moss.sh)
 set -euo pipefail
 cd "$HOME/ComfyUI"
@@ -61,6 +64,9 @@ if not os.environ.get("MOSS_NO_NSFW"):
     fetch("axiomofmind/Moss-image-nsfw-uncensored-lora", "MOSS-Image-NSFW-Uncensored-LoRA-ComfyUI.safetensors", "loras",
           "moss_image_nsfw_uncensored_comfyui.safetensors",
           "4480E3154FD663D5EE6DAA86AC59D0FD211CE495B9DFEEDFB914C38F777F3A0B")
+print("== Edit LoRAs (about 800 MB)")
+fetch("akhaliq/MOSS-Image-Edit-HQ", "weights/armV5/armV5.safetensors", "loras", "moss_image_edit_hq_armV5.safetensors")
+fetch(R, "loras/moss_image_edit_lora_rank_64_bf16.safetensors", "loras")
 shutil.rmtree("models/_hf_tmp", ignore_errors=True)
 PY
 
@@ -122,10 +128,52 @@ if not ok:
     shutil.move(os.path.join("models/diffusion_models", unet), os.path.join("models/_disabled", os.path.basename(unet)))
     raise SystemExit(f"MOSS-Image failed its test; moved {unet} to models/_disabled so the page won't offer it.")
 print("The test picture is in ComfyUI's output folder (rv6m_moss_test_*).")
+
+# Edit test: change the apple in that picture with the HQ edit LoRA
+edit = next((n for n in opts("LoraLoaderModelOnly", "lora_name") if re.search(r"moss.*edit.*(hq|armv5)", n, re.I)), None)
+fmts = opts("TextEncodeMOSSImageEdit", "edit_format")
+if not edit or "ai-toolkit" not in fmts:
+    print("MOSS EDIT TEST: skipped (edit LoRA or ComfyUI's MOSS edit node missing):", edit, fmts)
+    raise SystemExit
+shutil.copy(os.path.join("output", imgs[0].get("subfolder", ""), imgs[0]["filename"]), "input/rv6m_moss_edit_test.png")
+enc = lambda text: {"class_type": "TextEncodeMOSSImageEdit", "inputs": {"clip": ["2", 0], "prompt": text, "vae": ["13", 0],
+                    "edit_format": "ai-toolkit", "image_strength": 1, "images.image_0": ["60", 0]}}
+e = {"1": p["1"], "2": p["2"], "13": p["13"],
+     "16": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": edit, "strength_model": 1}},
+     "15": {"class_type": "SkipLayerGuidanceDiTSimple", "inputs": {"model": ["16", 0], "double_layers": "", "single_layers": "22",
+            "start_percent": 0, "end_percent": 1}},
+     "50": {"class_type": "LoadImage", "inputs": {"image": "rv6m_moss_edit_test.png"}},
+     "60": {"class_type": "ImageScaleToTotalPixels", "inputs": {"image": ["50", 0], "upscale_method": "lanczos", "megapixels": 1, "resolution_steps": 16}},
+     "27": {"class_type": "GetImageSize", "inputs": {"image": ["60", 0]}},
+     "28": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": ["27", 0], "height": ["27", 1], "batch_size": 1}},
+     "39": enc("Change only the apple to a green pear. Keep the table, the light and the composition unchanged."),
+     "36": enc("nsfw, worst quality, bad anatomy, watermark, jpeg artifact"),
+     "7": {"class_type": "KSampler", "inputs": {"model": ["15", 0], "positive": ["39", 0], "negative": ["36", 0], "latent_image": ["28", 0],
+           "seed": 1, "steps": 30, "cfg": 3, "sampler_name": "euler", "scheduler": "normal", "denoise": 1}},
+     "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["13", 0]}},
+     "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "rv6m_moss_edit_test"}}}
+req = urllib.request.Request("http://127.0.0.1:8188/api/prompt", json.dumps({"prompt": e}).encode(), {"Content-Type": "application/json"})
+try:
+    pid = json.load(urllib.request.urlopen(req))["prompt_id"]
+except urllib.error.HTTPError as err:
+    print("MOSS EDIT TEST REJECTED:", err.read().decode()[:600]); raise SystemExit
+t = time.time()
+while time.time() - t < 900:
+    h = get("/api/history/" + pid)
+    if pid in h:
+        s = h[pid]["status"]
+        print("MOSS EDIT TEST:", s["status_str"], f"in {time.time() - t:.0f}s (rv6m_moss_edit_test_* in the output folder: the apple should be a pear)")
+        if s["status_str"] != "success":
+            print("  ", json.dumps(s)[:600])
+            print("  MOSS-Image itself works; MOSS Edit may not. Send this to Claude.")
+        break
+    time.sleep(2)
 PY
 
 echo "== Updating the page"
 restart
 echo
-echo "Done. Reload the edit page: Create mode → Create model → MOSS-Image (25 steps)."
-echo "With the uncensored LoRA installed, a 🔞 Uncensored LoRA switch appears under it."
+echo "Done. Reload the edit page:"
+echo "  ✍️ Create → MOSS-Image (25 steps)"
+echo "  ✨ Describe edit → Edit model → MOSS Edit (up to 4 photos)"
+echo "  Both have a Safe / 🔞 Uncensored / 🔞 + LoRA control."

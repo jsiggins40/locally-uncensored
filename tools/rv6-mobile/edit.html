@@ -209,10 +209,6 @@
       <div class="seg"><button id="cmQ2512">Qwen 2512</button><button id="cmQ21">🆕 Qwen 2.1</button><button id="cmKrea" class="hidden">Krea 2 Turbo</button><button id="cmMoss" class="hidden">MOSS-Image</button></div>
       <div class="hint hidden" id="kreaHint">Krea 2 Turbo: 12B, made for 8 steps (a few seconds a picture). Natural, photographic look. Text-to-image only; it doesn't edit photos.</div>
     </div>
-    <div id="mossBox" class="hidden" style="margin-top:6px">
-      <label id="mossNsfwRow" class="hidden" style="display:flex;align-items:center;gap:8px;color:var(--text)"><input type="checkbox" id="mossNsfw" style="width:20px;height:20px"> 🔞 Uncensored LoRA</label>
-      <div class="hint" id="mossHint"></div>
-    </div>
     <label for="createSize">Size</label>
     <select id="createSize">
       <option value="0.75">Small (faster)</option>
@@ -221,6 +217,11 @@
       <option value="1.5">Extra large (slow, may repeat things)</option>
     </select>
     <div class="hint" id="createSizeHint"></div>
+  </div>
+  <div id="mossBox" class="hidden">
+    <label>MOSS-Image content</label>
+    <div class="seg"><button id="mmSafe">Safe</button><button id="mmUnc">🔞 Uncensored</button><button id="mmLora" class="hidden">🔞 + LoRA</button></div>
+    <div class="hint" id="mossHint"></div>
   </div>
   <label for="res">Output size (long side)</label>
   <select id="res">
@@ -348,7 +349,7 @@
   </div>
   <div id="editModelBox" class="hidden">
     <label>Edit model</label>
-    <div class="seg"><button id="emQwen">Qwen 2511 + LoRA</button><button id="emAio">⚡ Rapid AIO NSFW</button><button id="emQ21" class="hidden">🆕 Qwen 2.1</button><button id="emKrea" class="hidden">Krea 2</button></div>
+    <div class="seg"><button id="emQwen">Qwen 2511 + LoRA</button><button id="emAio">⚡ Rapid AIO NSFW</button><button id="emQ21" class="hidden">🆕 Qwen 2.1</button><button id="emKrea" class="hidden">Krea 2</button><button id="emMoss" class="hidden">MOSS Edit</button></div>
     <div class="seg hidden" id="kreaPickRow" style="margin-top:6px"><button id="kpGeneral">✏️ Edit</button><button id="kpIdentity">🧍 Restage person</button></div>
     <div class="hint" id="emHint"></div>
   </div>
@@ -517,7 +518,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-10a';
+const PAGE_BUILD = '2026-11-10b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -667,8 +668,14 @@ let video = null, upscaler = null, jobNote = '';
 let q21 = null, createModel = recall('createModel') || 'q21', q21Pick = recall('q21Pick') || 'noct';
 // MOSS-Image (add-moss.sh): a Create model, 25 steps at CFG 2.5, with an optional
 // uncensored LoRA. Chosen with its button, or when it's the only Create model
-let moss = null, mossNsfw = recall('mossNsfw') !== '0';
+// Content: 'safe' keeps "nsfw" in the negative (the MOSS team's default), 'uncensored'
+// drops it (the base model already knows everything), 'lora' adds the uncensored LoRA
+let moss = null, mossMode = recall('mossMode') || 'uncensored';
 const mossActive = () => !!moss && mode === 'create' && (createModel === 'moss' || (!create && !q21 && !krea));
+// MOSS Edit (add-moss.sh): Describe edit with an edit LoRA (akhaliq's HQ armV5 first,
+// else chinoll's); up to 4 photos. Chosen with its button, or when it's the only editor
+const mossEdit = () => !!(moss && moss.edit) && mode === 'instruct' && (editModel === 'moss' || (!qwen && !q21 && !(krea && krea.edit)));
+const mossLora = () => mossMode === 'lora' && moss && moss.nsfw ? moss.nsfw : null;
 // Krea 2 Turbo (add-krea2.sh): another Create model, 8 steps at CFG 1
 let krea = null;
 const kreaActive = () => !!krea && mode === 'create' && !mossActive() && (createModel === 'krea' || (!create && !q21));
@@ -677,7 +684,7 @@ let kreaPick = recall('kreaPick') || 'general';
 const kreaEdit = () => !!(krea && krea.edit) && mode === 'instruct' && editModel === 'krea';
 const kreaLora = () => krea.edit[kreaPick === 'identity' && krea.edit.identity ? 'identity' : 'general'] || krea.edit.identity;
 const q21Active = () => !!q21 && (mode === 'create' ? (createModel === 'q21' || !create) && !kreaActive() && !mossActive()
-  : (mode === 'instruct' || qwenMask()) && !kreaEdit() && (editModel === 'q21' || !qwen || (editModel === 'krea' && !aioCkpt)));
+  : (mode === 'instruct' || qwenMask()) && !kreaEdit() && !mossEdit() && (editModel === 'q21' || !qwen || (editModel === 'krea' && !aioCkpt)));
 const q21Turbo = () => !!(q21 && q21.turbo && q21Pick === 'turbo');
 const q21Unet = () => (q21Pick === 'noct' && q21.noct) || (q21Turbo() && q21.turbo.unet) || q21.unet || q21.noct;
 // Qwen-Image 2.1 Turbo: 8 steps at CFG 1 on the schedule it was distilled for
@@ -719,7 +726,7 @@ function setMode(m) {
   const masked = m === 'mask', cloud = m === 'cloud', q = usesQwen(), inst = q, fx = fixMask();
   $('engineBox').classList.toggle('hidden', !(masked && fill && qwen));
   $('engChange').classList.toggle('on', masked && !fx); $('engFix').classList.toggle('on', fx);
-  $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && qwen && qwen.plus && !kreaEdit()) || refVid() || startVid()));
+  $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && ((qwen && qwen.plus && !kreaEdit()) || mossEdit())) || refVid() || startVid()));
   $('batchBox').classList.toggle('hidden', !cloud); renderBatch();
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   $('markBox').classList.toggle('hidden', !cloud); $('marks').classList.toggle('hidden', !cloud);
@@ -730,15 +737,15 @@ function setMode(m) {
   $('res').previousElementSibling.classList.toggle('hidden', cloud || cr || vid);
   shapeUI();
   $('resHint').classList.toggle('hidden', cloud || cr || vid);
-  $('neg').closest('details').classList.toggle('hidden', cloud || fx || vid || kreaActive() || kreaEdit() || mossActive());
+  $('neg').closest('details').classList.toggle('hidden', cloud || fx || vid || kreaActive() || kreaEdit() || mossActive() || mossEdit());
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !speedLora());
   const encOwner = q21Active() ? q21 : cr ? create : qwen;
   $('encBox').classList.toggle('hidden', !inst || kreaActive() || kreaEdit() || mossActive() || !(encOwner && encOwner.clipAbl));
   applyEncoder();
-  $('editModelBox').classList.toggle('hidden', !((((aioCkpt || q21) && qwen) || (krea && krea.edit && m === 'instruct')) && (m === 'instruct' || (masked && !fx))));
+  $('editModelBox').classList.toggle('hidden', !((((aioCkpt || q21) && qwen) || (krea && krea.edit && m === 'instruct') || (moss && moss.edit && m === 'instruct')) && (m === 'instruct' || (masked && !fx))));
   applyEditModel(); applyQ21();
-  $('loraBox').classList.toggle('hidden', !inst || aioActive() || q21Active() || kreaActive() || kreaEdit() || mossActive() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
+  $('loraBox').classList.toggle('hidden', !inst || aioActive() || q21Active() || kreaActive() || kreaEdit() || mossActive() || mossEdit() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
   $('fluxLoraBox').classList.toggle('hidden', !fx || !fill.loras.length);
   const [hint, label, ph] = MODE_TEXT[fx ? 'fmask' : m === 'mask' && q ? 'qmask' : m];
   $('modeHint').textContent = hint; $('promptLabel').textContent = label;
@@ -757,7 +764,7 @@ function setMode(m) {
     applySpeed();
   } else if (inst) {
     if (!wasWritten) $('prompt').value = '';
-    if (!qwen) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
+    if (!qwen && !mossEdit() && !q21Active() && !kreaEdit()) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
     applySpeed();
   } else if (fx) {
     if (!wasWritten) $('prompt').value = '';
@@ -928,7 +935,14 @@ async function info(node) {
   const mVae = vaes.filter(n => /flux2.?vae/i.test(n)).sort((a, b) => /small/i.test(a) - /small/i.test(b)).pop();
   if (mUnet && mClip && mVae && JSON.stringify(clipTypes || '').includes('moss_image')) {
     const ml = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name');
-    moss = { unet: mUnet, clip: mClip, vae: mVae, nsfw: ml.filter(n => /moss.*(nsfw|uncensored)/i.test(n)).sort().pop() || null };
+    moss = { unet: mUnet, clip: mClip, vae: mVae, nsfw: ml.filter(n => /moss.*(nsfw|uncensored)/i.test(n)).sort().pop() || null, edit: null };
+    // Edit LoRAs: akhaliq's HQ (ai-toolkit layout, 50 steps CFG 3) first, else chinoll's (30 steps CFG 4)
+    const hq = ml.filter(n => /moss.*edit.*(hq|armv5)/i.test(n)).sort().pop(), ch = ml.filter(n => /moss_image_edit_lora/i.test(n)).sort().pop();
+    if (moss.unet && (hq || ch) && JSON.stringify(await info('TextEncodeMOSSImageEdit')).includes('ai-toolkit')) {
+      moss.edit = hq ? { lora: hq, format: 'ai-toolkit', steps: 50, cfg: 3, name: 'HQ (armV5)' }
+                     : { lora: ch, format: 'Moss-Image-Edit', steps: 30, cfg: 4, name: 'chinoll' };
+      $('emMoss').classList.remove('hidden');
+    }
     $('modeCreate').classList.remove('hidden');
   }
   $('createModelBox').classList.toggle('hidden', [create, q21, krea, moss].filter(Boolean).length < 2);
@@ -1044,7 +1058,7 @@ let quality = recall('quality') === '1';
 // on unsoftened. Same choice for Describe edit, Change and Create.
 let encoder = recall('encoder') || 'abl';
 const activeClip = m => encoder === 'abl' && m.clipAbl ? m.clipAbl : m.clip;
-const ablActive = () => { if (kreaActive() || kreaEdit() || mossActive()) return false; const m = q21Active() ? q21 : mode === 'create' ? create : qwen; return !!(m && m.clipAbl && encoder === 'abl'); };
+const ablActive = () => { if (kreaActive() || kreaEdit() || mossActive() || mossEdit()) return false; const m = q21Active() ? q21 : mode === 'create' ? create : qwen; return !!(m && m.clipAbl && encoder === 'abl'); };
 function applyEncoder() {
   $('encStd').classList.toggle('on', encoder !== 'abl'); $('encAbl').classList.toggle('on', encoder === 'abl');
   $('encHint').textContent = encoder === 'abl'
@@ -1063,6 +1077,19 @@ function applyEditModel() {
   if (editModel === 'q21' && !q21) editModel = aioCkpt ? 'aio' : 'qwen';
   if (editModel === 'aio' && !aioCkpt) editModel = 'qwen';
   if (editModel === 'krea' && !(krea && krea.edit)) editModel = aioCkpt ? 'aio' : q21 ? 'q21' : 'qwen';
+  if (editModel === 'moss' && !(moss && moss.edit)) editModel = aioCkpt ? 'aio' : q21 ? 'q21' : 'qwen';
+  const me = mossEdit();
+  $('emMoss').classList.toggle('on', me); $('emMoss').classList.toggle('hidden', !(moss && moss.edit) || mode !== 'instruct');
+  if (me) {
+    for (const id of ['emQwen', 'emAio', 'emQ21', 'emKrea']) $(id).classList.remove('on');
+    $('emQwen').classList.toggle('hidden', !qwen); $('emAio').classList.toggle('hidden', !aioCkpt);
+    $('kreaPickRow').classList.add('hidden');
+    $('emHint').textContent = 'MOSS Edit: MOSS-Image with an edit LoRA. Good at clothes, colours, lighting, props and style while keeping the person.';
+    setVal($('steps'), moss.edit.steps); setVal($('cfg'), moss.edit.cfg);
+    applyMossBox();
+    return;
+  }
+  applyMossBox();
   const ke = kreaEdit();
   $('emKrea').classList.toggle('on', ke); $('emKrea').classList.toggle('hidden', !(krea && krea.edit) || mode !== 'instruct');
   $('kreaPickRow').classList.toggle('hidden', !ke || !(krea.edit.general && krea.edit.identity));
@@ -1088,15 +1115,10 @@ function applyQ21() {
   const kr = kreaActive(), mo = mossActive();
   $('cmQ2512').classList.toggle('on', !kr && !mo && createModel !== 'q21'); $('cmQ21').classList.toggle('on', !kr && !mo && createModel === 'q21');
   $('cmKrea').classList.toggle('on', kr); $('kreaHint').classList.toggle('hidden', !kr);
-  $('cmMoss').classList.toggle('on', mo); $('mossBox').classList.toggle('hidden', !mo);
+  $('cmMoss').classList.toggle('on', mo);
   if (kr) { setVal($('steps'), 8); setVal($('cfg'), 1); }
-  if (mo) {
-    setVal($('steps'), 25); setVal($('cfg'), 2.5);
-    $('mossNsfwRow').classList.toggle('hidden', !moss.nsfw);
-    $('mossNsfw').checked = mossNsfw && !!moss.nsfw;
-    $('mossHint').textContent = 'MOSS-Image (OpenMOSS, Oct 2026): 5B, strong with long detailed prompts and with text in pictures. 25 steps. ' +
-      (!moss.nsfw ? '' : mossNsfw ? 'Uncensored LoRA on: tuned for explicit photographic content.' : 'Uncensored LoRA off: the standard model.');
-  }
+  if (mo) { setVal($('steps'), 25); setVal($('cfg'), 2.5); }
+  applyMossBox();
   const on = q21Active();
   $('q21Box').classList.toggle('hidden', !on);
   if (!on) return;
@@ -1118,7 +1140,24 @@ $('cmQ2512').onclick = () => { createModel = '2512'; store('createModel', create
 $('cmQ21').onclick = () => { createModel = 'q21'; store('createModel', createModel); setMode(mode); };
 $('cmKrea').onclick = () => { createModel = 'krea'; store('createModel', createModel); setMode(mode); };
 $('cmMoss').onclick = () => { createModel = 'moss'; store('createModel', createModel); setMode(mode); };
-$('mossNsfw').onchange = () => { mossNsfw = $('mossNsfw').checked; store('mossNsfw', mossNsfw ? '1' : '0'); applyQ21(); };
+for (const [id, m] of [['mmSafe', 'safe'], ['mmUnc', 'uncensored'], ['mmLora', 'lora']])
+  $(id).onclick = () => { mossMode = m; store('mossMode', m); applyMossBox(); };
+$('emMoss').onclick = () => { editModel = 'moss'; store('editModel', editModel); setMode(mode); };
+// The MOSS content control, for Create and for MOSS Edit
+function applyMossBox() {
+  const on = mossActive() || mossEdit();
+  $('mossBox').classList.toggle('hidden', !on);
+  if (!on) return;
+  if (mossMode === 'lora' && !moss.nsfw) mossMode = 'uncensored';
+  $('mmLora').classList.toggle('hidden', !moss.nsfw);
+  for (const [id, m] of [['mmSafe', 'safe'], ['mmUnc', 'uncensored'], ['mmLora', 'lora']]) $(id).classList.toggle('on', mossMode === m);
+  const what = mossEdit()
+    ? `MOSS Edit ${moss.edit.name}: say only what changes, e.g. "Change only her jacket to a red leather jacket. Keep her face, hair, pose and the background unchanged." Up to 4 photos; ${moss.edit.steps} steps. `
+    : 'MOSS-Image: 5B, strong with long detailed prompts and with text in pictures. 25 steps. ';
+  $('mossHint').textContent = what + (mossMode === 'safe' ? 'Safe: asks the model to avoid nudity.'
+    : mossMode === 'lora' ? 'Uncensored + LoRA: adds the LoRA tuned for explicit photographic content' + (mossEdit() ? ' (experimental with editing).' : '.')
+    : 'Uncensored: the model as it is, no filter (it already knows explicit content).');
+}
 $('q21Noct').onclick = () => { q21Pick = 'noct'; store('q21Pick', q21Pick); applyQ21(); };
 $('q21Off').onclick = () => { q21Pick = 'official'; store('q21Pick', q21Pick); applyQ21(); };
 $('q21Turbo').onclick = () => { q21Pick = 'turbo'; store('q21Pick', q21Pick); applyQ21(); };
@@ -1127,13 +1166,14 @@ $('kpGeneral').onclick = () => { kreaPick = 'general'; store('kreaPick', kreaPic
 $('kpIdentity').onclick = () => { kreaPick = 'identity'; store('kreaPick', kreaPick); applyEditModel(); };
 $('emQwen').onclick = () => { editModel = 'qwen'; store('editModel', editModel); setMode(mode); };
 $('emAio').onclick = () => { editModel = 'aio'; store('editModel', editModel); setMode(mode); };
-const speedLora = () => q21Active() || kreaActive() || kreaEdit() || mossActive() ? false : aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
+const speedLora = () => q21Active() || kreaActive() || kreaEdit() || mossActive() || mossEdit() ? false : aioActive() ? true : mode === 'create' ? create && create.lora : qwen && qwen.lora;
 function fastActive() { return !!speedLora() && !quality; }
 function applySpeed() {
   const cr = mode === 'create';
   if (q21Active()) { setVal($('steps'), q21Turbo() ? 8 : 25); setVal($('cfg'), 1); return; }  // Qwen's own 2.1 settings
   if (kreaActive() || kreaEdit()) { setVal($('steps'), 8); setVal($('cfg'), 1); return; }  // Krea 2 Turbo: 8 steps, CFG 1
   if (mossActive()) { setVal($('steps'), 25); setVal($('cfg'), 2.5); return; }  // MOSS-Image: Comfy's template settings
+  if (mossEdit()) { setVal($('steps'), moss.edit.steps); setVal($('cfg'), moss.edit.cfg); return; }
   if (!(cr ? create : qwen)) return;
   $('fastBtn').classList.toggle('on', fastActive()); $('qualBtn').classList.toggle('on', !fastActive());
   if (aioActive()) {
@@ -1157,7 +1197,7 @@ $('qualBtn').onclick = () => { quality = true; store('quality', '1'); applySpeed
 // Describe edit (Qwen-Image-Edit Plus) takes pictures 2 and 3
 const more = [];  // canvases, picture 2 onwards
 const startVid = () => mode === 'video' && cloudVid() && (vidKind !== 'ref' || wanVid());  // first frame: picture 2 = last frame
-const maxMore = () => mode === 'cloud' || (mode === 'instruct' && q21Active()) || refVid() ? 9 : startVid() ? 1 : 2;
+const maxMore = () => mode === 'cloud' || (mode === 'instruct' && q21Active()) || refVid() ? 9 : mossEdit() ? 3 : startVid() ? 1 : 2;
 const hasSecond = () => more.length > 0;
 const usedMore = () => more.slice(0, maxMore());
 function renderMore() {
@@ -1556,7 +1596,7 @@ for (const b of document.querySelectorAll('button.step[data-for=q21cfg]')) b.add
 // small VAE, skip-layer guidance on layer 22 for the first half, er_sde / simple.
 // The uncensored LoRA wants its trigger word first and "nsfw" out of the negative.
 const MOSS_NEG = 'worst quality, bad anatomy, watermark, jpeg artifact';
-function buildMossWorkflow(text, seed, steps, cfg, w, h, nsfwLora) {
+function buildMossWorkflow(text, seed, steps, cfg, w, h, nsfwLora, safe) {
   let model = ['1', 0];
   const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: moss.unet, weight_dtype: 'default' } },
@@ -1571,10 +1611,47 @@ function buildMossWorkflow(text, seed, steps, cfg, w, h, nsfwLora) {
   Object.assign(p, {
     '15': { class_type: 'SkipLayerGuidanceDiTSimple', inputs: { model, double_layers: '', single_layers: '22', start_percent: 0, end_percent: 0.5 } },
     '3': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text } },
-    '4': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: nsfwLora ? MOSS_NEG : 'nsfw, ' + MOSS_NEG } },
+    '4': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: safe ? 'nsfw, ' + MOSS_NEG : MOSS_NEG } },
     '6': { class_type: 'EmptyFlux2LatentImage', inputs: { width: w, height: h, batch_size: 1 } },
     '7': { class_type: 'KSampler', inputs: { model: ['15', 0], positive: ['3', 0], negative: ['4', 0], latent_image: ['6', 0],
                                               seed, steps, cfg, sampler_name: 'er_sde', scheduler: 'simple', denoise: 1 } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
+  });
+  return p;
+}
+// MOSS Edit, as in Comfy-Org's image_moss_image_edit template: the edit LoRA on the
+// MOSS model, each photo scaled to 1 MP (16 px steps) and given to the edit encoder
+// (images.image_0..3; with the VAE they also become reference latents), the output
+// the size of photo 1. Euler / normal, skip-layer guidance on layer 22 throughout.
+function buildMossEditWorkflow(imgNames, text, seed, steps, cfg, nsfwLora, safe) {
+  const e = moss.edit;
+  const p = {
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: moss.unet, weight_dtype: 'default' } },
+    '16': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: e.lora, strength_model: 1 } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: moss.clip, type: 'moss_image' } },
+    '13': { class_type: 'VAELoader', inputs: { vae_name: moss.vae } },
+  };
+  let model = ['16', 0];
+  if (nsfwLora) {
+    p['18'] = { class_type: 'LoraLoaderModelOnly', inputs: { model, lora_name: nsfwLora, strength_model: 0.8 } };
+    model = ['18', 0];
+  }
+  const images = {};
+  imgNames.slice(0, 4).forEach((name, i) => {
+    p[String(50 + i)] = { class_type: 'LoadImage', inputs: { image: name } };
+    p[String(60 + i)] = { class_type: 'ImageScaleToTotalPixels', inputs: { image: [String(50 + i), 0], upscale_method: 'lanczos', megapixels: 1, resolution_steps: 16 } };
+    images['images.image_' + i] = [String(60 + i), 0];
+  });
+  const enc = (prompt) => ({ class_type: 'TextEncodeMOSSImageEdit', inputs: { clip: ['2', 0], prompt, vae: ['13', 0], edit_format: e.format, image_strength: 1, ...images } });
+  Object.assign(p, {
+    '15': { class_type: 'SkipLayerGuidanceDiTSimple', inputs: { model, double_layers: '', single_layers: '22', start_percent: 0, end_percent: 1 } },
+    '27': { class_type: 'GetImageSize', inputs: { image: ['60', 0] } },
+    '28': { class_type: 'EmptyFlux2LatentImage', inputs: { width: ['27', 0], height: ['27', 1], batch_size: 1 } },
+    '39': enc(text),
+    '36': enc(safe ? 'nsfw, ' + MOSS_NEG : MOSS_NEG),
+    '7': { class_type: 'KSampler', inputs: { model: ['15', 0], positive: ['39', 0], negative: ['36', 0], latent_image: ['28', 0],
+                                              seed, steps, cfg, sampler_name: 'euler', scheduler: 'normal', denoise: 1 } },
     '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
   });
@@ -2589,7 +2666,7 @@ $('go').onclick = async () => {
   if (mode !== 'create' && $('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
   if (mode === 'mask' && maskIsEmpty()) return setStatus('Tap or paint the area you want to change first.', true);
   if (!$('prompt').value.trim() && !fixMask()) return setStatus(usesQwen() ? 'Type what you want changed first.' : 'Type a prompt or tap some tags first.', true);
-  if (mode === 'instruct' && !qwen && !q21Active() && !kreaEdit()) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
+  if (mode === 'instruct' && !qwen && !q21Active() && !kreaEdit() && !mossEdit()) return setStatus('Describe-edit model is not installed yet: run the add-edit-model command on the VM.', true);
   $('go').disabled = true; stopRequested = false; currentJobs = [];
   $('stop').classList.remove('hidden');
   store('workPrompt', $('prompt').value);
@@ -2612,7 +2689,12 @@ $('go').onclick = async () => {
     } else if (mossActive()) {
       const [w, h] = createDims();
       p = buildMossWorkflow($('prompt').value.trim(), seed, +$('steps').value || 25, +$('cfg').value || 2.5, w, h,
-                            mossNsfw && moss.nsfw ? moss.nsfw : null);
+                            mossLora(), mossMode === 'safe');
+    } else if (mossEdit()) {
+      const names = [imgName];
+      for (const [i, c] of usedMore().entries()) names.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
+      p = buildMossEditWorkflow(names, $('prompt').value.trim(), seed, +$('steps').value || moss.edit.steps, +$('cfg').value || moss.edit.cfg,
+                                mossLora(), mossMode === 'safe');
     } else if (kreaActive()) {
       const [w, h] = createDims();
       p = buildKreaWorkflow($('prompt').value.trim(), seed, +$('steps').value || 8, w, h);
@@ -2989,7 +3071,8 @@ async function waitForJobs(ids, t0) {
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
         const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
-          : mossActive() ? `MOSS-Image${mossNsfw && moss.nsfw ? ' + uncensored LoRA' : ''} · ${$('steps').value} steps · ${createDims().join('×')}`
+          : mossActive() ? `MOSS-Image · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps · ${createDims().join('×')}`
+          : mossEdit() ? `MOSS Edit ${moss.edit.name} · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps` + (hasSecond() ? ` · ${1 + usedMore().length} photos` : '')
           : kreaActive() ? `Krea 2 Turbo · ${$('steps').value} steps · ${createDims().join('×')}`
           : kreaEdit() ? `Krea 2 ${kreaLora() === krea.edit.identity ? 'Restage' : 'Edit'} · ${$('steps').value} steps · ${kreaEditDims().join('×')}`
           : q21Active() ? `Qwen 2.1${q21Turbo() ? ' Turbo' : q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +

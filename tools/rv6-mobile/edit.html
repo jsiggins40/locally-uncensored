@@ -518,7 +518,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-10b';
+const PAGE_BUILD = '2026-11-10c';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -657,8 +657,8 @@ let mode = 'mask', qwen = null, maskPrompt = null;
 // 🩹 Fix = FLUX.1 Fill dev OneReward: repairs/removes the selection with natural
 // edges and colour; the prompt is optional (it describes what belongs there)
 let fill = null, engine = recall('maskEngine') || 'change';
-const fixMask = () => mode === 'mask' && !!fill && (engine === 'fix' || !qwen);
-const qwenMask = () => mode === 'mask' && !!qwen && !fixMask();
+const fixMask = () => mode === 'mask' && !!fill && (engine === 'fix' || !(qwen || (moss && moss.edit)));
+const qwenMask = () => mode === 'mask' && !!qwen && !fixMask() && !mossEdit();
 // ✍️ Create = Qwen-Image 2512: a new picture from text, no photo involved
 let create = null;
 // Qwen-Image 2.1 (Sept 2026, 7B): one model for Create and editing (up to 10
@@ -673,8 +673,12 @@ let q21 = null, createModel = recall('createModel') || 'q21', q21Pick = recall('
 let moss = null, mossMode = recall('mossMode') || 'uncensored';
 const mossActive = () => !!moss && mode === 'create' && (createModel === 'moss' || (!create && !q21 && !krea));
 // MOSS Edit (add-moss.sh): Describe edit with an edit LoRA (akhaliq's HQ armV5 first,
-// else chinoll's); up to 4 photos. Chosen with its button, or when it's the only editor
-const mossEdit = () => !!(moss && moss.edit) && mode === 'instruct' && (editModel === 'moss' || (!qwen && !q21 && !(krea && krea.edit)));
+// else chinoll's); up to 4 photos. Chosen with its button, or when it's the only editor.
+// Also Selected area (one photo): only the selection is re-generated (latent noise
+// mask) and pasted back with a soft edge, so the rest of the photo can't change
+const mossEdit = () => !!(moss && moss.edit) && (mode === 'instruct'
+  ? editModel === 'moss' || (!qwen && !q21 && !(krea && krea.edit))
+  : mode === 'mask' && !fixMask() && (editModel === 'moss' || !qwen));
 const mossLora = () => mossMode === 'lora' && moss && moss.nsfw ? moss.nsfw : null;
 // Krea 2 Turbo (add-krea2.sh): another Create model, 8 steps at CFG 1
 let krea = null;
@@ -690,7 +694,11 @@ const q21Unet = () => (q21Pick === 'noct' && q21.noct) || (q21Turbo() && q21.tur
 // Qwen-Image 2.1 Turbo: 8 steps at CFG 1 on the schedule it was distilled for
 // (Qwen's sample_sigmas, terminal 0 added); other schedules weren't evaluated
 const Q21_TURBO_SIGMAS = '1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0';
-const usesQwen = () => mode === 'instruct' || mode === 'create' || qwenMask();
+// Which editors are installed: Selected area needs one that takes a mask; the page
+// opens edits in Describe edit when an instruction editor is there, else Selected area
+const canMask = () => !!(qwen || fill || allModels.length || (moss && moss.edit));
+const editHome = () => qwen || q21 || (moss && moss.edit) || !canMask() ? 'instruct' : 'mask';
+const usesQwen = () => mode === 'instruct' || mode === 'create' || qwenMask() || mossEdit();
 const MODE_TEXT = {
   video: ['Turns the photo into a video. Say what happens and how the camera moves; the person and scene come from the photo. Long videos are made 5 seconds at a time and joined seamlessly.',
           'What should happen in the video?', 'e.g. she turns to the camera and smiles, slow push-in'],
@@ -711,7 +719,7 @@ const MODE_TEXT = {
 };
 function setMode(m) {
   // Describe edit and Seedream share the instruction text; the tag modes keep their own
-  const written = k => k === 'instruct' || k === 'cloud' || k === 'create' || k === 'video' || (k === 'mask' && !!(qwen || fill));
+  const written = k => k === 'instruct' || k === 'cloud' || k === 'create' || k === 'video' || (k === 'mask' && !!(qwen || fill || (moss && moss.edit)));
   if (written(m) && !written(mode)) maskPrompt = $('prompt').value;
   if (!written(m) && written(mode) && maskPrompt !== null) $('prompt').value = maskPrompt;
   const wasWritten = written(mode);
@@ -724,7 +732,7 @@ function setMode(m) {
   $('stage').style.display = $('empty').style.display = cr ? 'none' : '';
   $('aspectBox').classList.toggle('hidden', !cr);
   const masked = m === 'mask', cloud = m === 'cloud', q = usesQwen(), inst = q, fx = fixMask();
-  $('engineBox').classList.toggle('hidden', !(masked && fill && qwen));
+  $('engineBox').classList.toggle('hidden', !(masked && fill && (qwen || (moss && moss.edit))));
   $('engChange').classList.toggle('on', masked && !fx); $('engFix').classList.toggle('on', fx);
   $('secondBox').classList.toggle('hidden', !(cloud || (m === 'instruct' && ((qwen && qwen.plus && !kreaEdit()) || mossEdit())) || refVid() || startVid()));
   $('batchBox').classList.toggle('hidden', !cloud); renderBatch();
@@ -741,9 +749,9 @@ function setMode(m) {
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !speedLora());
   const encOwner = q21Active() ? q21 : cr ? create : qwen;
-  $('encBox').classList.toggle('hidden', !inst || kreaActive() || kreaEdit() || mossActive() || !(encOwner && encOwner.clipAbl));
+  $('encBox').classList.toggle('hidden', !inst || kreaActive() || kreaEdit() || mossActive() || mossEdit() || !(encOwner && encOwner.clipAbl));
   applyEncoder();
-  $('editModelBox').classList.toggle('hidden', !((((aioCkpt || q21) && qwen) || (krea && krea.edit && m === 'instruct') || (moss && moss.edit && m === 'instruct')) && (m === 'instruct' || (masked && !fx))));
+  $('editModelBox').classList.toggle('hidden', !((((aioCkpt || q21) && qwen) || (krea && krea.edit && m === 'instruct') || (moss && moss.edit && (m === 'instruct' || masked))) && (m === 'instruct' || (masked && !fx))));
   applyEditModel(); applyQ21();
   $('loraBox').classList.toggle('hidden', !inst || aioActive() || q21Active() || kreaActive() || kreaEdit() || mossActive() || mossEdit() || !(qwen && qwen.extras.length));  // Qwen LoRAs also load on Create (same model family)
   $('fluxLoraBox').classList.toggle('hidden', !fx || !fill.loras.length);
@@ -955,13 +963,13 @@ async function info(node) {
     renderFluxLoras();
   }
   await cloudReady; await ckptReady.catch(() => {});
-  $('modeMask').classList.toggle('hidden', !qwen && !fill && !allModels.length);
+  $('modeMask').classList.toggle('hidden', !canMask());
   let saved = recall('mode') || mode;
-  if (saved === 'cloud' && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
+  if (saved === 'cloud' && !cloudCfg.configured) saved = editHome();
   if (saved === 'whole' && !allModels.length) saved = 'instruct';
-  if (saved === 'create' && !create && !q21 && !krea) saved = qwen ? 'instruct' : 'mask';
-  if (saved === 'video' && !video && !cloudCfg.configured) saved = qwen ? 'instruct' : 'mask';
-  if (saved === 'mask' && !qwen && !fill && !allModels.length) saved = 'instruct';
+  if (saved === 'create' && !create && !q21 && !krea && !moss) saved = editHome();
+  if (saved === 'video' && !video && !cloudCfg.configured) saved = editHome();
+  if (saved === 'mask' && !canMask()) saved = 'instruct';
   setMode(saved);  // (re-)run now that the models are known
   // Put the last prompt back (setMode clears it; iOS reloads the tab while an image is made)
   const pr = recall('workPrompt');
@@ -1079,7 +1087,7 @@ function applyEditModel() {
   if (editModel === 'krea' && !(krea && krea.edit)) editModel = aioCkpt ? 'aio' : q21 ? 'q21' : 'qwen';
   if (editModel === 'moss' && !(moss && moss.edit)) editModel = aioCkpt ? 'aio' : q21 ? 'q21' : 'qwen';
   const me = mossEdit();
-  $('emMoss').classList.toggle('on', me); $('emMoss').classList.toggle('hidden', !(moss && moss.edit) || mode !== 'instruct');
+  $('emMoss').classList.toggle('on', me); $('emMoss').classList.toggle('hidden', !(moss && moss.edit) || (mode !== 'instruct' && mode !== 'mask'));
   if (me) {
     for (const id of ['emQwen', 'emAio', 'emQ21', 'emKrea']) $(id).classList.remove('on');
     $('emQwen').classList.toggle('hidden', !qwen); $('emAio').classList.toggle('hidden', !aioCkpt);
@@ -1151,7 +1159,9 @@ function applyMossBox() {
   if (mossMode === 'lora' && !moss.nsfw) mossMode = 'uncensored';
   $('mmLora').classList.toggle('hidden', !moss.nsfw);
   for (const [id, m] of [['mmSafe', 'safe'], ['mmUnc', 'uncensored'], ['mmLora', 'lora']]) $(id).classList.toggle('on', mossMode === m);
-  const what = mossEdit()
+  const what = mossEdit() && mode === 'mask'
+    ? `MOSS Edit ${moss.edit.name}, selected area: say what the selection should become, e.g. "a red leather jacket". Only the selection changes; a little extra around it helps it blend. ${moss.edit.steps} steps. `
+    : mossEdit()
     ? `MOSS Edit ${moss.edit.name}: say only what changes, e.g. "Change only her jacket to a red leather jacket. Keep her face, hair, pose and the background unchanged." Up to 4 photos; ${moss.edit.steps} steps. `
     : 'MOSS-Image: 5B, strong with long detailed prompts and with text in pictures. 25 steps. ';
   $('mossHint').textContent = what + (mossMode === 'safe' ? 'Safe: asks the model to avoid nudity.'
@@ -1624,7 +1634,7 @@ function buildMossWorkflow(text, seed, steps, cfg, w, h, nsfwLora, safe) {
 // MOSS model, each photo scaled to 1 MP (16 px steps) and given to the edit encoder
 // (images.image_0..3; with the VAE they also become reference latents), the output
 // the size of photo 1. Euler / normal, skip-layer guidance on layer 22 throughout.
-function buildMossEditWorkflow(imgNames, text, seed, steps, cfg, nsfwLora, safe) {
+function buildMossEditWorkflow(imgNames, text, seed, steps, cfg, nsfwLora, safe, maskName) {
   const e = moss.edit;
   const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: moss.unet, weight_dtype: 'default' } },
@@ -1655,6 +1665,24 @@ function buildMossEditWorkflow(imgNames, text, seed, steps, cfg, nsfwLora, safe)
     '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
   });
+  if (maskName) {
+    // Selected area: start from the photo itself and re-generate only the (slightly
+    // grown) selection, then blend it over the full-size original with a soft edge
+    Object.assign(p, {
+      '80': { class_type: 'LoadImageMask', inputs: { image: maskName, channel: 'red' } },
+      '81': { class_type: 'GrowMask', inputs: { mask: ['80', 0], expand: 6, tapered_corners: true } },
+      '82': { class_type: 'VAEEncode', inputs: { pixels: ['60', 0], vae: ['13', 0] } },
+      '83': { class_type: 'SetLatentNoiseMask', inputs: { samples: ['82', 0], mask: ['81', 0] } },
+      '84': { class_type: 'MaskToImage', inputs: { mask: ['81', 0] } },
+      '85': { class_type: 'ImageBlur', inputs: { image: ['84', 0], blur_radius: 8, sigma: 4 } },
+      '86': { class_type: 'ImageToMask', inputs: { image: ['85', 0], channel: 'red' } },
+      '87': { class_type: 'ImageCompositeMasked', inputs: { destination: ['50', 0], source: ['8', 0], x: 0, y: 0,
+                                                            resize_source: true, mask: ['86', 0] } },
+    });
+    p['7'].inputs.latent_image = ['83', 0];
+    p['9'].inputs.images = ['87', 0];
+    delete p['27']; delete p['28'];  // the photo's own latent replaces the empty one
+  }
   return p;
 }
 // Krea 2 Turbo: ComfyUI's own nodes (CLIPLoader type "krea2" = its Qwen3-VL-4B
@@ -1864,7 +1892,7 @@ function promptTarget() {
   if (mode === 'create') return 'create';
   if (mode === 'instruct') return 'qwen_edit';
   if (mode === 'whole') return 'restyle';
-  if (qwenMask()) return 'qwen_area';
+  if (qwenMask() || mossEdit()) return 'qwen_area';
   return 'inpaint';
 }
 function thumbUrl(c, max = 768) {
@@ -2091,7 +2119,7 @@ async function liftUse(blob, as) {
     const dropped = more.length + batch.length;
     if (more.length) { genMore++; more.length = 0; renderMore(); }
     if (batch.length) { genBatch++; batch.length = 0; renderBatch(); }
-    setMode(cloudCfg.configured ? 'cloud' : qwen ? 'instruct' : 'mask');
+    setMode(cloudCfg.configured ? 'cloud' : editHome());
     scrollTo({ top: 0 });
     setStatus((cloudCfg.configured ? 'Your new picture is the photo. Say what Seedream should change, e.g. the place, the light, the clothes.'
       : 'Your new picture is the photo. Now say what to change.')
@@ -2692,9 +2720,10 @@ $('go').onclick = async () => {
                             mossLora(), mossMode === 'safe');
     } else if (mossEdit()) {
       const names = [imgName];
-      for (const [i, c] of usedMore().entries()) names.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
+      if (mode === 'instruct') for (const [i, c] of usedMore().entries()) names.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
+      const maskName = mode === 'mask' ? await upload(await exportMask(), `rv6m_${ts}_mask.png`) : null;
       p = buildMossEditWorkflow(names, $('prompt').value.trim(), seed, +$('steps').value || moss.edit.steps, +$('cfg').value || moss.edit.cfg,
-                                mossLora(), mossMode === 'safe');
+                                mossLora(), mossMode === 'safe', maskName);
     } else if (kreaActive()) {
       const [w, h] = createDims();
       p = buildKreaWorkflow($('prompt').value.trim(), seed, +$('steps').value || 8, w, h);
@@ -3072,7 +3101,7 @@ async function waitForJobs(ids, t0) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
         const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
           : mossActive() ? `MOSS-Image · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps · ${createDims().join('×')}`
-          : mossEdit() ? `MOSS Edit ${moss.edit.name} · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps` + (hasSecond() ? ` · ${1 + usedMore().length} photos` : '')
+          : mossEdit() ? `MOSS Edit ${moss.edit.name} · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps` + (mode === 'mask' ? ' · selected area' : hasSecond() ? ` · ${1 + usedMore().length} photos` : '')
           : kreaActive() ? `Krea 2 Turbo · ${$('steps').value} steps · ${createDims().join('×')}`
           : kreaEdit() ? `Krea 2 ${kreaLora() === krea.edit.identity ? 'Restage' : 'Edit'} · ${$('steps').value} steps · ${kreaEditDims().join('×')}`
           : q21Active() ? `Qwen 2.1${q21Turbo() ? ' Turbo' : q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
@@ -3184,7 +3213,7 @@ $('stop').onclick = async () => {
 $('again').onclick = async () => {
   genPhoto++;
   await loadIntoCanvas($('out').src); savePhoto();
-  if (mode === 'create') setMode(qwen ? 'instruct' : 'mask');  // a created picture is edited like any photo
+  if (mode === 'create') setMode(editHome());  // a created picture is edited like any photo
   $('result').classList.add('hidden');
   window.scrollTo({ top: 0, behavior: 'smooth' });
   setStatus('Paint the next area to change.');

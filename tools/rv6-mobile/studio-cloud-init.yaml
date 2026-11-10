@@ -28,7 +28,7 @@ write_files:
       # The newest CUDA compiler first: Blackwell GPUs (RTX PRO 6000) need 12.8+ for the chat engine
       as_user() { sudo -u ubuntu -H bash -lc "export PATH=/usr/local/cuda-12.8/bin:/usr/local/cuda/bin:\$HOME/.local/bin:\$PATH; $1"; }
       apt-get update -qq
-      apt-get install -y -qq python3-venv tmux git curl
+      apt-get install -y -qq python3-venv tmux git curl mosh   # mosh: steady phone connections (Blink)
       echo "== Tailscale (the phone's private link): name 'studio'"
       curl -fsSL https://tailscale.com/install.sh | sh
       set +x   # keep the auth key out of the log

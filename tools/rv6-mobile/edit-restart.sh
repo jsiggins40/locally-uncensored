@@ -5,6 +5,14 @@
 #   sudo curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/edit-restart.sh -o /usr/local/bin/edit-restart && sudo chmod +x /usr/local/bin/edit-restart
 SRC="https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile"
 DEST="$HOME/ComfyUI/custom_nodes/rv6_mobile"
+# One at a time: when two run together (the boot-time auto-start and an
+# installer, say) they trip over each other's downloads and ComfyUI restarts.
+# The second waits for the first. (The lock is held across the self-update below.)
+if [ -z "${RV6M_LOCKED:-}" ] && command -v flock >/dev/null; then
+  exec 9>"/tmp/rv6m-edit-restart-$(id -u).lock"
+  if ! flock -n 9; then echo "Another edit-restart is running; waiting for it to finish…"; flock 9; fi
+  export RV6M_LOCKED=1
+fi
 echo "Getting the latest page"
 # GitHub's raw files are cached for up to 5 minutes by branch name; asking for
 # the newest commit by its id always gets the newest files

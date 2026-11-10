@@ -7,10 +7,15 @@ SRC="https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-
 DEST="$HOME/ComfyUI/custom_nodes/rv6_mobile"
 # One at a time: when two run together (the boot-time auto-start and an
 # installer, say) they trip over each other's downloads and ComfyUI restarts.
-# The second waits for the first. (The lock is held across the self-update below.)
+# The second waits for the first, at most 10 minutes. (The lock is held across the
+# self-update below; tmux gets "9>&-" so the tmux server it may start doesn't keep
+# the lock after this ends. v2: the first version's lock could stay held that way.)
 if [ -z "${RV6M_LOCKED:-}" ] && command -v flock >/dev/null; then
-  exec 9>"/tmp/rv6m-edit-restart-$(id -u).lock"
-  if ! flock -n 9; then echo "Another edit-restart is running; waiting for it to finish…"; flock 9; fi
+  exec 9>"/tmp/rv6m-edit-restart-v2-$(id -u).lock"
+  if ! flock -n 9; then
+    echo "Another edit-restart is running; waiting for it to finish…"
+    flock -w 600 9 || echo "  (still busy after 10 minutes: going ahead anyway)"
+  fi
   export RV6M_LOCKED=1
 fi
 echo "Getting the latest page"
@@ -65,8 +70,8 @@ fi
 "$HOME/ComfyUI/venv/bin/python" -c "import pillow_heif" 2>/dev/null \
   || "$HOME/ComfyUI/venv/bin/pip" install -q pillow-heif >/dev/null 2>&1 \
   || echo "  (couldn't install pillow-heif: HEIC photos won't convert)"
-tmux kill-session -t comfy 2>/dev/null
-tmux new -d -s comfy "cd $HOME/ComfyUI && venv/bin/python main.py --listen 127.0.0.1 --port 8188"
+tmux kill-session -t comfy 2>/dev/null 9>&-
+tmux new -d -s comfy "cd $HOME/ComfyUI && venv/bin/python main.py --listen 127.0.0.1 --port 8188" 9>&-
 echo -n "Starting ComfyUI"
 for _ in $(seq 90); do curl -sf -o /dev/null localhost:8188 && break; echo -n .; sleep 1; done; echo
 curl -sf -o /dev/null localhost:8188 || { echo "ComfyUI did not start. See: tmux attach -t comfy"; exit 1; }

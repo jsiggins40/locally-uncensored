@@ -313,6 +313,8 @@ if [ -x "$HOME/.local/bin/search-start" ]; then
 fi
 tmux kill-session -t chat 2>/dev/null || true
 tmux new -d -s chat "env ${env[*]} open-webui serve --host 127.0.0.1 --port 8080"
+# The phone's link to the chat page (Tailscale, tailnet only)
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:8080 >/dev/null 2>&1 || true
 SH
 chmod +x "$HOME/.local/bin/chat-start"
 "$HOME/.local/bin/chat-start"

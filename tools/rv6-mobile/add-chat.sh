@@ -312,7 +312,9 @@ if [ -x "$HOME/.local/bin/search-start" ]; then
   env+=(ENABLE_WEB_SEARCH=True WEB_SEARCH_ENGINE=searxng SEARXNG_QUERY_URL=http://127.0.0.1:8888/search WEB_SEARCH_RESULT_COUNT=5)
 fi
 tmux kill-session -t chat 2>/dev/null || true
-tmux new -d -s chat "env ${env[*]} open-webui serve --host 127.0.0.1 --port 8080"
+# Restarted by itself if it ever stops; its output is kept in ~/open-webui.log
+: > "$HOME/open-webui.log"
+tmux new -d -s chat "while true; do env ${env[*]} open-webui serve --host 127.0.0.1 --port 8080 2>&1 | tee -a \$HOME/open-webui.log; echo; echo 'Open WebUI stopped; restarting in 5 s (log: ~/open-webui.log)'; sleep 5; done"
 # The phone's link to the chat page (Tailscale, tailnet only)
 sudo tailscale serve --bg --https=8443 http://127.0.0.1:8080 >/dev/null 2>&1 || true
 SH

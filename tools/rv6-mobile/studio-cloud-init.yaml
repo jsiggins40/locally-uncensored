@@ -1,0 +1,50 @@
+#cloud-config
+# A whole studio VM, set up by itself on first boot (no SSH needed): the edit page
+# with ✂️ Lift, MOSS (Create, Describe edit, Selected area), the private chat
+# (Qwen 3.8 27B) with web search, and auto-start after every boot.
+# Made for a 96 GB RTX PRO 6000. Boot disk: 200 GB or more.
+# Paste it into Nebius: Configuration step → User data → "Enable custom cloud-init
+# config". Replace the three PASTE lines first (public keys only; never a private key).
+# Takes about an hour; progress: /var/log/rv6m-setup.log ("RV6M-SETUP-DONE" at the end).
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - PASTE-YOUR-LAPTOP-PUBLIC-KEY-HERE
+      - PASTE-YOUR-IPHONE-PUBLIC-KEY-HERE
+write_files:
+  - path: /root/tskey
+    permissions: "0600"
+    content: PASTE-YOUR-TAILSCALE-AUTH-KEY-HERE
+  - path: /root/rv6m-setup.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      # Installs everything for the "ubuntu" user; log: /var/log/rv6m-setup.log
+      exec >> /var/log/rv6m-setup.log 2>&1
+      set -x
+      SRC=https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile
+      # The newest CUDA compiler first: Blackwell GPUs (RTX PRO 6000) need 12.8+ for the chat engine
+      as_user() { sudo -u ubuntu -H bash -lc "export PATH=/usr/local/cuda-12.8/bin:/usr/local/cuda/bin:\$HOME/.local/bin:\$PATH; $1"; }
+      apt-get update -qq
+      apt-get install -y -qq python3-venv tmux git curl mosh   # mosh: steady phone connections (Blink)
+      echo "== Tailscale (the phone's private link): name 'studio'"
+      curl -fsSL https://tailscale.com/install.sh | sh
+      set +x   # keep the auth key out of the log
+      tailscale up --auth-key="$(cat /root/tskey)" --hostname=studio && echo "Tailscale is up" || echo "STEP FAILED: Tailscale"
+      rm -f /root/tskey
+      set -x
+      v=$(/usr/local/cuda/bin/nvcc --version 2>/dev/null | grep -o 'release [0-9]*\.[0-9]*' | cut -d' ' -f2)
+      if [ -z "$v" ] || [ "$(printf '%s\n12.8\n' "$v" | sort -V | head -1)" != 12.8 ]; then
+        apt-get install -y -qq cuda-toolkit-12-8 || true
+      fi
+      echo "== Edit page + Lift";        as_user "bash <(curl -fsSL $SRC/setup.sh) lift" || echo "STEP FAILED: edit page"
+      echo "== MOSS";                    as_user "bash <(curl -fsSL $SRC/add-moss.sh)" || echo "STEP FAILED: MOSS"
+      # Chat on the GPU next to the image models: Q6 (about 23 GB), 64K memory
+      echo "== Chat";                    as_user "CHAT_DEVICE=gpu bash <(curl -fsSL $SRC/add-chat.sh)" || echo "STEP FAILED: chat"
+      echo "== Web search for the chat"; as_user "bash <(curl -fsSL $SRC/add-search.sh)" || echo "STEP FAILED: search"
+      echo "== Auto-start after boot";   as_user "bash <(curl -fsSL $SRC/add-autostart.sh)" || echo "STEP FAILED: auto-start"
+      echo RV6M-SETUP-DONE
+runcmd:
+  - [bash, /root/rv6m-setup.sh]

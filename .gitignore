@@ -31,6 +31,10 @@ pnpm-lock.yaml
 # Rust build artifacts
 src-tauri/target/
 
+# Python bytecode cache (e.g. tools/rv6-mobile/__init__.py when imported)
+__pycache__/
+*.pyc
+
 # Environment
 .env
 

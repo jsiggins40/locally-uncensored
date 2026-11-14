@@ -66,6 +66,8 @@ const STYLE = `
 #lf-sheet .lf-busy.on { display:grid; }
 #lf-sheet .lf-spin { width:28px; height:28px; border-radius:50%; border:3px solid rgba(255,255,255,.25); border-top-color:#fff; animation:lfspin .8s linear infinite; margin:0 auto 10px; }
 @keyframes lfspin { to { transform:rotate(360deg); } }
+#lf-cursor { position:absolute; border:2px solid #fff; border-radius:50%; box-shadow:0 0 0 1px rgba(0,0,0,.6); pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:1; }
+#lf-sheet .lf-photo.brushing #lf-base { cursor:none; touch-action:none; }
 #lf-status { min-height:1.4em; color:var(--muted,#999); margin-top:8px; font-size:14px; }
 #lf-status.err { color:var(--danger,#ff5a5a); }
 #lf-sel-actions { display:none; }
@@ -121,6 +123,7 @@ const MARKUP = `
       <div class="lf-photo" id="lf-photo">
         <canvas id="lf-base" aria-label="Photo: tap a person to lift them"></canvas>
         <canvas id="lf-overlay" aria-hidden="true"></canvas>
+        <div id="lf-cursor" aria-hidden="true"></div>
       </div>
       <div class="lf-busy" id="lf-busy"><div><div class="lf-spin"></div><span id="lf-busy-text">Working…</span></div></div>
     </div>
@@ -130,11 +133,20 @@ const MARKUP = `
           <button type="button" data-mode="new" class="on">New</button>
           <button type="button" data-mode="add">➕ Add</button>
           <button type="button" data-mode="sub">➖ Remove</button>
+          <button type="button" data-mode="keep">👤 Keep only</button>
         </div>
         <button type="button" id="lf-btn-all" style="flex:0 1 auto">👥 Everyone</button>
       </div>
+      <div class="lf-row">
+        <div class="lf-seg" role="group" aria-label="Fix the outline by hand">
+          <button type="button" data-mode="paint">🖌️ Paint in</button>
+          <button type="button" data-mode="erase">🧽 Erase</button>
+        </div>
+        <button type="button" id="lf-btn-undo" style="flex:0 1 auto" disabled>↩️ Undo</button>
+      </div>
+      <div class="lf-sl" id="lf-selbrush-row" hidden><span>Brush size</span><input type="range" id="lf-selbrush" min="4" max="80" step="1" value="18"></div>
       <div id="lf-status" role="status" aria-live="polite"></div>
-      <div class="hint" style="margin-top:4px">Tap a person: the whole person lifts. On a computer you can then drag them straight onto the new picture. <b>➕ Add</b> then tap more people to lift them together; <b>➖ Remove</b> then tap a stray bit to drop it. Tapping anything else (a dog, a bag) lifts that.</div>
+      <div class="hint" style="margin-top:4px">Tap a person: the whole person lifts (on a computer, drag them onto the new picture). <b>➕ Add</b> more people · <b>➖ Remove</b> one inside the outline · <b>👤 Keep only</b> the one you tap · <b>🖌️ Paint in</b> / <b>🧽 Erase</b> fix the outline with your finger. Two people stuck together? Erase a line between them, then Remove or Keep only. <b>↩️ Undo</b> takes back the last change.</div>
       <div id="lf-sel-actions">
         <div class="lf-row"><button type="button" class="primary" id="lf-btn-use" style="margin:0">✂️ Add to the new picture</button></div>
         <div class="lf-row" style="margin-top:6px"><button type="button" id="lf-btn-save">⬇️ Save cut-out</button><button type="button" id="lf-btn-clear">Clear</button></div>
@@ -184,7 +196,7 @@ const MARKUP = `
         <button type="button" id="lf-l-up">Forward</button>
         <button type="button" id="lf-l-down">Back</button>
         <button type="button" id="lf-l-dup">Copy</button>
-        <button type="button" id="lf-l-del">🗑️</button>
+        <button type="button" id="lf-l-del">🗑️ Delete</button>
       </div>
       <div class="lf-h" style="margin:12px 0 0;font-size:14px">Depth: paint which parts are in front</div>
       <div class="lf-seg" data-group="depth" style="margin-top:6px">
@@ -261,6 +273,7 @@ const el = {
   download: $('download'), useHint: $('use-hint'),
   brushRow: $('brush-row'), brush: $('brush'), depthHint: $('depth-hint'),
   turnBox: $('turn-box'), turnHint: $('turn-hint'),
+  undo: $('btn-undo'), selBrushRow: $('selbrush-row'), selBrush: $('selbrush'), cursor: $('cursor'),
   itemsOpen: $('items-open'), items: $('items'), itemsClose: $('items-close'), itemsCats: $('items-cats'),
   itemsSearch: $('items-search'), itemsStatus: $('items-status'), itemsGrid: $('items-grid'),
 };
@@ -579,6 +592,8 @@ async function openImage(img) {
   el.base.getContext('2d').drawImage(c, 0, 0);
   el.overlay.width = w; el.overlay.height = h;
   clearSelection();
+  undoStack.length = 0;
+  el.undo.disabled = true;
 
   el.drop.hidden = true;
   el.stage.hidden = false;
@@ -817,14 +832,14 @@ function samImage() {
   return sam.pending;
 }
 
-async function samMask(px, py) {
+async function samMask(px, py, { maxArea } = {}) {
   const name = await samImage();
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 120000);   // the first use loads SAM on the VM
   try {
     const r = await fetch('/rv6m/segment', {
       method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: name, points: [[px + 0.5, py + 0.5]], labels: [1], grow: 0, pick: 'largest' }),
+      body: JSON.stringify({ image: name, points: [[px + 0.5, py + 0.5]], labels: [1], grow: 0, pick: 'largest', ...(maxArea ? { max_area: maxArea } : {}) }),
     });
     if (!r.ok) throw Object.assign(new Error(`SAM failed (${r.status})`), { permanent: r.status === 404 });
     const bmp = await createImageBitmap(await r.blob());
@@ -906,7 +921,8 @@ async function onTap(e) {
   const ny = (e.clientY - r.top) / r.height;
   if (nx < 0 || ny < 0 || nx > 1 || ny > 1) return;
   const mode = e.shiftKey ? 'add' : e.altKey ? 'sub' : tapMode;
-  if (mode === 'sub' && !sel) return;
+  if (mode === 'paint' || mode === 'erase') return;          // brushes use the pointer events below
+  if ((mode === 'sub' || mode === 'keep') && !sel) { setStatus('Lift someone first, then tap the part to remove or keep.'); return; }
 
   working = true;
   setBusy('Lifting…');
@@ -914,6 +930,26 @@ async function onTap(e) {
   try {
     const px = Math.min(src.w - 1, Math.max(0, Math.floor(nx * src.w)));
     const py = Math.min(src.h - 1, Math.max(0, Math.floor(ny * src.h)));
+    if (mode === 'sub' || mode === 'keep') {
+      if (sel[py * src.w + px] <= 0.5) { setStatus('Tap inside the lifted outline (the bright part).'); return; }
+      const piece = await pieceAt(px, py);
+      if (!piece) {
+        setStatus("Couldn't tell them apart there. Use 🧽 Erase to draw a line between them, then tap again.", true);
+        return;
+      }
+      pushUndo();
+      if (mode === 'keep') {
+        setSelection(piece, true);
+        setStatus('Kept only that one. ↩️ Undo if it took the wrong part.');
+      } else {
+        const next = new Float32Array(sel.length);
+        for (let i = 0; i < sel.length; i++) next[i] = Math.max(0, sel[i] - piece[i]);
+        if (maskArea(next) < MIN_PIXELS) { clearSelection(); setStatus('Selection cleared. ↩️ Undo brings it back.'); return; }
+        setSelection(next, false);
+        setStatus('Removed. ↩️ Undo if it took the wrong part.');
+      }
+      return;
+    }
     const region = await liftAt(px, py);
     if (maskArea(region) < MIN_PIXELS) {
       setStatus('Nothing to lift there. Try tapping closer to the middle of the subject.');
@@ -923,15 +959,12 @@ async function onTap(e) {
     if (mode === 'add' && sel) {
       next = new Float32Array(sel.length);
       for (let i = 0; i < sel.length; i++) next[i] = Math.max(sel[i], region[i]);
-    } else if (mode === 'sub') {
-      next = new Float32Array(sel.length);
-      for (let i = 0; i < sel.length; i++) next[i] = sel[i] * (1 - region[i]);
     } else {
       next = region;
     }
-    if (maskArea(next) < MIN_PIXELS) { clearSelection(); setStatus('Selection cleared.'); return; }
-    setSelection(next, mode !== 'sub');
-    setStatus(mode === 'add' ? 'Added to the selection.' : mode === 'sub' ? 'Removed from the selection.' : 'Lifted.');
+    pushUndo();
+    setSelection(next, true);
+    setStatus(mode === 'add' ? 'Added to the selection.' : 'Lifted. Two people joined? 👤 Keep only, then tap the one you want.');
   } catch (err) {
     console.error(err);
     setStatus('Something went wrong while lifting. Try again.', true);
@@ -959,8 +992,9 @@ async function selectAllPeople() {
       for (let i = 0; i < all.length; i++) if (r[i] > all[i]) all[i] = r[i];
       count++;
     }
+    pushUndo();
     setSelection(all, true);
-    setStatus(count === 1 ? 'Lifted the person.' : `Lifted ${count} people.`);
+    setStatus(count === 1 ? 'Lifted the person.' : `Lifted ${count} people. To drop one: ➖ Remove, then tap them.`);
   } catch (err) {
     console.error(err);
     setStatus('Something went wrong while lifting. Try again.', true);
@@ -968,6 +1002,162 @@ async function selectAllPeople() {
     setBusy('');
     working = false;
   }
+}
+
+// ── Editing the outline: pieces, brushes, undo ───────────────────────────
+
+// The part of the selection under (px, py). If the selection is in separate
+// pieces (two people apart, or after an Erase line), that piece. Otherwise ask
+// SAM for the object under the finger, limited to clearly less than the whole
+// selection, so it answers with one person rather than the joined group.
+async function pieceAt(px, py) {
+  const { w, h } = src;
+  const total = maskArea(sel);
+  const island = islandAt(sel, px, py);
+  if (maskArea(island) < 0.97 * total) return island;
+  if (!sam.ok) return null;
+  let S;
+  try {
+    S = await samMask(px, py, { maxArea: Math.min(0.6, (0.85 * total) / (w * h)) });
+  } catch (err) {
+    if (err.permanent) sam.ok = false;
+    console.warn('[lift] SAM unavailable:', err.message);
+    return null;
+  }
+  if (S[py * w + px] < 0.5) return null;
+  const b = boxBlur(S, w, h, Math.max(2, Math.round(Math.max(w, h) / 300)));
+  const out = new Float32Array(sel.length);
+  for (let i = 0; i < out.length; i++) out[i] = Math.min(sel[i], clamp01(b[i] * 3));
+  const area = maskArea(out);
+  return area >= MIN_PIXELS && area <= 0.92 * total ? out : null;
+}
+
+// The connected piece of a mask at (px, py), with its soft edge.
+function islandAt(m, px, py) {
+  const { w, h } = src;
+  const bin = new Uint8Array(m.length);
+  for (let i = 0; i < m.length; i++) bin[i] = m[i] > 0.5 ? 1 : 0;
+  const comp = floodFill(bin, w, h, px, py);
+  const near = boxBlur(Float32Array.from(comp), w, h, 2);
+  const out = new Float32Array(m.length);
+  for (let i = 0; i < m.length; i++) if (near[i] > 0.01) out[i] = m[i];
+  return out;
+}
+
+// Undo: earlier selections, 8-bit to keep memory down (a 2048 px photo: 4 MB each)
+const undoStack = [];
+function pushUndo() {
+  undoStack.push(sel ? Uint8Array.from(sel, (v) => Math.round(v * 255)) : null);
+  if (undoStack.length > 8) undoStack.shift();
+  el.undo.disabled = false;
+}
+function undoOnce() {
+  if (working || stroke || !undoStack.length) return;
+  const prev = undoStack.pop();
+  if (prev) setSelection(Float32Array.from(prev, (v) => v / 255), false);
+  else clearSelection();
+  el.undo.disabled = !undoStack.length;
+  setStatus('Undone.');
+}
+
+const isBrush = () => tapMode === 'paint' || tapMode === 'erase';
+let stroke = null;   // { last, rad, add, id } while a finger or mouse paints
+
+function imgPoint(e) {
+  const r = el.base.getBoundingClientRect();
+  return { x: ((e.clientX - r.left) / r.width) * src.w, y: ((e.clientY - r.top) / r.height) * src.h };
+}
+function showCursor(e) {
+  if (!isBrush() || !src.canvas) { el.cursor.style.display = 'none'; return; }
+  const r = el.photo.getBoundingClientRect();
+  const d = 2 * +el.selBrush.value;
+  Object.assign(el.cursor.style, { display: 'block', width: d + 'px', height: d + 'px',
+    left: e.clientX - r.left + 'px', top: e.clientY - r.top + 'px' });
+}
+
+// One dab of the brush: a solid middle with a soft rim. The overlay gets the
+// same change right away; the exact cut-out is redrawn when the stroke ends.
+function dab(cx, cy, rad, add) {
+  const { w, h } = src;
+  const x0 = Math.max(0, Math.floor(cx - rad)), x1 = Math.min(w - 1, Math.ceil(cx + rad));
+  const y0 = Math.max(0, Math.floor(cy - rad)), y1 = Math.min(h - 1, Math.ceil(cy + rad));
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const t = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) / rad;
+      if (t >= 1) continue;
+      const v = t < 0.7 ? 1 : (1 - t) / 0.3;
+      const i = y * w + x;
+      sel[i] = add ? Math.max(sel[i], v) : Math.min(sel[i], 1 - v);
+    }
+  }
+  const ctx = el.overlay.getContext('2d');
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+  if (add) { ctx.clip(); ctx.drawImage(src.canvas, 0, 0); }
+  else { ctx.globalCompositeOperation = 'destination-out'; ctx.fill(); }
+  ctx.restore();
+}
+function strokeTo(p) {
+  const { last, rad, add } = stroke;
+  const n = Math.max(1, Math.ceil(Math.hypot(p.x - last.x, p.y - last.y) / (rad * 0.3)));
+  for (let k = 1; k <= n; k++) dab(last.x + ((p.x - last.x) * k) / n, last.y + ((p.y - last.y) * k) / n, rad, add);
+  stroke.last = p;
+}
+
+function brushDown(e) {
+  if (!isBrush() || !src.canvas || working || e.button > 0) return;
+  e.preventDefault();
+  const add = tapMode === 'paint';
+  if (!add && !sel) { setStatus('Nothing to erase yet: lift someone first.'); return; }
+  pushUndo();
+  if (!sel) {
+    sel = new Float32Array(src.w * src.h);
+    el.photo.classList.add('has-sel');
+    el.actions.classList.add('on');
+    el.overlay.getContext('2d').clearRect(0, 0, src.w, src.h);
+  }
+  cancelAnimationFrame(animId);             // stop the shimmer; the overlay now shows the plain cut-out
+  if (refined) { const c = refined.cut, ctx = el.overlay.getContext('2d'); ctx.clearRect(0, 0, src.w, src.h); ctx.drawImage(c.canvas, c.x0, c.y0); }
+  try { el.base.setPointerCapture(e.pointerId); } catch {}
+  const r = el.base.getBoundingClientRect();
+  const p = imgPoint(e);
+  stroke = { last: p, rad: Math.max(1, (+el.selBrush.value * src.w) / r.width), add, id: e.pointerId };
+  dab(p.x, p.y, stroke.rad, add);
+  showCursor(e);
+}
+function brushMove(e) {
+  showCursor(e);
+  if (stroke && e.pointerId === stroke.id) { e.preventDefault(); strokeTo(imgPoint(e)); }
+}
+function brushUp(e) {
+  if (!stroke || e.pointerId !== stroke.id) return;
+  const add = stroke.add;
+  stroke = null;
+  if (e.pointerType !== 'mouse') el.cursor.style.display = 'none';
+  selVersion++;
+  refined = null;
+  if (maskArea(sel) < MIN_PIXELS) { clearSelection(); setStatus('Selection cleared. ↩️ Undo brings it back.'); return; }
+  drawSelection(false);
+  setStatus(add ? 'Painted in.' : 'Erased. Split two people? Now ➖ Remove or 👤 Keep only, and tap one.');
+}
+
+const MODE_TIPS = {
+  new: 'Tap a person to lift them.',
+  add: 'Tap more people or missed parts to add them.',
+  sub: 'Tap a person or a stray bit inside the outline to remove it.',
+  keep: 'Two people lifted as one? Tap the one you want to keep.',
+  paint: 'Paint over parts the outline missed (hair, a hand, a bag).',
+  erase: "Erase what shouldn't be there. To split joined people, draw a line between them.",
+};
+function applyTapMode() {
+  const brush = isBrush();
+  el.selBrushRow.hidden = !brush;
+  el.photo.classList.toggle('brushing', brush);
+  el.base.draggable = !brush;
+  if (!brush) el.cursor.style.display = 'none';
+  if (src.canvas && models) setStatus(MODE_TIPS[tapMode] || '');
+  syncRanges();
 }
 
 function setSelection(mask, shimmer) {
@@ -2052,13 +2242,28 @@ el.main.addEventListener('click', () => { if (opts.photo) useMainPhoto(); });
 
 el.base.addEventListener('click', onTap);
 el.all.addEventListener('click', selectAllPeople);
-el.clear.addEventListener('click', () => { clearSelection(); setStatus('Tap a person to lift them.'); });
+el.clear.addEventListener('click', () => { if (sel) pushUndo(); clearSelection(); setStatus('Tap a person to lift them. ↩️ Undo brings the last one back.'); });
+el.undo.addEventListener('click', undoOnce);
+el.base.addEventListener('pointerdown', brushDown);
+el.base.addEventListener('pointermove', brushMove);
+el.base.addEventListener('pointerup', brushUp);
+el.base.addEventListener('pointercancel', brushUp);
+el.base.addEventListener('pointerleave', (e) => { if (!stroke && e.pointerType === 'mouse') el.cursor.style.display = 'none'; });
+el.selBrush.addEventListener('input', () => { if (el.cursor.style.display === 'block') { const d = 2 * +el.selBrush.value; el.cursor.style.width = el.cursor.style.height = d + 'px'; } });
 
 const tapButtons = sheet.querySelectorAll('.lf-seg[role=group] button');
 tapButtons.forEach((b) => b.addEventListener('click', () => {
   tapMode = b.dataset.mode;
   tapButtons.forEach((x) => x.classList.toggle('on', x === b));
+  applyTapMode();
 }));
+document.addEventListener('keydown', (e) => {
+  if (sheet.hidden || !(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z' || comp.selected) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  e.preventDefault();
+  undoOnce();
+});
 
 let refineTimer = 0;
 for (const r of [el.feather, el.grow]) {
@@ -2163,4 +2368,4 @@ export function openLift(o = {}) {
 }
 
 // For automated tests
-window.__lift = { comp, src, get sel() { return sel; }, get models() { return models; } };
+window.__lift = { comp, src, get sel() { return sel; }, get models() { return models; }, undoStack };

@@ -5,6 +5,9 @@
 # own nodes (no custom nodes). Gets Comfy-Org's ComfyUI files, tests a picture
 # on the GPU, then updates the page: "Krea 2 Turbo" appears under Create model.
 # Krea 2 ships under the Krea 2 Community License (https://www.krea.ai/krea-2-licensing).
+# Also gets Krea2-realism V2 (1.6 GB), a community LoRA for realistic skin and
+# anatomy that its author says does NSFW at strength 1.5-2.0: the page's
+# "🔓 Uncensored" switch for Krea 2 uses it at 1.5. Skip it with KREA_NO_NSFW=1.
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-krea2.sh)
 set -euo pipefail
 cd "$HOME/ComfyUI"
@@ -24,8 +27,8 @@ if ! grep -q "krea2" comfy/supported_models.py 2>/dev/null; then
 fi
 grep -q "krea2" comfy/supported_models.py || { echo "This ComfyUI can't run Krea 2 even after updating; stopping."; exit 1; }
 
-venv/bin/python - <<'PY'
-import os, shutil, sys
+KREA_NO_NSFW="${KREA_NO_NSFW:-}" venv/bin/python - <<'PY'
+import hashlib, os, shutil, sys
 from huggingface_hub import HfApi, hf_hub_download
 free = shutil.disk_usage(os.path.realpath("models")).free / 1e9
 print(f"== Free disk: {free:.0f} GB")
@@ -64,6 +67,25 @@ if vae:
     fetch(vae[0], "vae", ["krea", "qwen_image_vae"])
 elif not any("qwen_image_vae" in f for f in os.listdir("models/vae")):
     sys.exit(f"{R} has no VAE and the Qwen-Image VAE isn't installed (add-edit-model.sh has it).")
+if not os.environ.get("KREA_NO_NSFW"):
+    # Krea2-realism V2 by rudysen; this copy (cusiman's) is the one on Hugging Face.
+    # Pinned to the file that was checked when it was added here.
+    dest = "models/loras/krea2_realism_v2.safetensors"
+    if os.path.exists(dest) and os.path.getsize(dest) > 0:
+        print("   already have", dest)
+    else:
+        print("== Krea2-realism V2 LoRA (uncensored switch, 1.6 GB)")
+        tmp = hf_hub_download("cusiman/Krea2-realism-V2", "Krea2-realism-V2.safetensors", local_dir="models/_hf_tmp")
+        h = hashlib.sha256()
+        with open(tmp, "rb") as f:
+            for b in iter(lambda: f.read(1 << 20), b""): h.update(b)
+        if h.hexdigest() != "fb0048ce3340adc2842ccfcc1a9a61a9773b6628b01ae5a2e139ca9c679e715d":
+            os.remove(tmp)
+            print("   the LoRA file has changed since it was checked; not installed (Krea 2 still works)")
+        else:
+            os.makedirs("models/loras", exist_ok=True)
+            shutil.move(tmp, dest)
+            print("   installed", dest)
 shutil.rmtree("models/_hf_tmp", ignore_errors=True)
 PY
 
@@ -124,9 +146,38 @@ if not ok:
     shutil.move(os.path.join("models/diffusion_models", unet), os.path.join("models/_disabled", os.path.basename(unet)))
     raise SystemExit(f"Krea 2 failed its test; moved {unet} to models/_disabled so the page won't offer it.")
 print("The test picture is in ComfyUI's output folder (rv6m_krea_test_*).")
+lora = next((n for n in opts("LoraLoaderModelOnly", "lora_name") if re.search(r"krea2.?realism", n, re.I)), None)
+if lora:
+    p["18"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": lora, "strength_model": 1.5}}
+    p["7"]["inputs"]["model"] = ["18", 0]
+    p["9"]["inputs"]["filename_prefix"] = "rv6m_krea_lora_test"
+    ok = False
+    req = urllib.request.Request("http://127.0.0.1:8188/api/prompt", json.dumps({"prompt": p}).encode(), {"Content-Type": "application/json"})
+    try:
+        pid = json.load(urllib.request.urlopen(req))["prompt_id"]
+    except urllib.error.HTTPError as e:
+        print("KREA 2 + LORA TEST REJECTED:", e.read().decode()[:600]); pid = None
+    t = time.time()
+    while pid and time.time() - t < 600:
+        h = get("/api/history/" + pid)
+        if pid in h:
+            s = h[pid]["status"]
+            print("KREA 2 + UNCENSORED LORA TEST:", s["status_str"], f"in {time.time() - t:.0f}s")
+            imgs = [i for o in h[pid]["outputs"].values() for i in o.get("images", [])]
+            if s["status_str"] == "success" and imgs:
+                im = Image.open(os.path.join("output", imgs[0].get("subfolder", ""), imgs[0]["filename"])).convert("RGB")
+                r, g, b = [sum(c) / len(c) for c in zip(*im.resize((32, 32)).getdata())]
+                ok = not (max(r, g, b) < 8 or min(r, g, b) > 247)
+            break
+        time.sleep(2)
+    if not ok:
+        os.makedirs("models/_disabled", exist_ok=True)
+        shutil.move(os.path.join("models/loras", lora), os.path.join("models/_disabled", os.path.basename(lora)))
+        print(f"   the LoRA failed its test; moved {lora} to models/_disabled (Krea 2 itself works)")
 PY
 
 echo "== Updating the page"
 restart
 echo
-echo "Done. Reload the edit page: Create mode → Create model → Krea 2 Turbo (8 steps)."
+echo "Done. Reload the edit page: Create mode → Create model → Krea 2 Turbo (8 steps);"
+echo "its 🔓 Uncensored switch is under the Create model buttons."

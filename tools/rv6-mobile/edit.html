@@ -223,6 +223,11 @@
     <div class="seg"><button id="mmSafe">Safe</button><button id="mmUnc">🔞 Uncensored</button><button id="mmLora" class="hidden">🔞 + LoRA</button></div>
     <div class="hint" id="mossHint"></div>
   </div>
+  <div id="kreaBox" class="hidden">
+    <label>Krea 2 content</label>
+    <div class="seg"><button id="kcStd">Standard</button><button id="kcUnc">🔓 Uncensored</button></div>
+    <div class="hint" id="kreaContentHint"></div>
+  </div>
   <label for="res">Output size (long side)</label>
   <select id="res">
     <option value="768">768 px (fastest)</option>
@@ -518,7 +523,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-15b';
+const PAGE_BUILD = '2026-11-15c';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -680,9 +685,11 @@ const mossEdit = () => !!(moss && moss.edit) && (mode === 'instruct'
   ? editModel === 'moss' || (!qwen && !q21 && !(krea && krea.edit))
   : mode === 'mask' && !fixMask() && (editModel === 'moss' || !qwen));
 const mossLora = () => mossMode === 'lora' && moss && moss.nsfw ? moss.nsfw : null;
-// Krea 2 Turbo (add-krea2.sh): another Create model, 8 steps at CFG 1
-let krea = null;
+// Krea 2 Turbo (add-krea2.sh): another Create model, 8 steps at CFG 1. Its 🔓 Uncensored
+// switch adds the Krea2-realism LoRA at 1.5 (its author: NSFW from 1.5 to 2.0)
+let krea = null, kreaMode = recall('kreaMode') || 'uncensored';
 const kreaActive = () => !!krea && mode === 'create' && !mossActive() && (createModel === 'krea' || (!create && !q21));
+const kreaNsfw = () => kreaActive() && kreaMode === 'uncensored' && krea.nsfw ? krea.nsfw : null;
 // Krea 2 editing: Describe edit only, one photo (Selected area uses the Qwen editors)
 let kreaPick = recall('kreaPick') || 'general';
 const kreaEdit = () => !!(krea && krea.edit) && mode === 'instruct' && editModel === 'krea';
@@ -930,12 +937,13 @@ async function info(node) {
   const kVae = vaes.filter(n => /krea/i.test(n)).sort().pop() || vaes.filter(n => /qwen_image_vae/i.test(n)).sort().pop();
   const clipTypes = (((clip.CLIPLoader || {}).input || {}).required || {}).type;
   if (kUnet && kClip && kVae && JSON.stringify(clipTypes || '').includes('krea2')) {
-    krea = { unet: kUnet, clip: kClip, vae: kVae, edit: null };
+    krea = { unet: kUnet, clip: kClip, vae: kVae, edit: null, nsfw: null };
     $('modeCreate').classList.remove('hidden');
     // ✏️ Krea 2 editing (add-krea2-edit.sh): the krea2edit nodes + General / Identity Edit LoRAs
     const kl = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name');
     const kGen = kl.filter(n => /krea2.*general.?edit/i.test(n)).sort().pop(), kId = kl.filter(n => /krea2.*identity.?edit/i.test(n)).sort().pop();
     if (k2edit.Krea2EditGroundedEncode && (kGen || kId)) { krea.edit = { general: kGen || null, identity: kId || null }; $('emKrea').classList.remove('hidden'); }
+    krea.nsfw = kl.filter(n => /krea2.?realism/i.test(n)).sort().pop() || null;   // v2 sorts after v1
   }
   // MOSS-Image (add-moss.sh): ComfyUI's own nodes, CLIPLoader type "moss_image"
   const mUnet = units.filter(n => /moss_image/i.test(n)).sort((a, b) => /sft/i.test(a) - /sft/i.test(b) || /bf16/i.test(a) - /bf16/i.test(b)).pop();
@@ -1123,6 +1131,7 @@ function applyQ21() {
   const kr = kreaActive(), mo = mossActive();
   $('cmQ2512').classList.toggle('on', !kr && !mo && createModel !== 'q21'); $('cmQ21').classList.toggle('on', !kr && !mo && createModel === 'q21');
   $('cmKrea').classList.toggle('on', kr); $('kreaHint').classList.toggle('hidden', !kr);
+  applyKreaBox();
   $('cmMoss').classList.toggle('on', mo);
   if (kr) { setVal($('steps'), 8); setVal($('cfg'), 1); }
   if (mo) { setVal($('steps'), 25); setVal($('cfg'), 2.5); }
@@ -1148,6 +1157,17 @@ $('cmQ2512').onclick = () => { createModel = '2512'; store('createModel', create
 $('cmQ21').onclick = () => { createModel = 'q21'; store('createModel', createModel); setMode(mode); };
 $('cmKrea').onclick = () => { createModel = 'krea'; store('createModel', createModel); setMode(mode); };
 $('cmMoss').onclick = () => { createModel = 'moss'; store('createModel', createModel); setMode(mode); };
+function applyKreaBox() {
+  const on = kreaActive() && !!krea.nsfw;
+  $('kreaBox').classList.toggle('hidden', !on);
+  if (!on) return;
+  $('kcStd').classList.toggle('on', kreaMode !== 'uncensored'); $('kcUnc').classList.toggle('on', kreaMode === 'uncensored');
+  $('kreaContentHint').textContent = kreaMode === 'uncensored'
+    ? 'Uncensored: adds the Krea2-realism LoRA (realistic skin and anatomy; its author says it does NSFW). Describe the scene in 4-5 sentences for the best results.'
+    : 'Standard: Krea 2 as it ships.';
+}
+$('kcStd').onclick = () => { kreaMode = 'standard'; store('kreaMode', kreaMode); applyKreaBox(); };
+$('kcUnc').onclick = () => { kreaMode = 'uncensored'; store('kreaMode', kreaMode); applyKreaBox(); };
 for (const [id, m] of [['mmSafe', 'safe'], ['mmUnc', 'uncensored'], ['mmLora', 'lora']])
   $(id).onclick = () => { mossMode = m; store('mossMode', m); applyMossBox(); };
 $('emMoss').onclick = () => { editModel = 'moss'; store('editModel', editModel); setMode(mode); };
@@ -1687,8 +1707,8 @@ function buildMossEditWorkflow(imgNames, text, seed, steps, cfg, nsfwLora, safe,
 }
 // Krea 2 Turbo: ComfyUI's own nodes (CLIPLoader type "krea2" = its Qwen3-VL-4B
 // encoder); 8 steps at CFG 1, so the negative is just an empty conditioning
-function buildKreaWorkflow(text, seed, steps, w, h) {
-  return {
+function buildKreaWorkflow(text, seed, steps, w, h, nsfwLora) {
+  const p = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: krea.unet, weight_dtype: 'default' } },
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: krea.clip, type: 'krea2' } },
     '13': { class_type: 'VAELoader', inputs: { vae_name: krea.vae } },
@@ -1700,6 +1720,11 @@ function buildKreaWorkflow(text, seed, steps, w, h) {
     '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
   };
+  if (nsfwLora) {
+    p['18'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: nsfwLora, strength_model: 1.5 } };
+    p['7'].inputs.model = ['18', 0];
+  }
+  return p;
 }
 // Krea 2 editing (comfyui-krea2edit): the photo goes in twice, as clean picture tokens
 // (Krea2EditModelPatch: appearance) and to the text encoder with the instruction
@@ -2726,7 +2751,7 @@ $('go').onclick = async () => {
                                 mossLora(), mossMode === 'safe', maskName);
     } else if (kreaActive()) {
       const [w, h] = createDims();
-      p = buildKreaWorkflow($('prompt').value.trim(), seed, +$('steps').value || 8, w, h);
+      p = buildKreaWorkflow($('prompt').value.trim(), seed, +$('steps').value || 8, w, h, kreaNsfw());
     } else if (q21Active()) {
       const names = [];
       if (mode === 'instruct') for (const [i, c] of usedMore().entries()) names.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
@@ -3102,7 +3127,7 @@ async function waitForJobs(ids, t0) {
         const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
           : mossActive() ? `MOSS-Image · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps · ${createDims().join('×')}`
           : mossEdit() ? `MOSS Edit ${moss.edit.name} · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps` + (mode === 'mask' ? ' · selected area' : hasSecond() ? ` · ${1 + usedMore().length} photos` : '')
-          : kreaActive() ? `Krea 2 Turbo · ${$('steps').value} steps · ${createDims().join('×')}`
+          : kreaActive() ? `Krea 2 Turbo${kreaNsfw() ? ' · uncensored' : ''} · ${$('steps').value} steps · ${createDims().join('×')}`
           : kreaEdit() ? `Krea 2 ${kreaLora() === krea.edit.identity ? 'Restage' : 'Edit'} · ${$('steps').value} steps · ${kreaEditDims().join('×')}`
           : q21Active() ? `Qwen 2.1${q21Turbo() ? ' Turbo' : q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
             (mode === 'create' ? createDims().join('×') : (editOutDims() || [base.width, base.height]).join('×')) + (ablActive() ? ' · 🔓 encoder' : '') +

@@ -986,11 +986,21 @@ async function selectAllPeople() {
     const all = new Float32Array(w * h);
     let count = 0;
     for (const s of seeds) {
-      if (all[s.y * w + s.x] > 0.5) continue;      // already covered by an earlier lift
-      let r = await liftAt(s.x, s.y);
-      if (maskArea(r) < MIN_PIXELS) r = s.soft;
-      for (let i = 0; i < all.length; i++) if (r[i] > all[i]) all[i] = r[i];
-      count++;
+      // People who touch come out of the person model as one shape, and one
+      // lift keeps only the person tapped: lift again wherever a solid part of
+      // the shape is still left over, so nobody who belongs is left out
+      let at = { x: s.x, y: s.y };
+      for (let round = 0; round < 6 && at; round++) {
+        if (all[at.y * w + at.x] <= 0.5) {
+          let r = await liftAt(at.x, at.y);
+          if (maskArea(r) < MIN_PIXELS) r = round === 0 ? s.soft : null;
+          if (r) {
+            for (let i = 0; i < all.length; i++) if (r[i] > all[i]) all[i] = r[i];
+            count++;
+          }
+        }
+        at = leftOver(s.soft, all, s.area);
+      }
     }
     pushUndo();
     setSelection(all, true);
@@ -1158,6 +1168,21 @@ function applyTapMode() {
   if (!brush) el.cursor.style.display = 'none';
   if (src.canvas && models) setStatus(MODE_TIPS[tapMode] || '');
   syncRanges();
+}
+
+// The middle of the biggest solid part of a person shape that no lift covers
+// yet, or null when only edge slivers are left (the person model's outline is
+// rougher than a lift's, so a thin rim is always left over).
+function leftOver(shape, covered, shapeArea) {
+  const { w, h } = src;
+  const rest = new Float32Array(shape.length);
+  let area = 0;
+  for (let i = 0; i < rest.length; i++) if (shape[i] > 0.5 && covered[i] <= 0.5) { rest[i] = 1; area++; }
+  if (area < Math.max(shapeArea * 0.1, w * h * 0.002)) return null;
+  const solid = boxBlur(rest, w, h, Math.max(3, Math.round(Math.max(w, h) / 50)));
+  let best = -1, bestV = 0.7;
+  for (let i = 0; i < solid.length; i++) if (rest[i] && solid[i] > bestV) { bestV = solid[i]; best = i; }
+  return best < 0 ? null : { x: best % w, y: (best / w) | 0 };
 }
 
 function setSelection(mask, shimmer) {

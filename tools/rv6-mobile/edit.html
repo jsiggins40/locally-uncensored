@@ -361,7 +361,7 @@
   <div id="q21Box" class="hidden">
     <div id="q21PickRow">
       <label>Qwen 2.1 version</label>
-      <div class="seg"><button id="q21Noct">🔓 Noct Q uncensored</button><button id="q21Off">Official</button><button id="q21Turbo" class="hidden">⚡ Turbo</button></div>
+      <div class="seg"><button id="q21Noct">🔓 Noct Q uncensored</button><button id="q21Omni" class="hidden">🔞 Omni</button><button id="q21Off">Official</button><button id="q21Turbo" class="hidden">⚡ Turbo</button></div>
       <div class="hint" id="q21Hint"></div>
     </div>
     <div id="q21CfgBox">
@@ -523,7 +523,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-15c';
+const PAGE_BUILD = '2026-11-15d';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -697,7 +697,9 @@ const kreaLora = () => krea.edit[kreaPick === 'identity' && krea.edit.identity ?
 const q21Active = () => !!q21 && (mode === 'create' ? (createModel === 'q21' || !create) && !kreaActive() && !mossActive()
   : (mode === 'instruct' || qwenMask()) && !kreaEdit() && !mossEdit() && (editModel === 'q21' || !qwen || (editModel === 'krea' && !aioCkpt)));
 const q21Turbo = () => !!(q21 && q21.turbo && q21Pick === 'turbo');
-const q21Unet = () => (q21Pick === 'noct' && q21.noct) || (q21Turbo() && q21.turbo.unet) || q21.unet || q21.noct;
+const q21Unet = () => (q21Pick === 'noct' && q21.noct) || (q21Pick === 'omni' && q21.omni) || (q21Turbo() && q21.turbo.unet) || q21.unet || q21.noct || q21.omni;
+// chatrlabs Uncensored Omni: their settings are 35 steps, CFG 5, er_sde / simple, a one-space negative
+const q21Omni = () => !q21Turbo() && !!q21.omni && q21Unet() === q21.omni;
 // Qwen-Image 2.1 Turbo: 8 steps at CFG 1 on the schedule it was distilled for
 // (Qwen's sample_sigmas, terminal 0 added); other schedules weren't evaluated
 const Q21_TURBO_SIGMAS = '1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0';
@@ -891,6 +893,7 @@ async function info(node) {
   const t = {
     unet: units.filter(n => /qwen_image_2\.1/i.test(n) && !/noct|uncensor|turbo/i.test(n)).sort(bf16Last).pop() || null,
     noct: units.filter(n => /noct/i.test(n)).sort().pop() || null,
+    omni: units.filter(n => /omni/i.test(n) && /q21|qwen.?image.?2\.1/i.test(n)).sort().pop() || null,   // chatrlabs Uncensored Omni
     clip: clips.filter(n => /qwen3vl_8b/i.test(n) && !/heretic|abliterat|uncensor/i.test(n)).sort(bf16Last).pop(),
     clipAbl: clips.filter(n => /heretic|abliterat|uncensor/i.test(n) && /qwen3vl|qwen_image_2\.1|2\.1/i.test(n)).sort().pop() || null,
     vae: optionsOf(vae, 'VAELoader', 'vae_name').filter(n => /qwen_image_2\.1_vae/i.test(n)).sort().pop(),
@@ -925,7 +928,7 @@ async function info(node) {
     vae: optionsOf(vae, 'VAELoader', 'vae_name').filter(n => /seedvr2/i.test(n)).sort().pop(),
   };
   if (svr.SeedVR2Conditioning && u.unet && u.vae) { upscaler = u; $('upLookRow').classList.toggle('hidden', !u.sharp); showUpBox(); }
-  if ((t.unet || t.noct) && t.clip && t.vae && q21enc.TextEncodeQwenImage21) {
+  if ((t.unet || t.noct || t.omni) && t.clip && t.vae && q21enc.TextEncodeQwenImage21) {
     q21 = t;
     $('modeCreate').classList.remove('hidden');
     $('emQ21').classList.remove('hidden');
@@ -1094,6 +1097,7 @@ function applyEditModel() {
   if (editModel === 'aio' && !aioCkpt) editModel = 'qwen';
   if (editModel === 'krea' && !(krea && krea.edit)) editModel = aioCkpt ? 'aio' : q21 ? 'q21' : 'qwen';
   if (editModel === 'moss' && !(moss && moss.edit)) editModel = aioCkpt ? 'aio' : q21 ? 'q21' : 'qwen';
+  if (editModel === 'qwen' && !qwen) editModel = q21 ? 'q21' : moss && moss.edit ? 'moss' : 'qwen';   // no Qwen 2511 here
   const me = mossEdit();
   $('emMoss').classList.toggle('on', me); $('emMoss').classList.toggle('hidden', !(moss && moss.edit) || (mode !== 'instruct' && mode !== 'mask'));
   if (me) {
@@ -1139,18 +1143,22 @@ function applyQ21() {
   const on = q21Active();
   $('q21Box').classList.toggle('hidden', !on);
   if (!on) return;
-  $('q21PickRow').classList.toggle('hidden', [q21.noct, q21.unet, q21.turbo].filter(Boolean).length < 2);
+  $('q21PickRow').classList.toggle('hidden', [q21.noct, q21.unet, q21.turbo, q21.omni].filter(Boolean).length < 2);
   $('q21Noct').classList.toggle('hidden', !q21.noct); $('q21Off').classList.toggle('hidden', !q21.unet); $('q21Turbo').classList.toggle('hidden', !q21.turbo);
+  $('q21Omni').classList.toggle('hidden', !q21.omni);
   showQ21Cfg();
-  const turbo = q21Turbo(), noct = !turbo && q21Unet() === q21.noct;
-  $('q21Noct').classList.toggle('on', noct); $('q21Off').classList.toggle('on', !noct && !turbo); $('q21Turbo').classList.toggle('on', turbo);
+  const turbo = q21Turbo(), omni = q21Omni(), noct = !turbo && !omni && q21Unet() === q21.noct;
+  $('q21Noct').classList.toggle('on', noct); $('q21Off').classList.toggle('on', !noct && !turbo && !omni); $('q21Turbo').classList.toggle('on', turbo);
+  $('q21Omni').classList.toggle('on', omni);
   $('q21CfgBox').classList.toggle('hidden', turbo);
-  $('q21Hint').textContent = turbo
+  $('q21Hint').textContent = omni
+    ? 'Omni (chatrlabs): Qwen 2.1 with an uncensored adapter merged in. Their tests: follows explicit prompts a little better than Official (89.7 vs 85.1), same anatomy and normal-prompt quality. 35 steps at prompt strength 5, so about 2× slower.'
+    : turbo
     ? 'Turbo: official Qwen 2.1 made for 8 steps, about 3× faster. A little less fine detail than Official; prompt strength is fixed (it\'s built for CFG 1).'
     : noct
     ? 'Noct Q: community fine-tune that renders explicit scenes as asked far more often. Its author recommends prompt strength 3. Compare with Official if quality looks off.'
     : 'Official Qwen 2.1: already loose on NSFW; the best general image quality.';
-  if (on) { setVal($('steps'), turbo ? 8 : 25); setVal($('cfg'), 1); }
+  if (on) { setVal($('steps'), turbo ? 8 : omni ? 35 : 25); setVal($('cfg'), 1); }
 }
 $('emQ21').onclick = () => { editModel = 'q21'; store('editModel', editModel); setMode(mode); };
 $('cmQ2512').onclick = () => { createModel = '2512'; store('createModel', createModel); setMode(mode); };
@@ -1190,6 +1198,7 @@ function applyMossBox() {
 }
 $('q21Noct').onclick = () => { q21Pick = 'noct'; store('q21Pick', q21Pick); applyQ21(); };
 $('q21Off').onclick = () => { q21Pick = 'official'; store('q21Pick', q21Pick); applyQ21(); };
+$('q21Omni').onclick = () => { q21Pick = 'omni'; store('q21Pick', q21Pick); applyQ21(); };
 $('q21Turbo').onclick = () => { q21Pick = 'turbo'; store('q21Pick', q21Pick); applyQ21(); };
 $('emKrea').onclick = () => { editModel = 'krea'; store('editModel', editModel); setMode(mode); };
 $('kpGeneral').onclick = () => { kreaPick = 'general'; store('kreaPick', kreaPick); applyEditModel(); };
@@ -1200,7 +1209,7 @@ const speedLora = () => q21Active() || kreaActive() || kreaEdit() || mossActive(
 function fastActive() { return !!speedLora() && !quality; }
 function applySpeed() {
   const cr = mode === 'create';
-  if (q21Active()) { setVal($('steps'), q21Turbo() ? 8 : 25); setVal($('cfg'), 1); return; }  // Qwen's own 2.1 settings
+  if (q21Active()) { setVal($('steps'), q21Turbo() ? 8 : q21Omni() ? 35 : 25); setVal($('cfg'), 1); return; }  // Qwen's own 2.1 settings
   if (kreaActive() || kreaEdit()) { setVal($('steps'), 8); setVal($('cfg'), 1); return; }  // Krea 2 Turbo: 8 steps, CFG 1
   if (mossActive()) { setVal($('steps'), 25); setVal($('cfg'), 2.5); return; }  // MOSS-Image: Comfy's template settings
   if (mossEdit()) { setVal($('steps'), moss.edit.steps); setVal($('cfg'), moss.edit.cfg); return; }
@@ -1616,9 +1625,9 @@ function buildVideoWorkflow(imgName, text, seed) {
 // are CFG 3 with a negative prompt (at CFG 1 it barely follows the instruction)
 const Q21_NEG = 'blurry, low quality, distorted, deformed, bad anatomy, extra limbs, extra fingers, watermark, text';
 // "Follow the prompt" slider, remembered per version (defaults: Noct Q 3, Official 1)
-const q21Key = () => 'q21cfg_' + (q21Unet() === q21.noct ? 'noct' : 'official');
+const q21Key = () => 'q21cfg_' + (q21Omni() ? 'omni' : q21Unet() === q21.noct ? 'noct' : 'official');
 const q21Cfg = () => q21Turbo() ? 1 : +$('q21cfg').value || 1;
-function showQ21Cfg() { setVal($('q21cfg'), +(recall(q21Key()) || (q21Unet() === q21.noct ? 3 : 1))); }
+function showQ21Cfg() { setVal($('q21cfg'), +(recall(q21Key()) || (q21Omni() ? 5 : q21Unet() === q21.noct ? 3 : 1))); }
 $('q21cfg').addEventListener('input', () => store(q21Key(), $('q21cfg').value));
 for (const b of document.querySelectorAll('button.step[data-for=q21cfg]')) b.addEventListener('pointerup', () => store(q21Key(), $('q21cfg').value));
 // MOSS-Image: ComfyUI's own nodes, as in Comfy-Org's text-to-image template
@@ -1760,9 +1769,9 @@ function buildQ21Workflow(text, seed, steps, imgNames = [], w = 1024, h = 1024, 
     '1': { class_type: 'UNETLoader', inputs: { unet_name: q21Unet(), weight_dtype: 'default' } },
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: activeClip(q21), type: 'qwen_image' } },
     '13': { class_type: 'VAELoader', inputs: { vae_name: q21.vae } },
-    '3': { class_type: 'TextEncodeQwenImage21', inputs: { clip: ['2', 0], prompt: text, negative_prompt: cfg > 1 ? Q21_NEG : '', vae: ['13', 0], resolution: edit ? 0 : 1024 } },
+    '3': { class_type: 'TextEncodeQwenImage21', inputs: { clip: ['2', 0], prompt: text, negative_prompt: cfg > 1 ? (q21Omni() ? ' ' : Q21_NEG) : '', vae: ['13', 0], resolution: edit ? 0 : 1024 } },
     '7': { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['3', 0], negative: ['3', 1], latent_image: edit ? ['3', 2] : ['6', 0],
-                                              seed, steps, cfg, sampler_name: 'euler', scheduler: 'simple', denoise: 1 } },
+                                              seed, steps, cfg, sampler_name: q21Omni() ? 'er_sde' : 'euler', scheduler: 'simple', denoise: 1 } },
     '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['13', 0] } },
     '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'rv6_edit', images: ['8', 0] } },
   };
@@ -3129,7 +3138,7 @@ async function waitForJobs(ids, t0) {
           : mossEdit() ? `MOSS Edit ${moss.edit.name} · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps` + (mode === 'mask' ? ' · selected area' : hasSecond() ? ` · ${1 + usedMore().length} photos` : '')
           : kreaActive() ? `Krea 2 Turbo${kreaNsfw() ? ' · uncensored' : ''} · ${$('steps').value} steps · ${createDims().join('×')}`
           : kreaEdit() ? `Krea 2 ${kreaLora() === krea.edit.identity ? 'Restage' : 'Edit'} · ${$('steps').value} steps · ${kreaEditDims().join('×')}`
-          : q21Active() ? `Qwen 2.1${q21Turbo() ? ' Turbo' : q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
+          : q21Active() ? `Qwen 2.1${q21Turbo() ? ' Turbo' : q21Omni() ? ' Omni' : q21Unet() === q21.noct ? ' Noct Q' : ''} · ${$('steps').value} steps · CFG ${q21Cfg()} · ` +
             (mode === 'create' ? createDims().join('×') : (editOutDims() || [base.width, base.height]).join('×')) + (ablActive() ? ' · 🔓 encoder' : '') +
             (mode === 'instruct' && hasSecond() ? ` · ${1 + usedMore().length} photos` : '') + (qwenMask() ? ' · selected area' : '')
           : mode === 'create' ? `Create · ${fastActive() ? 'Fast' : 'Quality'} · ${$('steps').value} steps · ${createDims().join('×')}` +

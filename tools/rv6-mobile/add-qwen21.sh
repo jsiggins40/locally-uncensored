@@ -2,7 +2,8 @@
 # Adds Qwen-Image 2.1 (Sept 2026, 7B): text-to-image and editing with up to 10
 # photos in one model, far less censored than 2512. Also fetches the Noct Q
 # uncensored fine-tune and the Heretic (abliterated) Qwen3-VL text encoder when
-# they are in a form ComfyUI can load. About 50 GB. Each part is tested on the
+# they are in a form ComfyUI can load, and chatrlabs' Uncensored Omni (2.1 with
+# their uncensored adapter merged in; non-commercial Qwen Research License). About 65 GB. Each part is tested on the
 # GPU; a part that fails its test is moved aside so the page never offers it.
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-qwen21.sh)
 set -euo pipefail
@@ -24,13 +25,13 @@ fi
 grep -q "TextEncodeQwenImage21" comfy_extras/nodes_qwen.py || { echo "ComfyUI still has no Qwen-Image 2.1 support; stopping."; exit 1; }
 
 venv/bin/python - <<'PY'
-import os, re, shutil, sys
+import hashlib, os, re, shutil, sys
 from huggingface_hub import HfApi, hf_hub_download
 api = HfApi()
 free = shutil.disk_usage(os.path.realpath("models")).free / 1e9
 print(f"== Free disk: {free:.0f} GB")
-if free < 60:
-    sys.exit("Need about 60 GB free. Delete something first.")
+if free < 75:
+    sys.exit("Need about 75 GB free. Delete something first.")
 
 def files(repo):
     try:
@@ -119,6 +120,27 @@ if f:
     name = os.path.basename(f)
     fetch("kkxao/Qwen-Image-2.1-Text-Encoder-Heretic", f, "text_encoders",
           name if "heretic" in name.lower() and "qwen3vl" in name.lower() else "qwen3vl_8b_heretic_" + name)
+
+# 4. Uncensored Omni (chatrlabs): their rank-128 adapter merged into 2.1 at 1.0,
+# step 90,000. BF16, the file they verified with ComfyUI's own UNETLoader.
+# Pinned to its published SHA-256.
+print("== Uncensored Omni (chatrlabs, 14 GB)")
+dest = "models/diffusion_models/omni_q21_uncensored_chatrlabs_bf16.safetensors"
+if os.path.exists(dest) and os.path.getsize(dest) > 0:
+    print("   already have", dest)
+else:
+    try:
+        tmp = hf_hub_download("chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+                              "qwen-image-2.1-step90000-BF16/diffusion_pytorch_model.safetensors", local_dir="models/_hf_tmp")
+        h = hashlib.sha256()
+        with open(tmp, "rb") as fh:
+            for b in iter(lambda: fh.read(1 << 22), b""): h.update(b)
+        if h.hexdigest() == "97b3ad25796fc4b7d5e2572ffb3bd8560e3c343d79623e2711fabe9ebcf3cfe3":
+            shutil.move(tmp, dest); print("   installed", dest)
+        else:
+            print("   the Omni file doesn't match its published checksum; not installed")
+    except Exception as e:
+        print(f"   Omni: download failed ({type(e).__name__}: {str(e)[:150]}); skipped")
 shutil.rmtree("models/_hf_tmp", ignore_errors=True)
 PY
 
@@ -140,6 +162,7 @@ unet = (bf([n for n in units if "qwen_image_2.1" in n.lower() and "noct" not in 
 noct = next((n for n in units if "noct" in n.lower()), None)
 clip = (bf([n for n in clips if "qwen3vl_8b" in n.lower() and "heretic" not in n.lower()]) or [None])[0]
 heretic = next((n for n in clips if "heretic" in n.lower()), None)
+omni = next((n for n in units if "omni" in n.lower() and "q21" in n.lower()), None)
 vae = next((n for n in opts("VAELoader", "vae_name") if "qwen_image_2.1_vae" in n.lower()), None)
 print("ComfyUI sees:", unet, "|", noct, "|", clip, "|", heretic, "|", vae)
 if not (unet and clip and vae): raise SystemExit("QWEN 2.1 TEST: files not visible to ComfyUI")
@@ -183,6 +206,7 @@ def disable(sub, name):
 ok = run("QWEN 2.1 CREATE TEST", unet, clip, False)
 ok = run("QWEN 2.1 EDIT TEST", unet, clip, True) and ok
 if noct and not run("NOCT Q TEST", noct, clip, False): disable("diffusion_models", noct)
+if omni and not (run("OMNI CREATE TEST", omni, clip, False) and run("OMNI EDIT TEST", omni, clip, True)): disable("diffusion_models", omni)
 if heretic and not run("HERETIC ENCODER TEST", unet, heretic, False): disable("text_encoders", heretic)
 if not ok: raise SystemExit("Qwen 2.1 itself failed its test; see above.")
 PY
@@ -190,4 +214,5 @@ PY
 echo "== Updating the page"
 restart
 echo
-echo "Done. Reload the edit page: ✍️ Create and ✨ Describe edit now offer 🆕 Qwen 2.1."
+echo "Done. Reload the edit page: ✍️ Create and ✨ Describe edit now offer 🆕 Qwen 2.1"
+echo "(versions: Noct Q, Official, Omni)."

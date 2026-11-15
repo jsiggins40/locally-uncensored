@@ -81,6 +81,74 @@ def _segment(name, points, labels, grow, pick="best", max_area=0.6):
         return buf.getvalue()
 
 
+# ✂️ Lift's "Remove from photo": LaMa (big-lama, Apache-2.0) fills in the
+# background where a person was. edit-restart downloads it (about 200 MB) to
+# models/lama/big-lama.pt; it loads on first use and stays on the GPU.
+LAMA_PATH = os.path.join(folder_paths.models_dir, "lama", "big-lama.pt")
+_lama = {}
+
+
+def _lama_fill(model, device, image, mask, grow):
+    """image: PIL RGB; mask: HxW numpy, >127 = remove. Returns a PIL RGB image."""
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+    from PIL import Image
+
+    with torch.no_grad():
+        img = torch.from_numpy(np.asarray(image, dtype=np.uint8).copy()).permute(2, 0, 1)[None].float().div(255)
+        m = torch.from_numpy((np.asarray(mask) > 127).astype(np.float32))[None, None]
+        if grow > 0:   # cover the soft edge and a little halo around the person
+            m = F.max_pool2d(m, 2 * grow + 1, stride=1, padding=grow)
+        h, w = img.shape[2:]
+        ph, pw = (8 - h % 8) % 8, (8 - w % 8) % 8   # LaMa needs sides divisible by 8
+        x = F.pad(img, (0, pw, 0, ph), mode="reflect")
+        mm = F.pad(m, (0, pw, 0, ph), mode="reflect")
+        out = model(x.to(device), mm.to(device)).float().cpu()[:, :, :h, :w].clamp(0, 1)
+        # blend over the untouched photo with a few soft pixels at the edge
+        soft = F.avg_pool2d(m, 9, stride=1, padding=4).clamp(0, 1)
+        res = out * soft + img * (1 - soft)
+        arr = (res[0].permute(1, 2, 0).numpy() * 255 + 0.5).astype(np.uint8)
+    return Image.fromarray(arr, "RGB")
+
+
+def _erase(name, mask_name, grow):
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    with _lock:
+        if "model" not in _lama:
+            if not os.path.exists(LAMA_PATH):
+                raise FileNotFoundError("the remover isn't installed yet: run edit-restart on the VM")
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            _lama["model"] = torch.jit.load(LAMA_PATH, map_location=device).eval()
+            _lama["device"] = device
+        image = Image.open(folder_paths.get_annotated_filepath(name)).convert("RGB")
+        mimg = Image.open(folder_paths.get_annotated_filepath(mask_name))
+        mask = np.asarray(mimg.getchannel("A") if "A" in mimg.getbands() else mimg.convert("L"))
+        if mask.shape != (image.height, image.width):
+            mask = np.asarray(Image.fromarray(mask).resize(image.size, Image.NEAREST))
+        out = _lama_fill(_lama["model"], _lama["device"], image, mask, grow)
+        buf = io.BytesIO()
+        out.save(buf, "JPEG", quality=95)
+        return buf.getvalue()
+
+
+@PromptServer.instance.routes.post("/rv6m/erase")
+async def rv6m_erase(request):
+    try:
+        body = await request.json()
+        jpg = await asyncio.get_running_loop().run_in_executor(
+            None, _erase, body["image"], body["mask"], int(body.get("grow", 12)))
+        return web.Response(body=jpg, content_type="image/jpeg")
+    except FileNotFoundError as e:
+        return web.json_response({"error": str(e)}, status=404)
+    except Exception as e:
+        logging.exception("[rv6_mobile] erase failed")
+        return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+
 @PromptServer.instance.routes.post("/rv6m/segment")
 async def rv6m_segment(request):
     try:

@@ -56,6 +56,19 @@ if [ "$(cat "$LIFT/VERSION" 2>/dev/null)" != "$LIFT_V" ]; then
   fi
   rm -rf "$tmp"
 fi
+# 🧹 Remove from photo (✂️ Lift): LaMa (big-lama, Apache-2.0) fills in the
+# background where a person was. About 200 MB, once; checked against its SHA-256.
+LAMA="$HOME/ComfyUI/models/lama/big-lama.pt"
+if [ ! -s "$LAMA" ]; then
+  echo "Getting the ✂️ Lift remover (once, about 200 MB)"
+  mkdir -p "$(dirname "$LAMA")"
+  if curl -fsSL https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt -o "$LAMA.new" \
+     && echo "344c77bbcb158f17dd143070d1e789f38a66c04202311ae3a258ef66667a9ea9  $LAMA.new" | sha256sum -c --quiet; then
+    mv "$LAMA.new" "$LAMA"
+  else
+    rm -f "$LAMA.new"; echo "  (couldn't get it; 🧹 Remove from photo won't work until the next edit-restart)"
+  fi
+fi
 # keep this command itself up to date too; when it changed, run the new copy
 # right away (this run is still the old one)
 if sudo curl -fsSL "$SRC/edit-restart.sh" -o /usr/local/bin/edit-restart.new 2>/dev/null; then

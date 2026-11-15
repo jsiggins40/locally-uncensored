@@ -146,12 +146,21 @@ const MARKUP = `
       </div>
       <div class="lf-sl" id="lf-selbrush-row" hidden><span>Brush size</span><input type="range" id="lf-selbrush" min="4" max="80" step="1" value="18"></div>
       <div id="lf-status" role="status" aria-live="polite"></div>
-      <div class="hint" style="margin-top:4px">Tap a person: the whole person lifts (on a computer, drag them onto the new picture). <b>➕ Add</b> more people · <b>➖ Remove</b> one inside the outline · <b>👤 Keep only</b> the one you tap · <b>🖌️ Paint in</b> / <b>🧽 Erase</b> fix the outline with your finger. Two people stuck together? Erase a line between them, then Remove or Keep only. <b>↩️ Undo</b> takes back the last change.</div>
+      <div class="hint" style="margin-top:4px">Tap a person: the whole person lifts (on a computer, drag them onto the new picture). <b>➕ Add</b> more people · <b>➖ Remove</b> one inside the outline · <b>👤 Keep only</b> the one you tap · <b>🖌️ Paint in</b> / <b>🧽 Erase</b> fix the outline with your finger. Two people stuck together? Erase a line between them, then Remove or Keep only. <b>🧹 Remove from the photo</b> deletes the lifted person from the photo itself and fills in the background. <b>↩️ Undo</b> takes back the last change.</div>
       <div id="lf-sel-actions">
         <div class="lf-row"><button type="button" class="primary" id="lf-btn-use" style="margin:0">✂️ Add to the new picture</button></div>
+        <div class="lf-row" style="margin-top:6px"><button type="button" id="lf-btn-erase">🧹 Remove from the photo</button></div>
         <div class="lf-row" style="margin-top:6px"><button type="button" id="lf-btn-save">⬇️ Save cut-out</button><button type="button" id="lf-btn-clear">Clear</button></div>
         <div class="lf-sl"><span>Edge softness</span><input type="range" id="lf-feather" min="0" max="8" step="0.5" value="1"></div>
         <div class="lf-sl"><span>Shrink ↔ grow</span><input type="range" id="lf-grow" min="-0.3" max="0.3" step="0.02" value="0"></div>
+      </div>
+      <div id="lf-photo-actions" hidden>
+        <div class="hint" style="margin-top:10px">This photo has had people removed:</div>
+        <div class="lf-row" style="margin-top:4px">
+          <button type="button" class="primary" id="lf-photo-use" style="margin:0">☁️ Use this photo</button>
+          <button type="button" id="lf-photo-more">➕ As an extra photo</button>
+          <button type="button" id="lf-photo-save">⬇️ Save photo</button>
+        </div>
       </div>
       <div id="lf-tray" aria-label="Lifted people"></div>
     </div>
@@ -274,6 +283,7 @@ const el = {
   brushRow: $('brush-row'), brush: $('brush'), depthHint: $('depth-hint'),
   turnBox: $('turn-box'), turnHint: $('turn-hint'),
   undo: $('btn-undo'), selBrushRow: $('selbrush-row'), selBrush: $('selbrush'), cursor: $('cursor'),
+  erase: $('btn-erase'), photoActions: $('photo-actions'), photoUse: $('photo-use'), photoMore: $('photo-more'), photoSave: $('photo-save'),
   itemsOpen: $('items-open'), items: $('items'), itemsClose: $('items-close'), itemsCats: $('items-cats'),
   itemsSearch: $('items-search'), itemsStatus: $('items-status'), itemsGrid: $('items-grid'),
 };
@@ -594,6 +604,7 @@ async function openImage(img) {
   clearSelection();
   undoStack.length = 0;
   el.undo.disabled = true;
+  el.photoActions.hidden = true;
 
   el.drop.hidden = true;
   el.stage.hidden = false;
@@ -1055,19 +1066,93 @@ function islandAt(m, px, py) {
 }
 
 // Undo: earlier selections, 8-bit to keep memory down (a 2048 px photo: 4 MB each)
-const undoStack = [];
-function pushUndo() {
-  undoStack.push(sel ? Uint8Array.from(sel, (v) => Math.round(v * 255)) : null);
+const undoStack = [];   // { sel: Uint8Array | null, photo?: the photo before 🧹 }
+function pushUndo(extra = {}) {
+  undoStack.push({ sel: sel ? Uint8Array.from(sel, (v) => Math.round(v * 255)) : null, ...extra });
   if (undoStack.length > 8) undoStack.shift();
   el.undo.disabled = false;
 }
 function undoOnce() {
   if (working || stroke || !undoStack.length) return;
   const prev = undoStack.pop();
-  if (prev) setSelection(Float32Array.from(prev, (v) => v / 255), false);
+  if (prev.photo) setPhoto(prev.photo);
+  if (prev.sel) setSelection(Float32Array.from(prev.sel, (v) => v / 255), false);
   else clearSelection();
   el.undo.disabled = !undoStack.length;
-  setStatus('Undone.');
+  setStatus(prev.photo ? 'Undone: they are back in the photo.' : 'Undone.');
+}
+
+// Swap in a changed photo of the same size (🧹 Remove from the photo, or its undo)
+function setPhoto(c) {
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  Object.assign(src, { canvas: c, ctx, pixels: ctx.getImageData(0, 0, src.w, src.h).data, id: src.id + 1 });
+  el.base.getContext('2d').drawImage(c, 0, 0);
+  comp.bgBlurCache = null;
+  renderCompose();
+}
+
+// 🧹 Remove from the photo: LaMa on the VM fills in the background where the
+// selection is (a little bigger, to catch the soft edge); only that area of the
+// photo changes, the rest keeps its original pixels.
+async function removeFromPhoto() {
+  if (!sel || working || stroke) return;
+  working = true;
+  setBusy('Removing them from the photo…');
+  await nextFrame();
+  try {
+    const { w, h } = src;
+    const name = await samImage();                       // the photo, on the VM
+    const hard = new Float32Array(w * h);
+    for (let i = 0; i < hard.length; i++) hard[i] = sel[i] > 0.3 ? 1 : 0;
+    const m = makeCanvas(w, h);
+    const mctx = m.getContext('2d');
+    const md = mctx.createImageData(w, h);
+    for (let i = 0; i < hard.length; i++) { md.data[i * 4] = 255; md.data[i * 4 + 3] = hard[i] ? 255 : 0; }
+    mctx.putImageData(md, 0, 0);
+    const fd = new FormData();
+    fd.append('image', await canvasToBlob(m), `rv6m_liftmask_${Date.now().toString(36)}.png`);
+    fd.append('overwrite', 'true');
+    const up = await fetch('/api/upload/image', { method: 'POST', body: fd });
+    if (!up.ok) throw new Error(`upload failed (${up.status})`);
+    const j = await up.json();
+    const grow = Math.max(4, Math.round(Math.max(w, h) / 170));   // about 12 px on a 2048 px photo
+    const r = await fetch('/rv6m/erase', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: name, mask: j.subfolder ? `${j.subfolder}/${j.name}` : j.name, grow }),
+    });
+    if (r.status === 404) throw Object.assign(new Error('the remover is not installed'), { setup: true });
+    if (!r.ok) throw new Error(`remove failed (${r.status})`);
+    const bmp = await createImageBitmap(await r.blob());
+    // Only the grown, softly edged area takes the filled-in pixels
+    const near = boxBlur(hard, w, h, grow + 2);
+    const soft = new Float32Array(w * h);
+    for (let i = 0; i < soft.length; i++) soft[i] = near[i] > 0.02 ? 1 : 0;
+    const edge = boxBlur(soft, w, h, 2);
+    const fill = makeCanvas(w, h);
+    const fctx = fill.getContext('2d', { willReadFrequently: true });
+    fctx.drawImage(bmp, 0, 0, w, h);
+    if (bmp.close) bmp.close();
+    const fdata = fctx.getImageData(0, 0, w, h);
+    for (let i = 0; i < edge.length; i++) fdata.data[i * 4 + 3] = Math.round(255 * clamp01(edge[i]));
+    fctx.putImageData(fdata, 0, 0);
+    const out = makeCanvas(w, h);
+    const octx = out.getContext('2d');
+    octx.drawImage(src.canvas, 0, 0);
+    octx.drawImage(fill, 0, 0);
+    pushUndo({ photo: src.canvas });
+    setPhoto(out);
+    clearSelection();
+    el.photoActions.hidden = false;
+    setStatus('Removed from the photo. Lift anyone else to remove them too; ↩️ Undo brings them back.');
+    toast('🧹 Removed from the photo');
+  } catch (err) {
+    console.error(err);
+    setStatus(err.setup ? "The remover isn't on the VM yet: run edit-restart there, then try again."
+      : "Couldn't remove them. Check the VM is on, then try again.", true);
+  } finally {
+    setBusy('');
+    working = false;
+  }
 }
 
 const isBrush = () => tapMode === 'paint' || tapMode === 'erase';
@@ -2269,6 +2354,18 @@ el.base.addEventListener('click', onTap);
 el.all.addEventListener('click', selectAllPeople);
 el.clear.addEventListener('click', () => { if (sel) pushUndo(); clearSelection(); setStatus('Tap a person to lift them. ↩️ Undo brings the last one back.'); });
 el.undo.addEventListener('click', undoOnce);
+el.erase.addEventListener('click', removeFromPhoto);
+async function handBackPhoto(as) {
+  if (!opts.onUse || !src.canvas) return;
+  const blob = await canvasToBlob(src.canvas, 'image/jpeg', 0.95);
+  close();
+  await opts.onUse(blob, as);
+}
+el.photoUse.addEventListener('click', () => handBackPhoto('main'));
+el.photoMore.addEventListener('click', () => handBackPhoto('more'));
+el.photoSave.addEventListener('click', async () => {
+  if (src.canvas) downloadBlob(await canvasToBlob(src.canvas, 'image/jpeg', 0.95), `photo-${stamp()}.jpg`);
+});
 el.base.addEventListener('pointerdown', brushDown);
 el.base.addEventListener('pointermove', brushMove);
 el.base.addEventListener('pointerup', brushUp);
@@ -2386,6 +2483,7 @@ export function openLift(o = {}) {
   document.documentElement.style.overflow = 'hidden';
   document.body.style.overflow = 'hidden';
   el.main.hidden = !opts.photo;
+  el.photoUse.hidden = el.photoMore.hidden = !opts.onUse;
   el.useHint.textContent = opts.useHint || '';
   // Start on the edit page's photo, and follow it when it has changed since
   if (opts.photo && (!src.canvas || (srcFromMain && mainKey !== opts.photoKey))) useMainPhoto();

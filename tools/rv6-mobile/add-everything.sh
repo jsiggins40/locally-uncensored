@@ -6,7 +6,8 @@
 #   2. All the Qwen 2511 LoRAs for Describe edit, art styles included (add-qwen-loras.sh)
 #   3. Qwen-Image 2.1: Official, 🔓 Noct Q, 🔞 Omni, the Heretic encoder (add-qwen21.sh)
 #   4. Qwen-Image 2.1 ⚡ Turbo (add-qwen21-turbo.sh)
-#   5. Krea 2 Turbo + the 🔓 realism LoRA, and Krea 2 photo editing (add-krea2*.sh)
+#   5. Krea 2 Turbo + the 🔓 realism LoRA, the uncensored LoRAs, and Krea 2 photo
+#      editing (add-krea2*.sh)
 #   6. MOSS-Image + its uncensored and edit LoRAs (add-moss.sh)
 # About 300 GB and a few hours, mostly downloads. Each installer skips what it
 # already has and tests its models on the GPU, so it's safe to run again.
@@ -40,6 +41,7 @@ step "Qwen 2511 LoRAs (all, styles too)" run add-qwen-loras.sh styles
 step "Qwen 2.1: Official, Noct Q, Omni, Heretic encoder" run add-qwen21.sh
 step "Qwen 2.1 Turbo" run add-qwen21-turbo.sh
 step "Krea 2 Turbo + uncensored realism LoRA" run add-krea2.sh
+step "Krea 2 uncensored LoRAs" run add-krea2-loras.sh
 step "Krea 2 photo editing" run add-krea2-edit.sh
 step "MOSS-Image + uncensored and edit LoRAs" run add-moss.sh
 if [ -n "${ALL_EXTRAS:-}" ]; then

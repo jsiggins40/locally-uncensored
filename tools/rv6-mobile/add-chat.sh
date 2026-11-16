@@ -136,6 +136,9 @@ if has qwen || has glm; then
   # Open WebUI's parallel requests (title, tags...) that fails ("failed to restore
   # state") and the reply errors out (500). Off, when this build has the switch.
   nocache=""; "$SERVER" --help 2>&1 | grep -q -- "--cache-ram" && nocache="--cache-ram 0"
+  # Qwen 3.8's template re-sends the model's earlier thinking with every new message
+  # by default; in a long chat that alone fills the 64K context. Old thinking off.
+  "$SERVER" --help 2>&1 | grep -q -- "--no-reasoning-preserve" && nocache="$nocache --no-reasoning-preserve"
 
   if ! has glm; then
   echo "== Qwen 3.8 27B Uncensored ($(case $DEVICE in cpu) echo 'Q4, about 17 GB';; max) echo 'Q8, about 29 GB';; *) echo 'Q6, about 23 GB';; esac))"

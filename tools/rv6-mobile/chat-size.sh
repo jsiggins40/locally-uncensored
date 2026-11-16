@@ -5,8 +5,9 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/chat-size.sh)
 echo "== Settings in use right now"
 echo "  model server: $(pgrep -a llama-server | grep -oE -- '-c [0-9]+|--cache-ram 0|--no-reasoning-preserve' | tr '\n' ' ')"
-pid=$(pgrep -f "open-webui serve" | head -1)
-echo "  chat page: page cap $([ -n "$pid" ] && tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -oE 'WEB_FETCH_MAX_CONTENT_LENGTH=[0-9]+' || echo 'NOT SET'), version $(open-webui --version 2>/dev/null | tail -1 || true)"
+# The setting is on the command line of the loop that starts the chat page (chat-start)
+cap=$(pgrep -af "open-webui serve" | grep -oE 'WEB_FETCH_MAX_CONTENT_LENGTH=[0-9]+' | head -1)
+echo "  chat page: page cap ${cap:-NOT SET}"
 python3 - "${DATA_DIR:-$HOME/open-webui-data}/webui.db" <<'PY'
 import json, sqlite3, sys, time
 try:

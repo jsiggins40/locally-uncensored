@@ -109,7 +109,9 @@ if anchor not in s:
 block = '''# Web search (add-search.sh): SearXNG on this VM for the chat's "Web Search"
 if [ -x "$HOME/.local/bin/search-start" ]; then
   "$HOME/.local/bin/search-start" || true
-  env+=(ENABLE_WEB_SEARCH=True WEB_SEARCH_ENGINE=searxng SEARXNG_QUERY_URL=http://127.0.0.1:8888/search WEB_SEARCH_RESULT_COUNT=5)
+  # A page the model reads goes into its prompt whole unless capped: 10,000 characters
+  # (about 2,500 tokens) a page keeps five results well inside the 64K context
+  env+=(ENABLE_WEB_SEARCH=True WEB_SEARCH_ENGINE=searxng SEARXNG_QUERY_URL=http://127.0.0.1:8888/search WEB_SEARCH_RESULT_COUNT=5 WEB_FETCH_MAX_CONTENT_LENGTH=10000)
 fi
 '''
 open(p, "w").write(s.replace(anchor, block + anchor, 1))

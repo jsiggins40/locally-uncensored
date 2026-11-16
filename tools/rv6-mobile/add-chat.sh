@@ -132,6 +132,10 @@ if has qwen || has glm; then
     cmake --build "$BUILD" --target llama-server -j"$(nproc)" >/dev/null
   fi
   "$SERVER" --version 2>&1 | head -2
+  # llama.cpp's RAM prompt cache restores saved chats into the shared KV cache; with
+  # Open WebUI's parallel requests (title, tags...) that fails ("failed to restore
+  # state") and the reply errors out (500). Off, when this build has the switch.
+  nocache=""; "$SERVER" --help 2>&1 | grep -q -- "--cache-ram" && nocache="--cache-ram 0"
 
   if ! has glm; then
   echo "== Qwen 3.8 27B Uncensored ($(case $DEVICE in cpu) echo 'Q4, about 17 GB';; max) echo 'Q8, about 29 GB';; *) echo 'Q6, about 23 GB';; esac))"
@@ -254,7 +258,7 @@ PY
 #!/usr/bin/env bash
 . "$LLM/glm-chat.env"
 place=(); [ "\$MODE" = split ] && place=(-ot "exps=CPU")
-exec "$SERVER" -m "\$MODEL" --jinja -ngl 99 "\${place[@]}" -t $(nproc) -c 65536 --host 127.0.0.1 --port 8081 \\
+exec "$SERVER" -m "\$MODEL" --jinja $nocache -ngl 99 "\${place[@]}" -t $(nproc) -c 65536 --host 127.0.0.1 --port 8081 \\
   --alias "\$ALIAS"
 SH
     chmod +x "$HOME/.local/bin/qwen-start"
@@ -273,7 +277,7 @@ SH
 # that); at most 2048 (~1400 px square): a full-size phone photo otherwise takes
 # 10K+ tokens and a few of them filled the whole 64K context
 mm=(); [ -n "\$MMPROJ" ] && mm=(--mmproj "\$MMPROJ" --image-min-tokens 1024 --image-max-tokens 2048)
-$run "$SERVER" -m "\$MODEL" "\${mm[@]}" --jinja $dev --host 127.0.0.1 --port 8081 \\
+$run "$SERVER" -m "\$MODEL" "\${mm[@]}" --jinja $nocache $dev --host 127.0.0.1 --port 8081 \\
   --alias qwen3.8-27b-uncensored --chat-template-kwargs '{"reasoning_effort":"$effort"}'
 SH
   chmod +x "$HOME/.local/bin/qwen-start"

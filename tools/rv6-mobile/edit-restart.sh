@@ -92,6 +92,12 @@ sudo tailscale serve --bg 8188 >/dev/null 2>&1
 # The chat page (add-chat.sh), when installed: publish it on :8443 too (it has
 # gone missing from Tailscale's settings on some VMs)
 [ -x "$HOME/.local/bin/chat-start" ] && sudo tailscale serve --bg --https=8443 http://127.0.0.1:8080 >/dev/null 2>&1
+# SwarmUI (add-swarmui.sh), when installed: publish it on :8444, and bring it up if it
+# isn't running (after a boot). "9>&-": it must not keep this script's lock.
+if [ -x "$HOME/.local/bin/swarm-start" ]; then
+  sudo tailscale serve --bg --https=8444 http://127.0.0.1:7801 >/dev/null 2>&1
+  curl -sf -o /dev/null -m 3 localhost:7801 || (nohup "$HOME/.local/bin/swarm-start" >/dev/null 2>&1 9>&- &)
+fi
 host=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null)
 if [ -z "$host" ]; then echo "Tailscale is not logged in: sudo tailscale up --reset"; exit 1; fi
 echo "OPEN: https://$host/extensions/rv6_mobile/edit.html"

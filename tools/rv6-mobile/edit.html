@@ -587,7 +587,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-22d';
+const PAGE_BUILD = '2026-11-23a';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -3092,7 +3092,8 @@ const swarmCur = () => swarm && swarm.models.find(m => m.name === $('swarmModel'
 function swarmDims() {
   // Models SwarmUI lists at 2048 (Qwen-Image 2.1's 16x VAE) are comfortable, and much faster, around 1344
   let side = 1024; const m = swarmCur();
-  if (m && m.w > 0 && m.h > 0) side = Math.sqrt(m.w * m.h) > 1536 ? 1344 : Math.sqrt(m.w * m.h);
+  // (MiniMax H3 Image is the exception: it loses a lot of quality below its own 2048, and takes only 6 steps)
+  if (m && m.w > 0 && m.h > 0) side = Math.sqrt(m.w * m.h) > 1536 ? (/minimax/i.test(m.cls + m.name) ? 2048 : 1344) : Math.sqrt(m.w * m.h);
   let [a, b] = $('swarmShape').value.split(':').map(Number);
   if (swarmKind() !== 'new' && photoIn) { a = full.width; b = full.height; }   // an edit keeps the photo's shape
   const area = (side * +$('swarmSize').value) ** 2;
@@ -3115,7 +3116,7 @@ function applySwarm() {
   $('swarmCreatRow').classList.toggle('hidden', kind !== 'restyle');
   setVal($('swarmCreat'), +st.creat || 0.6);
   $('swarmKindHint').textContent = kind === 'edit'
-    ? 'Say what to change and the model edits your photo. This needs an edit model: Qwen Image Edit or Qwen Image 2.1 (Official, Noct Q, Omni). Other models ignore the photo or only glance at it.'
+    ? 'Say what to change and the model edits your photo. This needs an edit model: MiniMax H3 Image, Qwen Image Edit or Qwen Image 2.1 (Official, Noct Q, Omni). Other models ignore the photo or only glance at it.'
     : kind === 'restyle' ? 'Any model redraws your photo in its own style, following your description. Good for a new look; it does not follow instructions like "remove the hat".'
     : 'A new picture from your description, no photo needed.';
   const [lab, ph] = kind === 'edit' ? ['What should change?', 'e.g. change the background to a beach at sunset']

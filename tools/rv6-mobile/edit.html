@@ -125,6 +125,10 @@
 </head>
 <body>
 <h1>Photo Edit</h1>
+<div id="appLinks" class="hidden" style="display:flex;gap:8px;margin:-4px 0 10px">
+  <a id="swarmLink" class="hidden" target="_blank" rel="noopener" style="flex:1;text-align:center;text-decoration:none;color:var(--text);background:#2a2a2c;border:1px solid #3a3a3c;border-radius:10px;padding:9px 6px;font-size:14px">🐝 SwarmUI</a>
+  <a id="chatLink" class="hidden" target="_blank" rel="noopener" style="flex:1;text-align:center;text-decoration:none;color:var(--text);background:#2a2a2c;border:1px solid #3a3a3c;border-radius:10px;padding:9px 6px;font-size:14px">💬 Chat</a>
+</div>
 
 <div id="colMain">
 <div class="panel" id="stageBox">
@@ -536,7 +540,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-22a';
+const PAGE_BUILD = '2026-11-22b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -858,6 +862,14 @@ function optionsOf(info, node, input) {
 async function info(node) {
   try { const r = await fetch('/api/object_info/' + node); return r.ok ? await r.json() : {}; } catch (e) { return {}; }
 }
+// Links to the VM's other pages: SwarmUI (add-swarmui.sh, :8444) when its nodes are in
+// ComfyUI, the chat (add-chat.sh, :8443) when that port answers
+(async () => {
+  const show = (id, port) => { const a = $(id); a.href = `https://${location.hostname}:${port}/`; a.classList.remove('hidden'); $('appLinks').classList.remove('hidden'); };
+  if (location.protocol !== 'https:') return;
+  info('SwarmKSampler').then(r => { if (r.SwarmKSampler) show('swarmLink', 8444); });
+  try { await fetch(`https://${location.hostname}:8443/?probe=1`, { mode: 'no-cors', cache: 'no-store' }); show('chatLink', 8443); } catch (e) {}
+})();
 (async () => {
   const [unet, clip, vae, lora, plus, single, refm, dual, q21enc, q21cache, svi, svr, msig, k2edit] = await Promise.all(
     ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'TextEncodeQwenImageEditPlus', 'TextEncodeQwenImageEdit',

@@ -832,6 +832,137 @@ async def rv6m_cloud_job(request):
     return web.json_response(job)
 
 
+# ---- 🐝 SwarmUI through the edit page (add-swarmui.sh installs SwarmUI on
+# 127.0.0.1:7801). The page's Swarm mode asks here; this talks to SwarmUI's API
+# as its local user, so the presets linked to models in SwarmUI apply. A picture
+# is a background job like a Seedream edit, and is saved with the page's results.
+SWARM_URL = os.environ.get("RV6M_SWARM_URL", "http://127.0.0.1:7801").rstrip("/")
+_swarm_sid = {}
+
+
+def _swarm_api(name, body=None, timeout=60):
+    import json
+    import urllib.error
+    import urllib.request
+
+    def call():
+        if "id" not in _swarm_sid:
+            req = urllib.request.Request(SWARM_URL + "/API/GetNewSession", b"{}", {"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                _swarm_sid["id"] = json.load(r)["session_id"]
+        data = json.dumps({**(body or {}), "session_id": _swarm_sid["id"]}).encode()
+        req = urllib.request.Request(f"{SWARM_URL}/API/{name}", data, {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+
+    try:
+        j = call()
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            raise
+        j = {"error_id": "invalid_session_id"}
+    if j.get("error_id") == "invalid_session_id":   # SwarmUI was restarted
+        _swarm_sid.clear()
+        j = call()
+    return j
+
+
+def _swarm_status():
+    def listing(subtype):
+        j = _swarm_api("ListModels", {"path": "", "depth": 8, "subtype": subtype, "sortBy": "Name", "allowRemote": False})
+        return j.get("files") or []
+    try:
+        models = listing("Stable-Diffusion")
+    except Exception as e:
+        return {"installed": False, "why": f"{type(e).__name__}: {e}"}
+    try:
+        loras = listing("LoRA")
+    except Exception:
+        loras = []
+    try:
+        me = _swarm_api("GetMyUserData")
+    except Exception:
+        me = {}
+    presets = {p.get("title"): p.get("param_map") or {} for p in me.get("presets") or []}
+    links = (me.get("model_preset_links") or {}).get("Stable-Diffusion") or {}
+    clean = lambda n: n[:-len(".safetensors")] if n.endswith(".safetensors") else n
+    out = []
+    for m in models:
+        name = m.get("name") or ""
+        title = next((t for t in links.get(clean(name)) or [] if t in presets), None)
+        pm = presets.get(title) or {}
+        out.append({"name": name, "title": m.get("title") or "", "cls": m.get("class") or "", "arch": m.get("architecture") or "",
+                    "compat": m.get("compat_class") or "", "w": m.get("standard_width") or 0, "h": m.get("standard_height") or 0,
+                    "preset": title, "steps": pm.get("steps"), "cfg": pm.get("cfgscale")})
+    return {"installed": True, "models": out,
+            "loras": [{"name": l.get("name") or "", "title": l.get("title") or "", "compat": l.get("compat_class") or ""} for l in loras]}
+
+
+def _swarm_generate(req):
+    import base64
+    import time
+    import urllib.parse
+    import urllib.request
+    body = {"images": 1, "prompt": req["prompt"], "model": req["model"], "seed": int(req.get("seed", -1)),
+            "width": int(req["width"]), "height": int(req["height"])}
+    if req.get("negative"):
+        body["negativeprompt"] = req["negative"]
+    loras = [l for l in req.get("loras") or [] if l.get("name")]
+    if loras:
+        body["loras"] = [l["name"] for l in loras]
+        body["loraweights"] = [str(l.get("weight", 1)) for l in loras]
+    if req.get("steps"):          # your own settings: sent as they are, no preset on top
+        body["steps"] = int(req["steps"])
+        if req.get("cfg"):
+            body["cfgscale"] = float(req["cfg"])
+    elif req.get("preset"):       # the preset linked to this model in SwarmUI
+        body["presets"] = [req["preset"]]
+    j = _swarm_api("GenerateText2Image", body, timeout=3600)
+    if j.get("error"):
+        raise RuntimeError("SwarmUI: " + str(j["error"])[:400])
+    imgs = j.get("images") or []
+    if not imgs:
+        raise RuntimeError("SwarmUI returned no picture")
+    src = str(imgs[0])
+    if src.startswith("data:"):
+        head, b64 = src.split(",", 1)
+        data, ext = base64.b64decode(b64), ("jpg" if "jpeg" in head else "webp" if "webp" in head else "png")
+    else:
+        with urllib.request.urlopen(SWARM_URL + "/" + urllib.parse.quote(src.lstrip("/")), timeout=120) as r:
+            data = r.read()
+        ext = os.path.splitext(src)[1].lstrip(".").lower() or "png"
+    if ext not in ("png", "jpg", "jpeg", "webp"):
+        raise RuntimeError(f"SwarmUI made a .{ext} file; the edit page shows pictures only")
+    out = f"rv6_edit_swarm_{int(time.time() * 1000)}.{ext}"
+    with open(os.path.join(folder_paths.get_output_directory(), out), "wb") as f:
+        f.write(data)
+    sent = {k: v for k, v in body.items() if k != "prompt"}
+    return {"filename": out, "sent": {"swarm": True, **sent}}
+
+
+@PromptServer.instance.routes.get("/rv6m/swarm/status")
+async def rv6m_swarm_status(request):
+    return web.json_response(await asyncio.get_running_loop().run_in_executor(None, _swarm_status))
+
+
+@PromptServer.instance.routes.post("/rv6m/swarm")
+async def rv6m_swarm(request):
+    import uuid
+    body = await request.json()
+    if not str(body.get("prompt", "")).strip() or not body.get("model"):
+        return web.json_response({"error": "need a model and a prompt"}, status=400)
+    try:
+        w, h = int(body.get("width", 0)), int(body.get("height", 0))
+    except (TypeError, ValueError):
+        w = h = 0
+    if not (64 <= w <= 4096 and 64 <= h <= 4096):
+        return web.json_response({"error": "bad picture size"}, status=400)
+    jid = uuid.uuid4().hex
+    _jobs[jid] = {"status": "running"}
+    asyncio.ensure_future(_run_cloud(jid, _swarm_generate, body))
+    return web.json_response({"job": jid})
+
+
 # ---- "Notify me when done": a push to the ntfy app on the phone when the
 # page's edits finish, so you can leave the page while the VM works. Safari
 # can't run in the background on iOS, so the VM sends it. The page says when it

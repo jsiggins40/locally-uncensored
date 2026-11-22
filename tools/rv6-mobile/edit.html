@@ -201,6 +201,43 @@
   <select id="model"><option>Loading…</option></select>
   <div class="hint" id="modelHint"></div>
   </div>
+  <div id="swarmBox" class="hidden">
+    <label for="swarmModel">Model</label>
+    <select id="swarmModel"></select>
+    <div class="hint" id="swarmModelHint"></div>
+    <label for="swarmShape">Shape</label>
+    <select id="swarmShape">
+      <option value="3:4">Portrait 3:4</option>
+      <option value="9:16">Portrait 9:16 (phone)</option>
+      <option value="1:1">Square</option>
+      <option value="4:3">Landscape 4:3</option>
+      <option value="16:9">Landscape 16:9</option>
+    </select>
+    <label for="swarmSize">Size</label>
+    <select id="swarmSize">
+      <option value="0.75">Small (faster)</option>
+      <option value="1" selected>Standard (what the model is made for)</option>
+      <option value="1.5">Large (slower)</option>
+    </select>
+    <div class="hint" id="swarmSizeHint"></div>
+    <div id="swarmLoraWrap" class="hidden">
+      <label>LoRAs</label>
+      <div class="chips" id="swarmLoraChips"></div>
+      <div id="swarmLoraTune" class="hidden">
+        <div class="lbl"><span>LoRA strength</span></div>
+        <div class="ctl"><button class="step" data-for="swarmLoraW" data-dir="-1" aria-label="Less">−</button><input id="swarmLoraW" type="range" min="0.2" max="2" step="0.05" value="1" data-nudge="0.1"><button class="step" data-for="swarmLoraW" data-dir="1" aria-label="More">+</button><span class="val" id="swarmLoraWVal"></span></div>
+      </div>
+    </div>
+    <label>Steps and prompt strength</label>
+    <div class="seg"><button id="swAuto">✨ Auto</button><button id="swOwn">🎚️ My own</button></div>
+    <div id="swarmOwn" class="hidden">
+      <div class="lbl"><span>Steps</span></div>
+      <div class="ctl"><button class="step" data-for="swarmSteps" data-dir="-1" aria-label="Less">−</button><input id="swarmSteps" type="range" min="1" max="60" step="1" value="20" data-nudge="1"><button class="step" data-for="swarmSteps" data-dir="1" aria-label="More">+</button><span class="val" id="swarmStepsVal"></span></div>
+      <div class="lbl"><span>Prompt strength (CFG)</span></div>
+      <div class="ctl"><button class="step" data-for="swarmCfg" data-dir="-1" aria-label="Less">−</button><input id="swarmCfg" type="range" min="1" max="12" step="0.5" value="7" data-nudge="0.5"><button class="step" data-for="swarmCfg" data-dir="1" aria-label="More">+</button><span class="val" id="swarmCfgVal"></span></div>
+    </div>
+    <div class="hint" id="swarmTuneHint"></div>
+  </div>
   <div id="aspectBox" class="hidden">
     <label for="aspect">Picture shape</label>
     <select id="aspect">
@@ -276,6 +313,7 @@
     <button id="modeWhole">Restyle</button>
     <button id="modeCloud" class="hidden">☁️ Seedream</button>
     <button id="modeCreate" class="hidden">✍️ Create</button>
+    <button id="modeSwarm" class="hidden">🐝 Swarm</button>
     <button id="modeVideo" class="hidden">🎬 Video</button>
   </div>
   <div id="engineBox" class="hidden">
@@ -540,7 +578,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-22b';
+const PAGE_BUILD = '2026-11-22c';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -738,6 +776,8 @@ const MODE_TEXT = {
           'What should happen in the video?', 'e.g. she turns to the camera and smiles, slow push-in'],
   cloud: ['Seedream on Atlas Cloud: describe the change like in ✨ Describe edit. Up to 10 photos, paid per image. Photos are sent to Atlas.',
           'What should change?', 'e.g. change the background to a beach at sunset'],
+  swarm: ['SwarmUI makes the picture: choose any model on the VM, describe the picture, tap Generate. It sets the sampler and the rest itself; Auto uses the steps and prompt strength linked to that model.',
+          'Describe the picture', 'e.g. photo of a woman on a beach at golden hour, natural light, 35mm'],
   create: ['Describe a new picture and Qwen-Image 2512 makes it from scratch, no photo needed. Use "Keep editing this result" afterwards to edit it like any photo.',
            'Describe the picture', 'e.g. photo of a woman on a beach at golden hour, natural light, 35mm'],
   instruct: ['Say what to change and the model edits the photo, e.g. "make her hair red" or "put her on a beach at sunset".',
@@ -753,18 +793,19 @@ const MODE_TEXT = {
 };
 function setMode(m) {
   // Describe edit and Seedream share the instruction text; the tag modes keep their own
-  const written = k => k === 'instruct' || k === 'cloud' || k === 'create' || k === 'video' || (k === 'mask' && !!(qwen || fill || (moss && moss.edit)));
+  const written = k => k === 'instruct' || k === 'cloud' || k === 'create' || k === 'swarm' || k === 'video' || (k === 'mask' && !!(qwen || fill || (moss && moss.edit)));
   if (written(m) && !written(mode)) maskPrompt = $('prompt').value;
   if (!written(m) && written(mode) && maskPrompt !== null) $('prompt').value = maskPrompt;
   const wasWritten = written(mode);
   mode = m; store('mode', m); setStatus('');
-  for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole'], ['modeCloud', 'cloud'], ['modeCreate', 'create'], ['modeVideo', 'video']]) $(id).classList.toggle('on', k === m);
+  for (const [id, k] of [['modeInstruct', 'instruct'], ['modeMask', 'mask'], ['modeWhole', 'whole'], ['modeCloud', 'cloud'], ['modeCreate', 'create'], ['modeSwarm', 'swarm'], ['modeVideo', 'video']]) $(id).classList.toggle('on', k === m);
   const vid = m === 'video';
   $('videoBox').classList.toggle('hidden', !vid); $('countBox').classList.toggle('hidden', vid);
-  const cr = m === 'create';
-  // No photo in Create: hide the photo area (its loaded/empty state is kept for when you switch back)
-  $('stage').style.display = $('empty').style.display = cr ? 'none' : '';
+  const cr = m === 'create', sw = m === 'swarm';
+  // No photo in Create or Swarm: hide the photo area (its loaded/empty state is kept for when you switch back)
+  $('stage').style.display = $('empty').style.display = cr || sw ? 'none' : '';
   $('aspectBox').classList.toggle('hidden', !cr);
+  $('swarmBox').classList.toggle('hidden', !sw); if (sw) applySwarm();
   const masked = m === 'mask', cloud = m === 'cloud', q = usesQwen(), inst = q, fx = fixMask();
   $('engineBox').classList.toggle('hidden', !(masked && fill && (qwen || (moss && moss.edit))));
   $('engChange').classList.toggle('on', masked && !fx); $('engFix').classList.toggle('on', fx);
@@ -773,14 +814,14 @@ function setMode(m) {
   $('paintTools').classList.toggle('hidden', !masked); mask.classList.toggle('hidden', !masked); pts.classList.toggle('hidden', !masked);
   $('markBox').classList.toggle('hidden', !cloud); $('marks').classList.toggle('hidden', !cloud);
   $('seqBox').classList.toggle('hidden', !cloud);
-  for (const id of ['modelBox', 'denoiseBox']) $(id).classList.toggle('hidden', inst || cloud || fx || vid);
-  $('tuneBox').classList.toggle('hidden', cloud || fx || vid);   // applyTune (below) narrows it per model
-  for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr || vid);
-  $('tagBox').classList.toggle('hidden', cloud || q || fx || vid);
-  $('res').previousElementSibling.classList.toggle('hidden', cloud || cr || vid);
+  for (const id of ['modelBox', 'denoiseBox']) $(id).classList.toggle('hidden', inst || cloud || sw || fx || vid);
+  $('tuneBox').classList.toggle('hidden', cloud || sw || fx || vid);   // applyTune (below) narrows it per model
+  for (const id of ['tagBox', 'res']) $(id).classList.toggle('hidden', cloud || cr || sw || vid);
+  $('tagBox').classList.toggle('hidden', cloud || sw || q || fx || vid);
+  $('res').previousElementSibling.classList.toggle('hidden', cloud || cr || sw || vid);
   shapeUI();
-  $('resHint').classList.toggle('hidden', cloud || cr || vid);
-  $('neg').closest('details').classList.toggle('hidden', cloud || fx || vid || kreaActive() || kreaEdit() || mossActive() || mossEdit());
+  $('resHint').classList.toggle('hidden', cloud || cr || sw || vid);
+  $('neg').closest('details').classList.toggle('hidden', cloud || sw || fx || vid || kreaActive() || kreaEdit() || mossActive() || mossEdit());
   $('cloudBox').classList.toggle('hidden', !cloud);
   $('speedBox').classList.toggle('hidden', !inst || !speedLora());
   const encOwner = q21Active() ? q21 : cr ? create : qwen;
@@ -802,6 +843,8 @@ function setMode(m) {
   } else if (vid) {
     if (!wasWritten) $('prompt').value = '';
     applyVideo();
+  } else if (sw) {
+    if (!wasWritten) $('prompt').value = '';
   } else if (cr) {
     if (!wasWritten) $('prompt').value = '';
     applySpeed();
@@ -821,6 +864,7 @@ $('modeMask').onclick = () => setMode('mask');
 $('modeWhole').onclick = () => setMode('whole');
 $('modeCloud').onclick = () => setMode('cloud');
 $('modeCreate').onclick = () => setMode('create');
+$('modeSwarm').onclick = () => setMode('swarm');
 $('modeVideo').onclick = () => setMode('video');
 $('aspect').value = recall('aspect') || '1104x1472';
 $('aspect').addEventListener('change', () => { store('aspect', $('aspect').value); createSizeHint(); });
@@ -1012,12 +1056,14 @@ async function info(node) {
     renderFluxLoras();
   }
   await cloudReady; await ckptReady.catch(() => {});
+  if (recall('mode') === 'swarm') await Promise.race([swarmReady, sleep(6000)]);
   $('modeMask').classList.toggle('hidden', !canMask());
   let saved = recall('mode') || mode;
   if (saved === 'cloud' && !cloudCfg.configured) saved = editHome();
   if (saved === 'whole' && !allModels.length) saved = 'instruct';
   if (saved === 'create' && !create && !q21 && !krea && !moss) saved = editHome();
   if (saved === 'video' && !video && !cloudCfg.configured) saved = editHome();
+  if (saved === 'swarm' && !swarm) saved = editHome();
   if (saved === 'mask' && !canMask()) saved = 'instruct';
   setMode(saved);  // (re-)run now that the models are known
   // Put the last prompt back (setMode clears it; iOS reloads the tab while an image is made)
@@ -2031,7 +2077,7 @@ function setStatus(msg, err) { $('status').textContent = msg; $('status').classL
 function promptTarget() {
   if (mode === 'cloud') return 'seedream';
   if (mode === 'video') return refVid() ? 'seedance_ref' : wanVid() ? 'wan3' : cloudVid() ? 'seedance_start' : 'wan22';
-  if (mode === 'create') return 'create';
+  if (mode === 'create' || mode === 'swarm') return 'create';
   if (mode === 'instruct') return 'qwen_edit';
   if (mode === 'whole') return 'restyle';
   if (qwenMask() || mossEdit()) return 'qwen_area';
@@ -2069,7 +2115,7 @@ $('writeUndo').onclick = () => {
   writeBefore = null; $('writeUndo').classList.add('hidden'); setStatus('Your own words are back.');
 };
 
-const FMT = { q21cfg: v => (+v).toFixed(1), loraW: v => (+v).toFixed(2), kreaLoraW: v => (+v).toFixed(2), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
+const FMT = { q21cfg: v => (+v).toFixed(1), loraW: v => (+v).toFixed(2), kreaLoraW: v => (+v).toFixed(2), swarmLoraW: v => (+v).toFixed(2), swarmSteps: v => v, swarmCfg: v => (+v).toFixed(1), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
 function paint(r) {
   const pct = (r.value - r.min) / (r.max - r.min) * 100;
   r.style.setProperty('--pct', pct + '%');
@@ -2831,6 +2877,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 $('go').onclick = async () => {
   if (mode === 'cloud') return cloudGo();
+  if (mode === 'swarm') return swarmGo();
   if (mode === 'video' && cloudVid()) return cloudVideoGo();
   if (!workflow) return setStatus('Workflow not loaded yet, reload the page.', true);
   if (mode !== 'create' && $('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
@@ -3003,6 +3050,114 @@ function cloudSize(c = full) {
   return clamp(Math.sqrt(area * r)) + '*' + clamp(Math.sqrt(area / r));
 }
 const toJpeg = c => new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
+// ---- 🐝 Swarm: SwarmUI (add-swarmui.sh) makes the picture. The page lists SwarmUI's
+// models and LoRAs (/rv6m/swarm/status) and sends it the prompt (/rv6m/swarm); SwarmUI
+// builds the right graph for whatever model it is. A picture is a background job, like
+// a Seedream edit, and lands with the page's other results.
+let swarm = null;
+const swarmReady = fetch('/rv6m/swarm/status').then(r => r.ok ? r.json() : null).then(s => {
+  if (!s || !s.installed || !(s.models || []).length) return;
+  swarm = s;
+  $('modeSwarm').classList.remove('hidden');
+  renderSwarm();
+}).catch(() => {});
+const swarmClean = n => String(n).replace(/\.safetensors$/, '');
+const swarmShort = n => swarmClean(n).replace(/^.*\//, '');
+function renderSwarm() {
+  const sel = $('swarmModel'); sel.innerHTML = '';
+  const groups = {};
+  for (const m of swarm.models) (groups[m.cls || 'Other'] = groups[m.cls || 'Other'] || []).push(m);
+  for (const g of Object.keys(groups).sort()) {
+    const og = document.createElement('optgroup'); og.label = g;
+    for (const m of groups[g]) og.appendChild(new Option((m.preset ? '' : '· ') + swarmShort(m.name), m.name));
+    sel.appendChild(og);
+  }
+  const saved = recall('swarmModel');
+  sel.value = swarm.models.some(m => m.name === saved) ? saved : (swarm.models.find(m => m.preset) || swarm.models[0]).name;
+  $('swarmShape').value = recall('swarmShape') || '3:4'; if ($('swarmShape').selectedIndex < 0) $('swarmShape').value = '3:4';
+  $('swarmSize').value = recall('swarmSize') || '1'; if ($('swarmSize').selectedIndex < 0) $('swarmSize').value = '1';
+  if (mode === 'swarm') applySwarm();
+}
+const swarmCur = () => swarm && swarm.models.find(m => m.name === $('swarmModel').value);
+function swarmDims() {
+  // Models SwarmUI lists at 2048 (Qwen-Image 2.1's 16x VAE) are comfortable, and much faster, around 1344
+  let side = 1024; const m = swarmCur();
+  if (m && m.w > 0 && m.h > 0) side = Math.sqrt(m.w * m.h) > 1536 ? 1344 : Math.sqrt(m.w * m.h);
+  const [a, b] = $('swarmShape').value.split(':').map(Number), area = (side * +$('swarmSize').value) ** 2;
+  const r16 = v => Math.max(256, Math.min(4096, Math.round(v / 16) * 16));
+  return [r16(Math.sqrt(area * a / b)), r16(Math.sqrt(area * b / a))];
+}
+function swarmState() { try { return JSON.parse(recall('swarmSet') || '{}'); } catch (e) { return {}; } }
+function swarmSave(change) { store('swarmSet', JSON.stringify({ ...swarmState(), ...change })); }
+// LoRAs made for the chosen model's family (SwarmUI knows the family of most files)
+const swarmLoras = () => { const m = swarmCur(); return !m ? [] : swarm.loras.filter(l => !m.compat || !l.compat || l.compat === m.compat); };
+const swarmLorasOn = () => { const on = new Set(swarmState().loras || []); return swarmLoras().filter(l => on.has(l.name)); };
+function applySwarm() {
+  const m = swarmCur(); if (!m) return;
+  const st = swarmState(), own = !!st.own, tune = (st.tune || {})[m.name] || {};
+  $('swarmModelHint').textContent = (m.cls || "SwarmUI doesn't recognise this file's type") +
+    (m.preset ? '' : ' · no settings linked to it yet (models marked · in the list)');
+  const [w, h] = swarmDims();
+  $('swarmSizeHint').textContent = `${w}×${h}`;
+  const list = swarmLoras(), on = new Set(st.loras || []);
+  $('swarmLoraWrap').classList.toggle('hidden', !list.length);
+  const box = $('swarmLoraChips'); box.innerHTML = '';
+  for (const l of list) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'lchip' + (on.has(l.name) ? ' on' : ''); b.textContent = swarmShort(l.name);
+    b.onclick = () => { const f = new Set(swarmState().loras || []); f.has(l.name) ? f.delete(l.name) : f.add(l.name); swarmSave({ loras: [...f] }); applySwarm(); };
+    box.appendChild(b);
+  }
+  $('swarmLoraTune').classList.toggle('hidden', !swarmLorasOn().length);
+  setVal($('swarmLoraW'), +st.loraW || 1);
+  $('swAuto').classList.toggle('on', !own); $('swOwn').classList.toggle('on', own);
+  $('swarmOwn').classList.toggle('hidden', !own);
+  setVal($('swarmSteps'), +tune.steps || +m.steps || 20); setVal($('swarmCfg'), +tune.cfg || +m.cfg || 7);
+  $('swarmTuneHint').textContent = own
+    ? (m.preset ? `This model's own settings: ${m.steps} steps, prompt strength ${m.cfg}.` : 'Look up what this model is made for; fast "turbo" models want about 8 steps at strength 1.')
+    : m.preset ? `Auto: ${m.steps} steps, prompt strength ${m.cfg} (SwarmUI's "${m.preset}" preset for this model).`
+    : "Auto: no preset is linked to this model, so SwarmUI uses its general defaults (20 steps, strength 7), which suit older models. For a newer model choose My own.";
+}
+$('swarmModel').addEventListener('change', () => { store('swarmModel', $('swarmModel').value); applySwarm(); });
+for (const id of ['swarmShape', 'swarmSize']) $(id).addEventListener('change', () => { store(id, $(id).value); applySwarm(); });
+$('swAuto').onclick = () => { swarmSave({ own: false }); applySwarm(); };
+$('swOwn').onclick = () => { swarmSave({ own: true }); applySwarm(); };
+function swarmSaveTune() {
+  const m = swarmCur(); if (!m) return;
+  swarmSave({ loraW: +$('swarmLoraW').value, tune: { ...(swarmState().tune || {}), [m.name]: { steps: +$('swarmSteps').value, cfg: +$('swarmCfg').value } } });
+}
+for (const id of ['swarmLoraW', 'swarmSteps', 'swarmCfg']) {
+  $(id).addEventListener('input', swarmSaveTune);
+  for (const b of document.querySelectorAll(`button.step[data-for=${id}]`)) b.addEventListener('pointerup', () => setTimeout(swarmSaveTune, 0));
+}
+async function swarmGo() {
+  const m = swarmCur();
+  if (!m) return setStatus('Choose a model first.', true);
+  if (!$('prompt').value.trim()) return setStatus('Describe the picture first.', true);
+  $('go').disabled = true;
+  store('workPrompt', $('prompt').value);
+  try {
+    setStatus('Connecting… Stay on this page for now.');
+    if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
+    const st = swarmState(), own = !!st.own, [w, h] = swarmDims(), n = +$('count').value || 1, jobs = [];
+    const body = { model: swarmClean(m.name), prompt: $('prompt').value.trim(), width: w, height: h, seed: -1,
+                   loras: swarmLorasOn().map(l => ({ name: swarmClean(l.name), weight: +$('swarmLoraW').value })),
+                   preset: own ? null : m.preset, steps: own ? +$('swarmSteps').value : null, cfg: own ? +$('swarmCfg').value : null };
+    for (let i = 0; i < n; i++) {
+      const r = await fetch('/rv6m/swarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'The VM refused the SwarmUI picture (' + r.status + ')');
+      jobs.push(j.job);
+    }
+    startBg({ jobs, t0: Date.now(), size: `${w}*${h}`, engine: 'swarm', label: n > 1 ? `SwarmUI × ${n}` : 'SwarmUI picture' });
+    setStatus('🐝 Sent to SwarmUI. It runs in the background: you can start something else now. It shows below when ready (and under Recent edits).');
+  } catch (err) {
+    setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
+      ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.' : err.message, true);
+  } finally {
+    $('go').disabled = false;
+  }
+}
 async function cloudGo() {
   if ($('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
   if (!$('prompt').value.trim()) return setStatus('Type what you want changed first.', true);
@@ -3088,7 +3243,7 @@ async function cloudVideoGo() {
 const bgState = {};  // key -> { entry, done, failed, secs, finished, error, got, gone }
 function bgList() { try { return JSON.parse(recall('bgCloud') || '[]'); } catch (e) { return []; } }
 function bgSave(list) { store('bgCloud', JSON.stringify(list)); }
-const bgLimit = e => e.size === 'video' ? 2700 : 400 + 20 * e.jobs.length;
+const bgLimit = e => e.size === 'video' ? 2700 : e.engine === 'swarm' ? 1800 + 600 * e.jobs.length : 400 + 20 * e.jobs.length;
 const fmtSecs = s => s >= 60 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s` : `${s}s`;
 function renderBg() {
   const box = $('bgBox'); box.innerHTML = '';
@@ -3124,7 +3279,7 @@ async function bgWatch(entry) {
     await sleep(3000);
     if (st.stopped) return;
     st.secs = Math.round((Date.now() - entry.t0) / 1000);
-    if (st.secs > bgLimit(entry)) { st.error = 'timed out waiting for Atlas'; break; }
+    if (st.secs > bgLimit(entry)) { st.error = 'timed out waiting for ' + (entry.engine === 'swarm' ? 'SwarmUI' : 'Atlas'); break; }
     for (const id of entry.jobs.filter(i => !(i in st.done) && !(i in st.failed))) {
       let j;
       try { j = await (await fetch('/rv6m/cloud/job/' + id, { cache: 'no-store' })).json(); }
@@ -3150,7 +3305,7 @@ function openBg(key) {
   showResult(st.got[0], st.got);
   const n = st.entry.jobs.length, nf = Object.keys(st.failed).length;
   const cloud = Math.max(...st.got.map(d => d.seconds || 0));
-  setStatus(`Done in ${fmtSecs(st.secs || 0)} (Atlas Cloud ${cloud.toFixed(0)}s).\n` + (st.entry.note ? st.entry.note + ' · ' : '') +
+  setStatus(`Done in ${fmtSecs(st.secs || 0)}${st.entry.engine === 'swarm' ? '' : ` (Atlas Cloud ${cloud.toFixed(0)}s)`}.\n` + (st.entry.note ? st.entry.note + ' · ' : '') +
             sentSummary(st.got[0].sent, st.entry.size) + (nf ? `\n${nf} of ${n} failed: ${Object.values(st.failed)[0]}` : '') +
             (st.got.length > 1 ? '\nTap a thumbnail to compare.' : ''), nf > 0);
   $('result').scrollIntoView({ behavior: 'smooth' });
@@ -3158,6 +3313,7 @@ function openBg(key) {
 }
 // What the VM actually sent to Atlas, so results can be compared with Atlas's own playground
 function sentSummary(sent, size) {
+  if (sent && sent.swarm) return `SwarmUI · ${String(sent.model).replace(/^.*\//, '')} · ${sent.width}×${sent.height}` + (sent.steps ? ` · ${sent.steps} steps · CFG ${sent.cfgscale ?? '?'}` : sent.presets ? ` · ${sent.presets[0]}` : ' · SwarmUI defaults') + (sent.loras ? ` · ${sent.loras.length} LoRA${sent.loras.length > 1 ? 's' : ''}` : '');
   if (!sent) return 'Seedream · ' + size.replace('*', '×');
   const kb = (sent.images || []).map(x => +(x.match(/\((\d+) KB\)/) || [0, 0])[1]);
   if (sent.finished) return `Seedance draft finished at 1080p (from ${sent.finished})`;
@@ -3357,7 +3513,7 @@ $('stop').onclick = async () => {
 $('again').onclick = async () => {
   genPhoto++;
   await loadIntoCanvas($('out').src); savePhoto();
-  if (mode === 'create') setMode(editHome());  // a created picture is edited like any photo
+  if (mode === 'create' || mode === 'swarm') setMode(editHome());  // a created picture is edited like any photo
   $('result').classList.add('hidden');
   window.scrollTo({ top: 0, behavior: 'smooth' });
   setStatus('Paint the next area to change.');

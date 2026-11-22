@@ -127,7 +127,7 @@ RULES = [
     (r"qwen.?image.?2\.1.*turbo", "Auto Qwen 21 Turbo", 8, 1, "Qwen-Image 2.1 Turbo: 8 steps, CFG 1"),
     (r"qwen.?image.?2\.1", "Auto Qwen 21", 25, 1, "Qwen-Image 2.1: 25 steps, CFG 1"),
     (r"rapid.?aio", "Auto Rapid AIO", 8, 1, "Qwen-Image-Edit Rapid AIO: 8 steps, CFG 1"),
-    (r"qwen.?image.?edit", "Auto Qwen Image Edit", 30, 4, "Qwen-Image-Edit: 30 steps, CFG 4 (without a speed LoRA)"),
+    (r"qwen.?image.?edit", "Auto Qwen Image Edit", 30, 1, "Qwen-Image-Edit: 30 steps, CFG 1 (SwarmUI: edit models need CFG 1)"),
     (r"qwen.?image.?\d{4}", "Auto Qwen Image 2512", 40, 4, "Qwen-Image 2512: 40 steps, CFG 4 (without a speed LoRA)"),
 ]
 root = sys.argv[1]

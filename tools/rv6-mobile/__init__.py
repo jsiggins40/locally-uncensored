@@ -917,6 +917,20 @@ def _swarm_generate(req):
             body["cfgscale"] = float(req["cfg"])
     elif req.get("preset"):       # the preset linked to this model in SwarmUI
         body["presets"] = [req["preset"]]
+    # Photos from the page (already uploaded to ComfyUI's input folder). "edit": they go in
+    # with the prompt, for an edit model to follow your instruction on; "restyle": the first
+    # is the starting picture (img2img), redrawn by "creativity" (0 = unchanged, 1 = all new)
+    photos = []
+    for n in (req.get("images") or [])[:4]:
+        with open(folder_paths.get_annotated_filepath(n), "rb") as f:
+            raw = f.read()
+        mime = "image/png" if raw[:4] == b"\x89PNG" else "image/webp" if raw[8:12] == b"WEBP" else "image/jpeg"
+        photos.append(f"data:{mime};base64," + base64.b64encode(raw).decode())
+    if photos and req.get("kind") == "restyle":
+        body["initimage"] = photos[0]
+        body["initimagecreativity"] = min(1.0, max(0.05, float(req.get("creativity") or 0.6)))
+    elif photos:
+        body["promptimages"] = photos
     j = _swarm_api("GenerateText2Image", body, timeout=3600)
     if j.get("error"):
         raise RuntimeError("SwarmUI: " + str(j["error"])[:400])
@@ -936,7 +950,10 @@ def _swarm_generate(req):
     out = f"rv6_edit_swarm_{int(time.time() * 1000)}.{ext}"
     with open(os.path.join(folder_paths.get_output_directory(), out), "wb") as f:
         f.write(data)
-    sent = {k: v for k, v in body.items() if k != "prompt"}
+    sent = {k: v for k, v in body.items() if k not in ("prompt", "promptimages", "initimage")}   # no text or photo data in the log
+    if photos:
+        sent["photos"] = len(photos if "promptimages" in body else photos[:1])
+        sent["kind"] = "restyle" if "initimage" in body else "edit"
     return {"filename": out, "sent": {"swarm": True, **sent}}
 
 
@@ -957,6 +974,8 @@ async def rv6m_swarm(request):
         w = h = 0
     if not (64 <= w <= 4096 and 64 <= h <= 4096):
         return web.json_response({"error": "bad picture size"}, status=400)
+    if body.get("kind") in ("edit", "restyle") and not body.get("images"):
+        return web.json_response({"error": "need a photo to edit"}, status=400)
     jid = uuid.uuid4().hex
     _jobs[jid] = {"status": "running"}
     asyncio.ensure_future(_run_cloud(jid, _swarm_generate, body))

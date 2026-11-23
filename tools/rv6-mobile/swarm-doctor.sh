@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Checks SwarmUI (add-swarmui.sh) from end to end and says in plain words what is
-# wrong and which command fixes it. Changes nothing. Prints no prompts and no
-# pictures: only status, file names and error messages. Ends with a small test
-# picture (an apple) through SwarmUI, to show the exact error if generating fails.
+# wrong and which command fixes it. Prints no prompts and no pictures: only status,
+# file names and error messages. Ends with a small test picture (an apple) through
+# SwarmUI, to show the exact error if generating fails; it says every 15 seconds
+# what the GPU is doing, and gives up after 15 minutes. Changes nothing, except
+# with "clear", which cancels everything that is running or waiting.
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/swarm-doctor.sh)
 #   ... swarm-doctor.sh) minimax        test with the model whose name contains "minimax"
 #   ... swarm-doctor.sh) notest         skip the test picture
+#   ... swarm-doctor.sh) clear          cancel all running and waiting jobs, free the GPU memory
 export PATH="$HOME/.local/bin:$PATH"
 SW="$HOME/SwarmUI"; C="$HOME/ComfyUI"; WANT="${1:-}"
 SRC="https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile"
@@ -14,6 +17,28 @@ bad() { echo "  PROBLEM  $*"; PROBLEMS=$((PROBLEMS + 1)); }
 say() { echo; echo "== $*"; }
 PROBLEMS=0
 code() { curl -s -o /dev/null -m "${2:-5}" -w '%{http_code}' "$1" 2>/dev/null || true; }
+# How many jobs ComfyUI is running and has waiting (numbers only)
+queue() { curl -s -m 10 127.0.0.1:8188/api/queue 2>/dev/null | python3 -c 'import json,sys; j=json.load(sys.stdin); print(len(j.get("queue_running") or []), len(j.get("queue_pending") or []))' 2>/dev/null || echo "? ?"; }
+
+if [ "$WANT" = clear ]; then
+  echo "Jobs before: $(queue | awk '{print $1" running, "$2" waiting"}')"
+  python3 - <<'PY' || true
+import json, urllib.request
+def post(url, body):
+    try: urllib.request.urlopen(urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=60).read(); return True
+    except Exception as e: print("   (", url.split("/")[-1], "didn't answer:", type(e).__name__, ")"); return False
+try:
+    sid = json.load(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7801/API/GetNewSession", b"{}", {"Content-Type": "application/json"}), timeout=30))["session_id"]
+    post("http://127.0.0.1:7801/API/InterruptAll", {"session_id": sid, "other_sessions": True}) and print("  SwarmUI: told to stop everything")
+except Exception as e: print("  (SwarmUI didn't answer:", type(e).__name__ + ")")
+post("http://127.0.0.1:8188/api/queue", {"clear": True}) and print("  ComfyUI: waiting jobs removed")
+post("http://127.0.0.1:8188/api/interrupt", {}) and print("  ComfyUI: running job stopped")
+post("http://127.0.0.1:8188/api/free", {"unload_models": True, "free_memory": True}) and print("  ComfyUI: models unloaded from the GPU")
+PY
+  sleep 5
+  echo "Jobs now: $(queue | awk '{print $1" running, "$2" waiting"}'); GPU memory used: $(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null || echo '?')"
+  exit 0
+fi
 
 say "VM"
 echo "  up $(uptime -p | sed 's/^up //'); GPU memory used: $(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null || echo '?')"
@@ -47,6 +72,10 @@ fi
 
 say "ComfyUI (SwarmUI draws through it)"
 [ "$(code localhost:8188)" = 200 ] && ok "ComfyUI answers (port 8188)" || bad "ComfyUI does not answer. Run: edit-restart"
+read -r qr qp <<<"$(queue)"
+if [ "$qr" = 0 ] && [ "$qp" = 0 ]; then ok "ComfyUI is idle"
+else echo "  NOTE  ComfyUI is busy: $qr job(s) running, $qp waiting (a picture you started, or an earlier test that was cut off)."
+     echo "        The test picture below waits behind them. To cancel them all: rv6 swarm-doctor clear"; fi
 if curl -s -m 10 localhost:8188/api/object_info/SwarmKSampler 2>/dev/null | grep -q SwarmKSampler; then ok "ComfyUI has SwarmUI's nodes"
 else
   bad "ComfyUI has not loaded SwarmUI's nodes, so SwarmUI cannot draw."
@@ -109,18 +138,50 @@ pick = next((n for n in names if want and want in n.lower()), None) \
 if rank(pick)[1]: print("  NOTE  this is a video model: SwarmUI will try to make a video with it, which is slow and is not what the edit page's Swarm mode is for")
 auto = [t for t in links.get(clean(pick)) or [] if t in presets]
 print(f"  test model: {pick} | preset: {auto[0] if auto else 'none (SwarmUI defaults)'}")
-print("  making a 1024 px test picture (loading a model can take a few minutes)...")
-t = time.time()
-try:
-    r = api("GenerateText2Image", {"session_id": sid, "images": 1, "model": clean(pick), "width": 1024, "height": 1024, "seed": 1,
-                                   "prompt": "a red apple on a wooden table, photo", "donotsave": True, **({"presets": auto[:1]} if auto else {})}, 1800)
-except Exception as e:
-    body = ""
-    try: body = e.read().decode()[:400]
+print("  making a 1024 px test picture (loading a model can take a few minutes)...", flush=True)
+import subprocess, threading
+LIMIT = 900
+res = {}
+def work():
+    try:
+        res["r"] = api("GenerateText2Image", {"session_id": sid, "images": 1, "model": clean(pick), "width": 1024, "height": 1024, "seed": 1,
+                                              "prompt": "a red apple on a wooden table, photo", "donotsave": True, **({"presets": auto[:1]} if auto else {})}, LIMIT + 60)
+    except Exception as e:
+        body = ""
+        try: body = e.read().decode()[:400]
+        except Exception: pass
+        res["e"] = f"{type(e).__name__}: {str(e)[:200]} {body}"
+def state():
+    try: gpu = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception: gpu = "?"
+    try:
+        q = json.load(urllib.request.urlopen("http://127.0.0.1:8188/api/queue", timeout=10))
+        jobs = f"{len(q.get('queue_running') or [])} running, {len(q.get('queue_pending') or [])} waiting"
+    except Exception: jobs = "ComfyUI didn't answer"
+    return f"GPU {gpu} | ComfyUI jobs: {jobs}"
+def stop():
+    try: api("InterruptAll", {"session_id": sid, "other_sessions": False}, 30)
     except Exception: pass
-    print(f"  PROBLEM  the request failed after {time.time() - t:.0f}s: {type(e).__name__}: {str(e)[:200]} {body}"); raise SystemExit
-if r.get("images"): print(f"  OK    SwarmUI made a picture in {time.time() - t:.0f}s. Generating works with this model.")
-else: print(f"  PROBLEM  no picture after {time.time() - t:.0f}s. SwarmUI said: {str(r.get('error') or r)[:600]}")
+th = threading.Thread(target=work, daemon=True); t = time.time(); th.start()
+try:
+    while th.is_alive() and time.time() - t < LIMIT:
+        th.join(15)
+        if th.is_alive(): print(f"    {time.time() - t:>4.0f}s  still working… {state()}", flush=True)
+except KeyboardInterrupt:
+    stop(); print("\n  Stopped by you; the test picture was cancelled."); raise SystemExit
+took = time.time() - t
+if th.is_alive():
+    stop()
+    print(f"  PROBLEM  no picture after {LIMIT // 60} minutes; the test was cancelled. Last state: {state()}")
+    print("           If the GPU showed 0 % the whole time, the job never started: look at the lines below, and try: rv6 swarm-doctor clear")
+    try:
+        pane = subprocess.run(["tmux", "capture-pane", "-pt", "comfy", "-S", "-200"], capture_output=True, text=True, timeout=10).stdout
+        lines = [l for l in pane.splitlines() if re.search(r"error|exception|traceback|out of memory|cuda|killed|failed", l, re.I)]
+        for l in lines[-8:]: print("        comfy:", l[:220])
+    except Exception: pass
+elif "e" in res: print(f"  PROBLEM  the request failed after {took:.0f}s: {res['e']}")
+elif res["r"].get("images"): print(f"  OK    SwarmUI made a picture in {took:.0f}s. Generating works with this model.")
+else: print(f"  PROBLEM  no picture after {took:.0f}s. SwarmUI said: {str(res['r'].get('error') or res['r'])[:600]}")
 PY
 echo
 echo "Done. $PROBLEMS problem(s) found in the checks above (the test picture's result is the last lines). Send this whole output."

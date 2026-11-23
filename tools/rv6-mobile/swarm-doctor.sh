@@ -21,7 +21,7 @@ echo "  free disk: $(df --output=avail -BG "$HOME" | tail -1 | tr -dc 0-9) GB"
 
 say "Installed?"
 if [ -d "$SW/.git" ]; then ok "SwarmUI is in ~/SwarmUI ($(git -C "$SW" log -1 --format='%h from %cs' 2>/dev/null))"
-else bad "SwarmUI is not installed. Run: bash <(curl -fsSL $SRC/add-swarmui.sh)"; echo; echo "Nothing more to check."; exit 0; fi
+else bad "SwarmUI is not installed. Run: edit-restart   and then: rv6 bg add-swarmui"; echo; echo "Nothing more to check."; exit 0; fi
 [ -x "$HOME/.local/bin/swarm-start" ] && ok "swarm-start exists" || bad "swarm-start is missing: add-swarmui.sh did not finish. Run it again."
 sdks=$("$HOME/.dotnet/dotnet" --list-sdks 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
 [ -n "$sdks" ] && ok ".NET: $sdks" || bad ".NET is missing (SwarmUI is built with it). See: cd ~/SwarmUI && ./launchtools/linux-dotnet-install.sh ~/.dotnet"

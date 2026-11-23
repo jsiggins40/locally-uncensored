@@ -121,6 +121,7 @@ sid = api("GetNewSession", {})["session_id"]
 # Titles: letters, digits, spaces and hyphens only (SwarmUI strips other characters).
 RULES = [
     (r"minimax.?h3.?image", "Auto MiniMax H3 Image", 6, 1, "MiniMax H3 Image: 6 steps, CFG 1"),
+    (r"minimax.?h3.?(fl2va|ref2va)", "Auto MiniMax H3 Video", 20, 1, "MiniMax H3 video: 20 steps, CFG 1 (6-8 steps with the Turbo LoRA)"),
     (r"krea.*turbo", "Auto Krea 2 Turbo", 8, 1, "Krea 2 Turbo: 8 steps, CFG 1"),
     (r"moss.?image", "Auto MOSS Image", 25, 2.5, "MOSS-Image: 25 steps, CFG 2.5"),
     (r"omni.*(q21|qwen.?image.?2\.1)|qwen.?image.?2\.1.*omni", "Auto Qwen 21 Omni", 35, 5, "Qwen-Image 2.1 Uncensored Omni: 35 steps, CFG 5 (its authors' settings)"),

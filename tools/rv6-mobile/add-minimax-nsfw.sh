@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Uncensored extras for MiniMax H3 Image (add-minimax-image.sh first):
+# Uncensored extras for MiniMax H3 Image (add-minimax-image.sh) and MiniMax H3 video
+# (add-minimax-video.sh); run this after either or both:
 #   - "Heretic" text encoder: an abliterated copy of the Qwen3-VL 32B model that reads
 #     your prompt, made to pass explicit wording on as written. 4-bit, 15.7 GB, the
 #     same layout as the standard encoder. On the edit page it is the "🔓 Uncensored"
@@ -8,8 +9,10 @@
 #   - HearmemanAI's stills-trained anatomy LoRAs (Hearmeman/minimax-h3-loras: HMPussy V2,
 #     HMBreasts V2, HMPenis, HMInnie; 0.8 GB). They were made for the MiniMax H3 VIDEO
 #     model; they change the same layers the image model has, so they load on it, but
-#     how well they work on stills from the image model is not known. The repo's
-#     video-trained motion LoRAs are left out: they are for moving pictures.
+#     how well they work on stills from the image model is not known.
+#   - When the video model is installed: HearmemanAI's motion LoRA HMNSFW V2.5 (0.1 GB;
+#     word "hmmotion", strength 0.5-0.9), which teaches the video model sex motion. Add
+#     "all" for his single-act ones too (cumshot, squirt, masturbation; 1 GB).
 # Both are pinned to the exact files that were looked at and checked against their
 # SHA-256, then tried on the GPU through SwarmUI. General-purpose ones only: no LoRAs
 # of real people, none for a single act. The encoder is Apache-2.0; the LoRA has no
@@ -17,13 +20,16 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-minimax-nsfw.sh)
 set -euo pipefail
 cd "$HOME/ComfyUI"
-ls models/diffusion_models/*minimax_h3_image* >/dev/null 2>&1 \
-  || { echo "MiniMax H3 Image isn't installed yet. Run add-minimax-image.sh first, then this."; exit 1; }
+ls models/diffusion_models/*minimax_h3_image* models/diffusion_models/*minimax_h3_fl2va* models/diffusion_models/*minimax_h3_ref2va* >/dev/null 2>&1 \
+  || { echo "No MiniMax H3 model is installed yet. Run add-minimax-image.sh and/or add-minimax-video.sh first, then this."; exit 1; }
+WANT_ALL=""; for a in "$@"; do [ "$a" = all ] && WANT_ALL=1; done
+export WANT_ALL
 [ -x "$HOME/.local/bin/swarm-start" ] || { echo "This needs SwarmUI: run add-swarmui.sh first."; exit 1; }
 
 venv/bin/python - <<'PY'
-import hashlib, json, os, shutil, sys
+import glob, hashlib, json, os, shutil, sys
 from huggingface_hub import hf_hub_download
+has_video = bool(glob.glob("models/diffusion_models/*minimax_h3_fl2va*") + glob.glob("models/diffusion_models/*minimax_h3_ref2va*"))
 free = shutil.disk_usage(os.path.realpath("models")).free / 1e9
 print(f"== Free disk: {free:.0f} GB")
 # (repo, commit, file, SHA-256, saved as, what it is)
@@ -46,6 +52,18 @@ FILES += [
     (HM, HMREV, "HMInnie_v1_e50.safetensors", "499196c9d0e5f81ff575ba39a82987112c3bb1e09fbede858877cd950d6c8833",
      "models/loras/minimax_h3_image/hm_innie_v1.safetensors", "HMInnie v1.0 (made for the video model)"),
 ]
+if has_video:      # motion LoRAs: only useful on the video model, so they go in their own folder
+    FILES += [(HM, HMREV, "HMNSFW-AIO-V2.5.safetensors", "a07732a84fd733085eb5d910f602f918fa7a3658117116927e4329f5951a9d2d",
+               "models/loras/minimax_h3/hm_nsfw_motion_v2_5.safetensors", "HMNSFW V2.5, sex motion (video model only)")]
+    if os.environ.get("WANT_ALL"):
+        FILES += [
+            (HM, HMREV, "HMCumshot_V2.safetensors", "1a5b7948bb97f27737e62c3dd5497a3afb77517f230787f45e45c7d8fe3dc24d",
+             "models/loras/minimax_h3/hm_cumshot_v0_5.safetensors", "HMCumshot V0.5 (video model only)"),
+            (HM, HMREV, "HMSquirtV0.1.safetensors", "b25cc54db8e12012e9c1a60c514d767208c855cbf6e81605827d86913249cf24",
+             "models/loras/minimax_h3/hm_squirt_v0_1.safetensors", "HMSquirt v0.1 (video model only)"),
+            (HM, HMREV, "hmmasturbation_v2.safetensors", "f0e4bfbe5baebe972880d2250a227e2f475aa8c18d6d01ed897288d9741659d2",
+             "models/loras/minimax_h3/hm_masturbation_v2.safetensors", "HMMasturbation v2 (video model only)"),
+        ]
 need = [f for f in FILES if not (os.path.exists(f[4]) and os.path.getsize(f[4]) > 0)]
 if need and free < 20:
     sys.exit("Need about 20 GB free. Delete something first (disk-report.sh shows what's there).")
@@ -80,6 +98,15 @@ INFO = {
 for stem, (name, words, note) in INFO.items():
     if os.path.exists(f"models/loras/minimax_h3_image/{stem}.safetensors"):
         meta[f"minimax_h3_image/{stem}.safetensors"] = {"name": name, "baseModel": "MiniMax H3 Image", "trainedWords": words, "note": note}
+VIDEO_INFO = {
+    "hm_nsfw_motion_v2_5": ("🔞 HM sex motion", ["hmmotion"], "strength 0.5-0.9; write one long flowing paragraph, not a list of words"),
+    "hm_cumshot_v0_5": ("🔞 HM Cumshot", ["cumshot"], "strength 0.9; describe it in plain, blunt words"),
+    "hm_squirt_v0_1": ("🔞 HM Squirt", ["hmsquirt"], "experimental; its author runs HM Pussy next to it at 0.4"),
+    "hm_masturbation_v2": ("🔞 HM Masturbation", [], "describe the action in plain words"),
+}
+for stem, (name, words, note) in VIDEO_INFO.items():
+    if os.path.exists(f"models/loras/minimax_h3/{stem}.safetensors"):
+        meta[f"minimax_h3/{stem}.safetensors"] = {"name": name, "baseModel": "MiniMax H3", "trainedWords": words, "note": note + "; for the video model"}
 os.makedirs(os.path.dirname(meta_path), exist_ok=True)
 json.dump(meta, open(meta_path, "w"), indent=1)
 PY
@@ -102,8 +129,10 @@ def names(subtype):
 model = next((n for n in names("Stable-Diffusion") if "minimax_h3_image" in n.lower()), None)
 enc = next((n for n in names("Clip") if "heretic" in n.lower() and "minimax" in n.lower()), None)
 loras = [n for n in names("LoRA") if n.lower().replace("\\", "/").startswith("minimax_h3_image/")]
-print("SwarmUI sees: model", model, "| encoder", enc, "| LoRAs", len(loras))
-if not model: raise SystemExit("SwarmUI doesn't list MiniMax H3 Image; run add-minimax-image.sh again.")
+vmodel = next((n for n in names("Stable-Diffusion") if "minimax_h3_fl2va" in n.lower()), None)
+vloras = [n for n in names("LoRA") if n.lower().replace("\\", "/").startswith("minimax_h3/hm_")]
+print("SwarmUI sees: image model", model, "| video model", vmodel, "| encoder", enc, "| LoRAs", len(loras), "+", len(vloras), "for video")
+if not model and not vmodel: raise SystemExit("SwarmUI doesn't list a MiniMax H3 model; run add-minimax-image.sh or add-minimax-video.sh again.")
 clean = lambda n: n[:-len(".safetensors")] if n.endswith(".safetensors") else n
 def state():      # what the GPU and ComfyUI are doing, for the "still working" lines
     try: gpu = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader"], capture_output=True, text=True, timeout=10).stdout.strip()
@@ -113,14 +142,16 @@ def state():      # what the GPU and ComfyUI are doing, for the "still working" 
         jobs = f"{len(q.get('queue_running') or [])} running, {len(q.get('queue_pending') or [])} waiting"
     except Exception: jobs = "ComfyUI didn't answer"
     return f"GPU {gpu} | ComfyUI jobs: {jobs}"
-def gen(label, extra):
-    """One test picture. Says every 20 s that it is still working; cancelled after LIMIT.
+def gen(label, extra, video=False):
+    """One test picture (or, with video, a 1-second 608x352 test video on the video model). Says every 20 s that it is still working; cancelled after LIMIT.
     True = picture made, False = SwarmUI refused or failed, None = no answer in time (says nothing about the file)."""
     res = {}
     def work():
         try:
-            res["r"] = api("GenerateText2Image", {"session_id": sid, "images": 1, "model": clean(model), "width": 1024, "height": 1024, "seed": 1,
-                                                  "prompt": "a red apple on a wooden table, photo", "presets": ["Auto MiniMax H3 Image"], "donotsave": True, **extra}, LIMIT + 60)
+            base = {"model": clean(vmodel), "width": 608, "height": 352, "text2videoframes": 22, "presets": ["Auto MiniMax H3 Video"]} if video else \
+                   {"model": clean(model), "width": 1024, "height": 1024, "presets": ["Auto MiniMax H3 Image"]}
+            res["r"] = api("GenerateText2Image", {"session_id": sid, "images": 1, "seed": 1, "prompt": "a red apple on a wooden table, photo",
+                                                  "donotsave": True, **base, **extra}, LIMIT + 60)
         except Exception as e:
             res["e"] = f"{type(e).__name__}: {str(e)[:200]}"
     print(f"{label}: started", flush=True)
@@ -143,15 +174,26 @@ def aside(path, why):
     shutil.move(path, os.path.join("models/_disabled", os.path.basename(path)))
     print(f"   moved {os.path.basename(path)} to models/_disabled ({why}), so the page won't offer it")
 # First the model as it is: if that fails the problem is elsewhere, and nothing is moved aside
-if not gen("MINIMAX H3 IMAGE, AS IT IS", {}):
-    raise SystemExit("The model itself didn't make a picture through SwarmUI, so the extras weren't tested. They stay installed. Send the lines above.")
-if enc and gen("UNCENSORED ENCODER TEST", {"qwenmodel": enc}) is False:
-    aside("models/text_encoders/" + enc, "it didn't work")
-for lora in loras:      # each on a plain prompt: this shows it loads and runs, not what it draws
-    if gen(f"LORA TEST {os.path.basename(lora)}", {"loras": [clean(lora)], "loraweights": ["1"]}) is False:
-        aside("models/loras/" + lora, "it didn't work")
+if model:
+    if not gen("MINIMAX H3 IMAGE, AS IT IS", {}):
+        print("The image model itself didn't make a picture through SwarmUI, so its extras weren't tested. They stay installed. Send the lines above.")
+    else:
+        if enc and gen("UNCENSORED ENCODER TEST", {"qwenmodel": enc}) is False:
+            aside("models/text_encoders/" + enc, "it didn't work")
+        for lora in loras:      # each on a plain prompt: this shows it loads and runs, not what it draws
+            if gen(f"LORA TEST {os.path.basename(lora)}", {"loras": [clean(lora)], "loraweights": ["1"]}) is False:
+                aside("models/loras/" + lora, "it didn't work")
+if vmodel and vloras:
+    if not gen("MINIMAX H3 VIDEO, AS IT IS", {}, video=True):
+        print("The video model itself didn't make a video through SwarmUI, so its LoRAs weren't tested. They stay installed. Send the lines above.")
+    else:
+        for lora in vloras:
+            if gen(f"VIDEO LORA TEST {os.path.basename(lora)}", {"loras": [clean(lora)], "loraweights": ["0.7"]}, video=True) is False:
+                aside("models/loras/" + lora, "it didn't work")
 PY
 
 echo
 echo "Done. Run edit-restart, reload the edit page, then: 🐝 Swarm → Model → minimax_h3_image…"
 echo "  Content: 🔓 Uncensored (the text encoder) · LoRAs: tap the ones you want"
+echo "Video (when installed): in SwarmUI's own page (:8444), the LoRAs tab at the bottom has all of them;"
+echo "  the anatomy ones work on the video model too (they were made for it)."

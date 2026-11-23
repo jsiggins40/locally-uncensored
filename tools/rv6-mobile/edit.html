@@ -602,7 +602,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-23d';
+const PAGE_BUILD = '2026-11-23e';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -3152,7 +3152,10 @@ const toJpeg = c => new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
 let swarm = null, loraMeta = {};   // loraMeta: lora_info.json (names, trigger words and notes the installers wrote)
 const swarmLoraInfo = l => loraMeta[l.name] || loraMeta[l.name.replace(/\\/g, '/')] || {};
 const swarmReady = fetch('/rv6m/swarm/status').then(r => r.ok ? r.json() : null).then(s => {
-  if (!s || !s.installed || !(s.models || []).length) return;
+  if (!s || !s.installed) return;
+  // Swarm mode makes pictures: video models (MiniMax H3 fl2va / ref2va) are used in SwarmUI's own page
+  s.models = (s.models || []).filter(m => m.compat !== 'minimax-h3' && !/fl2va|ref2va/i.test(m.name));
+  if (!s.models.length) return;
   swarm = s;
   $('modeSwarm').classList.remove('hidden');
   renderSwarm();

@@ -89,11 +89,22 @@ if sudo -n tailscale serve status 2>/dev/null | grep -q ':8444'; then ok "https:
 else bad "port 8444 is not published. Run: sudo tailscale serve --bg --https=8444 http://127.0.0.1:7801"; fi
 
 say "The edit page's 🐝 Swarm mode"
-st=$(curl -s -m 60 localhost:8188/rv6m/swarm/status 2>/dev/null)
-python3 - "$st" <<'PY' || true
+# The bridge asks SwarmUI four things in a row, so it gets time; how long it took is printed
+tmpf=$(mktemp)
+read -r bcode btime <<<"$(curl -s -m 200 -o "$tmpf" -w '%{http_code} %{time_total}' 127.0.0.1:8188/rv6m/swarm/status 2>/dev/null)"
+st=$(head -c 400000 "$tmpf"); rm -f "$tmpf"
+echo "  the bridge answered with HTTP ${bcode:-nothing} after ${btime:-?} s"
+if [ "$bcode" = 500 ]; then
+  echo "  its error in ComfyUI's window:"
+  tmux capture-pane -pt comfy -S -300 2>/dev/null | grep -n -E "Traceback|Error|rv6_mobile|File \"" | tail -12 | cut -c1-220 | sed 's/^/        /'
+fi
+python3 - "$st" "$bcode" <<'PY' || true
 import json, sys
 try: j = json.loads(sys.argv[1])
-except Exception: print("  PROBLEM  the edit page's bridge gave no answer: the page code on this VM is old or ComfyUI is down. Run: edit-restart"); raise SystemExit
+except Exception:
+    why = {"000": "no answer in 200 seconds: SwarmUI is not answering the bridge's questions (timings below)", "404": "this VM's page code is old. Run: edit-restart",
+           "500": "the bridge's code failed (the lines above say where)"}.get(sys.argv[2], "an answer that is not what the page expects")
+    print("  PROBLEM  the edit page's bridge:", why); raise SystemExit
 if not j.get("installed"): print("  PROBLEM  the bridge cannot reach SwarmUI:", str(j.get("why"))[:200])
 else:
     ms = j.get("models") or []
@@ -122,6 +133,16 @@ except Exception as e: print("  (couldn't read the backends:", type(e).__name__,
 try: files = api("ListModels", {"session_id": sid, "path": "", "depth": 8, "subtype": "Stable-Diffusion", "allowRemote": False}).get("files") or []
 except Exception as e: files = []; print("  PROBLEM  couldn't list the models:", type(e).__name__, str(e)[:150])
 print(f"  SwarmUI lists {len(files)} models")
+# How long SwarmUI takes for each thing the edit page's bridge asks it (a slow one is what makes the page's Swarm mode hang)
+for label, name, body in (("models", "ListModels", {"subtype": "Stable-Diffusion"}), ("LoRAs", "ListModels", {"subtype": "LoRA"}),
+                          ("text encoders", "ListModels", {"subtype": "Clip"}), ("presets", "GetMyUserData", {})):
+    t0 = time.time()
+    try:
+        r = api(name, {"session_id": sid, **({"path": "", "depth": 8, "sortBy": "Name", "allowRemote": False} if name == "ListModels" else {}), **body}, 90)
+        n = len(r.get("files") or r.get("presets") or [])
+        print(f"    {label}: {n} in {time.time() - t0:.1f}s" + ("" if not r.get("error") else f" | SwarmUI said: {str(r.get('error'))[:200]}"), flush=True)
+    except Exception as e:
+        print(f"  PROBLEM  {label}: no answer after {time.time() - t0:.0f}s ({type(e).__name__})", flush=True)
 if want == "notest" or not files: raise SystemExit
 try: presets = {p.get("title") for p in api("GetMyUserData", {"session_id": sid}).get("presets") or []}
 except Exception: presets = set()
@@ -184,4 +205,4 @@ elif res["r"].get("images"): print(f"  OK    SwarmUI made a picture in {took:.0f
 else: print(f"  PROBLEM  no picture after {took:.0f}s. SwarmUI said: {str(res['r'].get('error') or res['r'])[:600]}")
 PY
 echo
-echo "Done. $PROBLEMS problem(s) found in the checks above (the test picture's result is the last lines). Send this whole output."
+echo "Done. Every line above that starts with PROBLEM is something to fix; if there is none, all is well. Send this whole output."

@@ -100,9 +100,13 @@ try: links = (api("GetMyUserData", {"session_id": sid}).get("model_preset_links"
 except Exception: links = {}
 clean = lambda n: n[:-len(".safetensors")] if n.endswith(".safetensors") else n
 names = [f.get("name") or "" for f in files]
+# Picture models first: ones with an Auto preset, then anything that isn't a video model by its name
+import re
+rank = lambda n: (0 if links.get(clean(n)) else 1, 1 if re.search(r"2va|[ti]2v|video|wan2", n, re.I) else 0)
+names.sort(key=rank)
 pick = next((n for n in names if want and want in n.lower()), None) \
-    or next((n for n in names if "krea" in n.lower() and "turbo" in n.lower()), None) \
-    or next((n for n in names if links.get(clean(n))), None) or names[0]
+    or next((n for n in names if "krea" in n.lower() and "turbo" in n.lower()), None) or names[0]
+if rank(pick)[1]: print("  NOTE  this is a video model: SwarmUI will try to make a video with it, which is slow and is not what the edit page's Swarm mode is for")
 auto = [t for t in links.get(clean(pick)) or [] if t in presets]
 print(f"  test model: {pick} | preset: {auto[0] if auto else 'none (SwarmUI defaults)'}")
 print("  making a 1024 px test picture (loading a model can take a few minutes)...")

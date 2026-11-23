@@ -7,13 +7,23 @@
 #   the model, 8-bit (21 GB); its Qwen3-VL 32B text encoder, 4-bit (16 GB, made for
 #   Blackwell GPUs like the RTX PRO 6000); its own VAE (1 GB). About 38 GB.
 # Then makes a test picture and a test edit on the GPU through SwarmUI.
-# Under the MiniMax H3 Image Community License (see the model's page before any
-# commercial use).
+# LICENCE: the MiniMax-H3-Image Community License only grants rights in its "Applicable
+# Territory": worldwide EXCLUDING the European Union, the United Kingdom, the Republic
+# of Korea and the United States (it says to ask MiniMax, or use their hosted API,
+# there). Check where your VM and you are before installing; this script asks.
 #   bash <(curl -fsSL https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile/add-minimax-image.sh)
 set -euo pipefail
 cd "$HOME/ComfyUI"
 SRC="https://raw.githubusercontent.com/jsiggins40/locally-uncensored/rv6-mobile-editor/tools/rv6-mobile"
 [ -x "$HOME/.local/bin/swarm-start" ] || { echo "MiniMax H3 Image runs through SwarmUI: run add-swarmui.sh first, then this."; exit 1; }
+
+if [ -z "${MINIMAX_LICENCE_OK:-}" ]; then
+  echo "LICENCE NOTE: MiniMax's licence for this model covers use worldwide EXCEPT in the"
+  echo "European Union, the United Kingdom, South Korea and the United States."
+  echo "Full text: https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE"
+  read -rp "Type yes to install anyway, anything else to stop: " ok </dev/tty || ok=""
+  [ "$ok" = yes ] || { echo "Stopped; nothing was downloaded."; exit 0; }
+fi
 
 echo "== ComfyUI must know MiniMax H3 Image (native support from mid-Nov 2026)"
 if ! grep -q "class MiniMaxH3Image" comfy/supported_models.py 2>/dev/null; then

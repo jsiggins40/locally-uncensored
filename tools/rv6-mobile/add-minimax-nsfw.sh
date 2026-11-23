@@ -87,14 +87,16 @@ PY
 echo "== Tests on the GPU, through SwarmUI (loading the encoder takes a few minutes)"
 curl -sf -o /dev/null -m 5 localhost:7801 || "$HOME/.local/bin/swarm-start"
 python3 - <<'PY'
-import json, os, shutil, time, urllib.request
+import json, os, shutil, subprocess, threading, time, urllib.request
 B = "http://127.0.0.1:7801"
+LIMIT = 900        # seconds one test may take before it is cancelled
 def api(name, body, timeout=3600):
     req = urllib.request.Request(f"{B}/API/{name}", json.dumps(body).encode(), {"Content-Type": "application/json"})
     return json.load(urllib.request.urlopen(req, timeout=timeout))
 sid = api("GetNewSession", {}, 60)["session_id"]
-try: api("TriggerRefresh", {"session_id": sid}, 600)      # make SwarmUI see the new files
-except Exception as e: print("   (couldn't refresh SwarmUI's lists:", type(e).__name__ + "; restart it with swarm-start if the tests can't find the files)")
+print("   asking SwarmUI to look for the new files (up to 2 minutes)...", flush=True)
+try: api("TriggerRefresh", {"session_id": sid}, 120)      # make SwarmUI see the new files
+except Exception as e: print("   (SwarmUI didn't finish refreshing its lists:", type(e).__name__ + "; restart it with swarm-start if the tests can't find the files)", flush=True)
 def names(subtype):
     return [f.get("name") or "" for f in api("ListModels", {"session_id": sid, "path": "", "depth": 8, "subtype": subtype, "allowRemote": False}, 120).get("files") or []]
 model = next((n for n in names("Stable-Diffusion") if "minimax_h3_image" in n.lower()), None)
@@ -103,16 +105,39 @@ loras = [n for n in names("LoRA") if n.lower().replace("\\", "/").startswith("mi
 print("SwarmUI sees: model", model, "| encoder", enc, "| LoRAs", len(loras))
 if not model: raise SystemExit("SwarmUI doesn't list MiniMax H3 Image; run add-minimax-image.sh again.")
 clean = lambda n: n[:-len(".safetensors")] if n.endswith(".safetensors") else n
-def gen(label, extra):
-    t = time.time()
+def state():      # what the GPU and ComfyUI are doing, for the "still working" lines
+    try: gpu = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception: gpu = "?"
     try:
-        r = api("GenerateText2Image", {"session_id": sid, "images": 1, "model": clean(model), "width": 1024, "height": 1024, "seed": 1,
-                                       "prompt": "a red apple on a wooden table, photo", "presets": ["Auto MiniMax H3 Image"], "donotsave": True, **extra})
-    except Exception as e:
-        print(f"{label}: failed ({type(e).__name__}: {str(e)[:200]})"); return False
+        q = json.load(urllib.request.urlopen("http://127.0.0.1:8188/api/queue", timeout=10))
+        jobs = f"{len(q.get('queue_running') or [])} running, {len(q.get('queue_pending') or [])} waiting"
+    except Exception: jobs = "ComfyUI didn't answer"
+    return f"GPU {gpu} | ComfyUI jobs: {jobs}"
+def gen(label, extra):
+    """One test picture. Says every 20 s that it is still working; cancelled after LIMIT.
+    True = picture made, False = SwarmUI refused or failed, None = no answer in time (says nothing about the file)."""
+    res = {}
+    def work():
+        try:
+            res["r"] = api("GenerateText2Image", {"session_id": sid, "images": 1, "model": clean(model), "width": 1024, "height": 1024, "seed": 1,
+                                                  "prompt": "a red apple on a wooden table, photo", "presets": ["Auto MiniMax H3 Image"], "donotsave": True, **extra}, LIMIT + 60)
+        except Exception as e:
+            res["e"] = f"{type(e).__name__}: {str(e)[:200]}"
+    print(f"{label}: started", flush=True)
+    th = threading.Thread(target=work, daemon=True); t = time.time(); th.start()
+    while th.is_alive() and time.time() - t < LIMIT:
+        th.join(20)
+        if th.is_alive(): print(f"    {time.time() - t:>4.0f}s  still working… {state()}", flush=True)
+    if th.is_alive():
+        try: api("InterruptAll", {"session_id": sid, "other_sessions": False}, 30)
+        except Exception: pass
+        print(f"{label}: no answer after {LIMIT // 60} minutes; cancelled. Last state: {state()}", flush=True); return None
+    if "e" in res:
+        print(f"{label}: failed ({res['e']})", flush=True); return False
+    r = res["r"]
     if r.get("error") or not r.get("images"):
-        print(f"{label}: SwarmUI said: {str(r.get('error') or r)[:400]}"); return False
-    print(f"{label}: ok in {time.time() - t:.0f}s"); return True
+        print(f"{label}: SwarmUI said: {str(r.get('error') or r)[:400]}", flush=True); return False
+    print(f"{label}: ok in {time.time() - t:.0f}s", flush=True); return True
 def aside(path, why):
     os.makedirs("models/_disabled", exist_ok=True)
     shutil.move(path, os.path.join("models/_disabled", os.path.basename(path)))
@@ -120,10 +145,10 @@ def aside(path, why):
 # First the model as it is: if that fails the problem is elsewhere, and nothing is moved aside
 if not gen("MINIMAX H3 IMAGE, AS IT IS", {}):
     raise SystemExit("The model itself didn't make a picture through SwarmUI, so the extras weren't tested. They stay installed. Send the lines above.")
-if enc and not gen("UNCENSORED ENCODER TEST", {"qwenmodel": enc}):
+if enc and gen("UNCENSORED ENCODER TEST", {"qwenmodel": enc}) is False:
     aside("models/text_encoders/" + enc, "it didn't work")
 for lora in loras:      # each on a plain prompt: this shows it loads and runs, not what it draws
-    if not gen(f"LORA TEST {os.path.basename(lora)}", {"loras": [clean(lora)], "loraweights": ["1"]}):
+    if gen(f"LORA TEST {os.path.basename(lora)}", {"loras": [clean(lora)], "loraweights": ["1"]}) is False:
         aside("models/loras/" + lora, "it didn't work")
 PY
 

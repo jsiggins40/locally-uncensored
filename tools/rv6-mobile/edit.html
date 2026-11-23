@@ -550,6 +550,15 @@
   <label>Speed</label>
   <div class="seg"><button id="vidFast">⚡ Fast (4 steps)</button><button id="vidQual">✨ Quality (follows the prompt)</button></div>
   </div>
+  <div id="vidLoraBox" class="hidden">
+    <label>Video LoRAs (Wan 2.2)</label>
+    <div class="chips" id="vidLoraChips"></div>
+    <div id="vidLoraTune" class="hidden">
+      <div class="lbl"><span>LoRA strength</span></div>
+      <div class="ctl"><button class="step" data-for="vidLoraW" data-dir="-1" aria-label="Less">−</button><input id="vidLoraW" type="range" min="0.2" max="2" step="0.05" value="1" data-nudge="0.1"><button class="step" data-for="vidLoraW" data-dir="1" aria-label="More">+</button><span class="val" id="vidLoraWVal"></span></div>
+    </div>
+    <div class="hint" id="vidLoraHint"></div>
+  </div>
   <div id="vidSoundBox" class="hidden">
   <label>Sound</label>
   <div class="seg"><button id="vidSoundOn">🔊 With sound</button><button id="vidSoundOff">Silent</button></div>
@@ -593,7 +602,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-23c';
+const PAGE_BUILD = '2026-11-23d';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -1013,7 +1022,25 @@ async function info(node) {
     sviH: loras.filter(n => /svi.*high.*pro/i.test(n)).sort().pop(),
     sviL: loras.filter(n => /svi.*low.*pro/i.test(n)).sort().pop(),
   };
-  if (svi.WanImageToVideoSVIPro && Object.values(v).every(Boolean)) { video = v; $('modeVideo').classList.remove('hidden'); }
+  if (svi.WanImageToVideoSVIPro && Object.values(v).every(Boolean)) {
+    // More Wan 2.2 image-to-video LoRAs (add-models.sh puts them in models/loras/wan22_i2v/). Most come as
+    // two files, one for the high-noise model and one for the low-noise model: shown here as one button
+    const groups = {};
+    for (const n of loras) {
+      const m = meta[n] || meta[n.replace(/\\/g, '/')] || {};
+      if (!(/^wan22_i2v[\\/]/i.test(n) || /wan.*2\.2.*i2v/i.test(m.baseModel || '')) || Object.values(v).includes(n)) continue;
+      const base = n.replace(/^.*[\\/]|\.safetensors$/g, '');
+      const noise = m.noise || (/high/i.test(base) ? 'high' : /low/i.test(base) ? 'low' : 'both');
+      const key = String(m.group || base.replace(/[-_ .]*(high|low)([-_ .]*noise)?/i, '').toLowerCase() || base);
+      const g = groups[key] = groups[key] || { key, label: '', words: [], note: '' };
+      if (noise !== 'low') g.high = n;
+      if (noise !== 'high') g.low = n;
+      g.label = g.label || m.name || base.replace(/[-_ .]*(high|low)([-_ .]*noise)?/i, '');
+      g.words = [...new Set([...g.words, ...(m.trainedWords || [])])]; g.note = g.note || m.note || '';
+    }
+    v.extras = Object.values(groups).sort((a, b) => a.label.localeCompare(b.label));
+    video = v; $('modeVideo').classList.remove('hidden');
+  }
   // ⬆️ Upscale: SeedVR2 (add-upscaler.sh), built into ComfyUI. The 7B over the 3B; fp16 first, then
   // 8-bit, nvfp4 last (made for Blackwell GPUs). "Sharp" is its more-detail version.
   const svPrec = n => /fp16|bf16/i.test(n) ? 3 : /int8|fp8/i.test(n) ? 2 : /nvfp4/i.test(n) ? 0 : 1;
@@ -1671,7 +1698,43 @@ function renderRefChips() {
   }
   if (!n) box.textContent = 'Choose a photo first.';
 }
+// Video LoRAs for the local engine: tap to switch on; one strength for all of them
+function vidLoraState() { try { return JSON.parse(recall('vidLoras') || '{}'); } catch (e) { return {}; } }
+const vidExtras = () => {
+  if (!video || cloudVid() || !(video.extras || []).length) return [];
+  const st = vidLoraState(), on = new Set(st.keys || []);
+  return video.extras.filter(l => on.has(l.key)).map(l => ({ ...l, w: +st.w || 1 }));
+};
+function applyVidLoras() {
+  const show = !!video && !cloudVid() && (video.extras || []).length > 0;
+  $('vidLoraBox').classList.toggle('hidden', !show);
+  if (!show) return;
+  const st = vidLoraState(), picked = new Set((st.keys || []).filter(k => video.extras.some(l => l.key === k)));
+  const box = $('vidLoraChips'); box.innerHTML = '';
+  for (const l of video.extras) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'lchip' + (picked.has(l.key) ? ' on' : ''); b.textContent = l.label;
+    b.onclick = () => {
+      const s2 = vidLoraState(), k = new Set(s2.keys || []);
+      k.has(l.key) ? k.delete(l.key) : k.add(l.key);
+      s2.keys = [...k]; store('vidLoras', JSON.stringify(s2)); applyVidLoras();
+    };
+    box.appendChild(b);
+  }
+  const act = video.extras.filter(l => picked.has(l.key));
+  $('vidLoraTune').classList.toggle('hidden', !act.length);
+  setVal($('vidLoraW'), +st.w || 1);
+  const words = act.flatMap(l => l.words), half = act.filter(l => !l.high || !l.low);
+  $('vidLoraHint').textContent = !act.length ? 'Tap one to switch it on. They teach the video model a motion or a look it does not know.'
+    : act.map(l => l.note ? `${l.label}: ${l.note}` : l.label).join(' · ') + (words.length ? ` · Added to your prompt automatically: ${words.join(', ')}.` : '') +
+      (half.length ? ` · ${half.map(l => l.label).join(', ')}: only the ${half[0].high ? 'high' : 'low'}-noise file is installed, so it works at half strength at best.` : '') +
+      ' · Describe the action in the prompt as well; Quality follows it better than Fast.';
+}
+function saveVidLoraW() { const st = vidLoraState(); st.w = +$('vidLoraW').value; store('vidLoras', JSON.stringify(st)); }
+$('vidLoraW').addEventListener('input', saveVidLoraW);
+for (const b of document.querySelectorAll('button.step[data-for=vidLoraW]')) b.addEventListener('pointerup', saveVidLoraW);
 function applyVideo() {
+  applyVidLoras();
   const cv = cloudVid(), wan = wanVid(), ref = cv && vidKind === 'ref' && !wan;
   $('vidKindBox').classList.toggle('hidden', !cv || wan);
   $('vidDraftBox').classList.toggle('hidden', wan);
@@ -1736,7 +1799,7 @@ const VID_NEG = '色调艳丽，过曝，静态，细节模糊不清，字幕，
 // following). Quality: 3 stages over 8 steps: the first 2 on the plain high-noise
 // model at CFG 3.5, so the prompt decides the motion, then LightX2V high (2-4)
 // and low (4-8) at CFG 1 for the detail. About 2x the time of Fast.
-function buildVideoWorkflow(imgName, text, seed) {
+function buildVideoWorkflow(imgName, text, seed, extras = []) {
   const [w, h] = vidDims(), n = vidClips(), steps = vidQuality ? 8 : 4, split = steps / 2, q = vidQuality;
   const p = {
     'm1': { class_type: 'UNETLoader', inputs: { unet_name: video.high, weight_dtype: 'default' } },
@@ -1745,7 +1808,7 @@ function buildVideoWorkflow(imgName, text, seed) {
     'va': { class_type: 'VAELoader', inputs: { vae_name: video.vae } },
     'h1': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['m1', 0], lora_name: video.lightH, strength_model: 1 } },
     'h2': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['h1', 0], lora_name: video.sviH, strength_model: 1 } },
-    'hs': { class_type: 'ModelSamplingSD3', inputs: { model: ['h2', 0], shift: 5 } },
+    'hs': { class_type: 'ModelSamplingSD3', inputs: { model: ['h2', 0], shift: 5 } },   // re-pointed below when LoRAs are on
     'l1': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['m2', 0], lora_name: video.lightL, strength_model: 1 } },
     'l2': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['l1', 0], lora_name: video.sviL, strength_model: 1 } },
     'ls': { class_type: 'ModelSamplingSD3', inputs: { model: ['l2', 0], shift: 5 } },
@@ -1757,6 +1820,19 @@ function buildVideoWorkflow(imgName, text, seed) {
     'fit': { class_type: 'ImageScale', inputs: { image: ['img', 0], upscale_method: 'lanczos', width: w, height: h, crop: 'center' } },
     'anc': { class_type: 'VAEEncode', inputs: { pixels: ['fit', 0], vae: ['va', 0] } },
   };
+  // Each LoRA's high-noise file goes on the high-noise model (both copies in Quality), its low-noise file on the low one
+  const chain = (tag, from, side) => {
+    let last = from;
+    extras.forEach((l, i) => {
+      if (!l[side]) return;
+      p[`x${tag}${i}`] = { class_type: 'LoraLoaderModelOnly', inputs: { model: [last, 0], lora_name: l[side], strength_model: l.w } };
+      last = `x${tag}${i}`;
+    });
+    return last;
+  };
+  p['hs'].inputs.model = [chain('h', 'h2', 'high'), 0];
+  p['ls'].inputs.model = [chain('l', 'l2', 'low'), 0];
+  if (q) p['gs'].inputs.model = [chain('g', 'g1', 'high'), 0];
   let frames = null;
   for (let i = 0; i < n; i++) {
     const c = 'c' + i;
@@ -2132,7 +2208,7 @@ $('writeUndo').onclick = () => {
   writeBefore = null; $('writeUndo').classList.add('hidden'); setStatus('Your own words are back.');
 };
 
-const FMT = { q21cfg: v => (+v).toFixed(1), loraW: v => (+v).toFixed(2), kreaLoraW: v => (+v).toFixed(2), swarmLoraW: v => (+v).toFixed(2), swarmSteps: v => v, swarmCfg: v => (+v).toFixed(1), swarmCreat: v => (+v).toFixed(2), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
+const FMT = { q21cfg: v => (+v).toFixed(1), loraW: v => (+v).toFixed(2), kreaLoraW: v => (+v).toFixed(2), vidLoraW: v => (+v).toFixed(2), swarmLoraW: v => (+v).toFixed(2), swarmSteps: v => v, swarmCfg: v => (+v).toFixed(1), swarmCreat: v => (+v).toFixed(2), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
 function paint(r) {
   const pct = (r.value - r.min) / (r.max - r.min) * 100;
   r.style.setProperty('--pct', pct + '%');
@@ -2916,7 +2992,9 @@ $('go').onclick = async () => {
     let model = $('model').value;
     if (mode === 'video') {
       if (!photoIn) throw new Error('Choose a photo first: the video starts from it.');
-      p = buildVideoWorkflow(imgName, $('prompt').value.trim(), seed);
+      const vx = vidExtras(), vhave = $('prompt').value.toLowerCase();
+      const vwords = vx.flatMap(l => l.words).filter(t => !vhave.includes(t.toLowerCase()));
+      p = buildVideoWorkflow(imgName, [...vwords, $('prompt').value.trim()].filter(Boolean).join(' '), seed, vx);
     } else if (kreaEdit()) {
       const [w, h] = kreaEditDims();
       p = buildKreaEditWorkflow(imgName, $('prompt').value.trim(), seed, +$('steps').value || 8, w, h, +$('cfg').value || 1);
@@ -3460,7 +3538,7 @@ async function waitForJobs(ids, t0) {
       }
       if (Object.keys(done).length === ids.length) {
         const gpu = Object.values(gpuMs).reduce((a, b) => a + b, 0) / 1000;
-        const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip`
+        const what = jobNote ? jobNote : mode === 'video' ? `Video · ${$('vidLen').value} s · ${vidDims().join('×')} · ${vidQuality ? 8 : 4} steps per clip${vidExtras().length ? ` · ${vidExtras().length} LoRA${vidExtras().length > 1 ? 's' : ''}` : ''}`
           : mossActive() ? `MOSS-Image · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps · ${createDims().join('×')}`
           : mossEdit() ? `MOSS Edit ${moss.edit.name} · ${mossMode === 'safe' ? 'safe' : mossLora() ? 'uncensored + LoRA' : 'uncensored'} · ${$('steps').value} steps` + (mode === 'mask' ? ' · selected area' : hasSecond() ? ` · ${1 + usedMore().length} photos` : '')
           : kreaActive() ? `Krea 2 Turbo${kreaNsfw() ? ' · uncensored' : ''}${kreaExtras().length ? ` · ${kreaExtras().length} LoRA${kreaExtras().length > 1 ? 's' : ''}` : ''} · ${$('steps').value} steps · ${createDims().join('×')}`

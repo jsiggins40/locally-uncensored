@@ -30,7 +30,8 @@ built=$(find "$SW/src/bin" -name SwarmUI.dll 2>/dev/null | head -1)
 
 say "Running?"
 tmux has-session -t swarm 2>/dev/null && ok "tmux session 'swarm' exists" || bad "no tmux session 'swarm': SwarmUI was not started. Run: swarm-start"
-c=$(code localhost:7801)
+# its front address answers with a redirect to /Text2Image, so the page itself is asked for
+c=$(code 127.0.0.1:7801/Text2Image 10)
 if [ "$c" = 200 ]; then ok "SwarmUI answers on this VM (port 7801)"
 else
   bad "SwarmUI does not answer on port 7801 (got: ${c:-nothing}). Last lines of its window:"

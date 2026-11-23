@@ -237,6 +237,7 @@
     <div id="swarmLoraWrap" class="hidden">
       <label>LoRAs</label>
       <div class="chips" id="swarmLoraChips"></div>
+      <div class="hint" id="swarmLoraHint"></div>
       <div id="swarmLoraTune" class="hidden">
         <div class="lbl"><span>LoRA strength</span></div>
         <div class="ctl"><button class="step" data-for="swarmLoraW" data-dir="-1" aria-label="Less">−</button><input id="swarmLoraW" type="range" min="0.2" max="2" step="0.05" value="1" data-nudge="0.1"><button class="step" data-for="swarmLoraW" data-dir="1" aria-label="More">+</button><span class="val" id="swarmLoraWVal"></span></div>
@@ -592,7 +593,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-23b';
+const PAGE_BUILD = '2026-11-23c';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -966,6 +967,7 @@ async function info(node) {
   // Other Qwen LoRAs (e.g. NSFW ones from add-models.sh --lora); lora_info.json has their trigger words
   let meta = {};
   try { const r = await fetch('./lora_info.json', { cache: 'no-store' }); if (r.ok) meta = await r.json(); } catch (e) {}
+  loraMeta = meta; if (mode === 'swarm') applySwarm();
   q.extras = optionsOf(lora, 'LoraLoaderModelOnly', 'lora_name')
     .filter(n => n !== q.lora && !/lightning/i.test(n))
     .filter(n => /qwen/i.test((meta[n] || {}).baseModel || '') || (!meta[n] && /qwen/i.test(n)))
@@ -3069,7 +3071,8 @@ const toJpeg = c => new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
 // models and LoRAs (/rv6m/swarm/status) and sends it the prompt (/rv6m/swarm); SwarmUI
 // builds the right graph for whatever model it is. A picture is a background job, like
 // a Seedream edit, and lands with the page's other results.
-let swarm = null;
+let swarm = null, loraMeta = {};   // loraMeta: lora_info.json (names, trigger words and notes the installers wrote)
+const swarmLoraInfo = l => loraMeta[l.name] || loraMeta[l.name.replace(/\\/g, '/')] || {};
 const swarmReady = fetch('/rv6m/swarm/status').then(r => r.ok ? r.json() : null).then(s => {
   if (!s || !s.installed || !(s.models || []).length) return;
   swarm = s;
@@ -3111,7 +3114,11 @@ function swarmState() { try { return JSON.parse(recall('swarmSet') || '{}'); } c
 function swarmKind() { const k = swarmState().kind; return k === 'edit' || k === 'restyle' ? k : 'new'; }
 function swarmSave(change) { store('swarmSet', JSON.stringify({ ...swarmState(), ...change })); }
 // LoRAs made for the chosen model's family (SwarmUI knows the family of most files)
-const swarmLoras = () => { const m = swarmCur(); return !m ? [] : swarm.loras.filter(l => !m.compat || !l.compat || l.compat === m.compat); };
+// ...and ones an installer filed under this model (lora_info.json's baseModel), whatever family SwarmUI
+// reads from the file: LoRAs made for MiniMax H3 video load on MiniMax H3 Image, for example
+const swarmNorm = t => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const swarmLoras = () => { const m = swarmCur(); return !m ? [] : swarm.loras.filter(l => !m.compat || !l.compat || l.compat === m.compat
+  || (!!swarmLoraInfo(l).baseModel && swarmNorm(swarmLoraInfo(l).baseModel) === swarmNorm(m.cls))); };
 // MiniMax H3 reads your prompt with a Qwen3-VL language model; with an abliterated copy of it installed (add-minimax-nsfw.sh) the page can ask SwarmUI to use that instead
 const swarmMmEnc = () => { const m = swarmCur(); return m && swarm.mmEnc && /minimax/i.test(m.cls + ' ' + m.name) ? swarm.mmEnc : null; };
 const swarmEncOn = () => swarmMmEnc() && swarmState().enc !== 'std' ? swarmMmEnc() : null;
@@ -3143,11 +3150,13 @@ function applySwarm() {
   const box = $('swarmLoraChips'); box.innerHTML = '';
   for (const l of list) {
     const b = document.createElement('button');
-    b.type = 'button'; b.className = 'lchip' + (on.has(l.name) ? ' on' : ''); b.textContent = swarmShort(l.name);
+    b.type = 'button'; b.className = 'lchip' + (on.has(l.name) ? ' on' : ''); b.textContent = swarmLoraInfo(l).name || swarmShort(l.name);
     b.onclick = () => { const f = new Set(swarmState().loras || []); f.has(l.name) ? f.delete(l.name) : f.add(l.name); swarmSave({ loras: [...f] }); applySwarm(); };
     box.appendChild(b);
   }
   $('swarmLoraTune').classList.toggle('hidden', !swarmLorasOn().length);
+  const lw = swarmLorasOn().flatMap(l => swarmLoraInfo(l).trainedWords || []);
+  $('swarmLoraHint').textContent = swarmLorasOn().filter(l => swarmLoraInfo(l).note).map(l => `${swarmLoraInfo(l).name || swarmShort(l.name)}: ${swarmLoraInfo(l).note}`).join(' · ') + (lw.length ? ` · Added to your prompt automatically: ${lw.join(', ')}.` : '');
   setVal($('swarmLoraW'), +st.loraW || 1);
   $('swAuto').classList.toggle('on', !own); $('swOwn').classList.toggle('on', own);
   $('swarmOwn').classList.toggle('hidden', !own);
@@ -3190,7 +3199,8 @@ async function swarmGo() {
       images.push((await photoOnVM('photo')) || await upload(await toJpeg(full), `rv6m_${ts}_img.jpg`));
       if (kind === 'edit') for (const [i, c] of usedMore().entries()) images.push(await upload(await toJpeg(c), `rv6m_${ts}_img${i + 2}.jpg`));
     }
-    const body = { model: swarmClean(m.name), prompt: $('prompt').value.trim(), width: w, height: h, seed: -1,
+    const typed = $('prompt').value.trim(), lwords = swarmLorasOn().flatMap(l => swarmLoraInfo(l).trainedWords || []).filter(t => !typed.toLowerCase().includes(t.toLowerCase()));
+    const body = { model: swarmClean(m.name), prompt: [...lwords, typed].join(', '), width: w, height: h, seed: -1,
                    loras: swarmLorasOn().map(l => ({ name: swarmClean(l.name), weight: +$('swarmLoraW').value })),
                    preset: own ? null : m.preset, steps: own ? +$('swarmSteps').value : null, cfg: own ? +$('swarmCfg').value : null,
                    kind, images, creativity: +$('swarmCreat').value, qwenmodel: swarmEncOn() };

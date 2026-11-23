@@ -207,6 +207,11 @@
     <label for="swarmModel">Model</label>
     <select id="swarmModel"></select>
     <div class="hint" id="swarmModelHint"></div>
+    <div id="swarmEncRow" class="hidden">
+      <label>Content</label>
+      <div class="seg"><button id="swEncStd">Standard</button><button id="swEncUnc">🔓 Uncensored</button></div>
+      <div class="hint" id="swarmEncHint"></div>
+    </div>
     <div id="swarmShapeRow">
     <label for="swarmShape">Shape</label>
     <select id="swarmShape">
@@ -587,7 +592,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-23a';
+const PAGE_BUILD = '2026-11-23b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -3107,11 +3112,17 @@ function swarmKind() { const k = swarmState().kind; return k === 'edit' || k ===
 function swarmSave(change) { store('swarmSet', JSON.stringify({ ...swarmState(), ...change })); }
 // LoRAs made for the chosen model's family (SwarmUI knows the family of most files)
 const swarmLoras = () => { const m = swarmCur(); return !m ? [] : swarm.loras.filter(l => !m.compat || !l.compat || l.compat === m.compat); };
+// MiniMax H3 reads your prompt with a Qwen3-VL language model; with an abliterated copy of it installed (add-minimax-nsfw.sh) the page can ask SwarmUI to use that instead
+const swarmMmEnc = () => { const m = swarmCur(); return m && swarm.mmEnc && /minimax/i.test(m.cls + ' ' + m.name) ? swarm.mmEnc : null; };
+const swarmEncOn = () => swarmMmEnc() && swarmState().enc !== 'std' ? swarmMmEnc() : null;
 const swarmLorasOn = () => { const on = new Set(swarmState().loras || []); return swarmLoras().filter(l => on.has(l.name)); };
 function applySwarm() {
   const m = swarmCur(); if (!m) return;
   const st = swarmState(), own = !!st.own, tune = (st.tune || {})[m.name] || {}, kind = swarmKind();
   for (const [id, k] of [['swNew', 'new'], ['swEdit', 'edit'], ['swRestyle', 'restyle']]) $(id).classList.toggle('on', kind === k);
+  $('swarmEncRow').classList.toggle('hidden', !swarmMmEnc());
+  $('swEncStd').classList.toggle('on', !swarmEncOn()); $('swEncUnc').classList.toggle('on', !!swarmEncOn());
+  $('swarmEncHint').textContent = swarmEncOn() ? 'Uncensored: an abliterated copy of the model that reads your prompt, made to pass explicit wording on as written.' : 'Standard: the text reader the model ships with.';
   $('swarmShapeRow').classList.toggle('hidden', kind !== 'new');
   $('swarmCreatRow').classList.toggle('hidden', kind !== 'restyle');
   setVal($('swarmCreat'), +st.creat || 0.6);
@@ -3149,6 +3160,8 @@ function applySwarm() {
 $('swarmModel').addEventListener('change', () => { store('swarmModel', $('swarmModel').value); applySwarm(); });
 for (const id of ['swarmShape', 'swarmSize']) $(id).addEventListener('change', () => { store(id, $(id).value); applySwarm(); });
 for (const [id, k] of [['swNew', 'new'], ['swEdit', 'edit'], ['swRestyle', 'restyle']]) $(id).onclick = () => { swarmSave({ kind: k }); setMode('swarm'); };
+$('swEncStd').onclick = () => { swarmSave({ enc: 'std' }); applySwarm(); };
+$('swEncUnc').onclick = () => { swarmSave({ enc: 'unc' }); applySwarm(); };
 $('swAuto').onclick = () => { swarmSave({ own: false }); applySwarm(); };
 $('swOwn').onclick = () => { swarmSave({ own: true }); applySwarm(); };
 function swarmSaveTune() {
@@ -3180,7 +3193,7 @@ async function swarmGo() {
     const body = { model: swarmClean(m.name), prompt: $('prompt').value.trim(), width: w, height: h, seed: -1,
                    loras: swarmLorasOn().map(l => ({ name: swarmClean(l.name), weight: +$('swarmLoraW').value })),
                    preset: own ? null : m.preset, steps: own ? +$('swarmSteps').value : null, cfg: own ? +$('swarmCfg').value : null,
-                   kind, images, creativity: +$('swarmCreat').value };
+                   kind, images, creativity: +$('swarmCreat').value, qwenmodel: swarmEncOn() };
     for (let i = 0; i < n; i++) {
       const r = await fetch('/rv6m/swarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
@@ -3351,7 +3364,7 @@ function openBg(key) {
 }
 // What the VM actually sent to Atlas, so results can be compared with Atlas's own playground
 function sentSummary(sent, size) {
-  if (sent && sent.swarm) return `SwarmUI · ${String(sent.model).replace(/^.*\//, '')} · ${sent.width}×${sent.height}` + (sent.steps ? ` · ${sent.steps} steps · CFG ${sent.cfgscale ?? '?'}` : sent.presets ? ` · ${sent.presets[0]}` : ' · SwarmUI defaults') + (sent.loras && sent.loras.length ? ` · ${sent.loras.length} LoRA${sent.loras.length > 1 ? 's' : ''}` : '') + (sent.kind === 'edit' ? ` · edit of ${sent.photos || 1} photo${sent.photos > 1 ? 's' : ''}` : sent.kind === 'restyle' ? ` · restyle at ${sent.initimagecreativity}` : '');
+  if (sent && sent.swarm) return `SwarmUI · ${String(sent.model).replace(/^.*\//, '')} · ${sent.width}×${sent.height}` + (sent.steps ? ` · ${sent.steps} steps · CFG ${sent.cfgscale ?? '?'}` : sent.presets ? ` · ${sent.presets[0]}` : ' · SwarmUI defaults') + (sent.loras && sent.loras.length ? ` · ${sent.loras.length} LoRA${sent.loras.length > 1 ? 's' : ''}` : '') + (sent.qwenmodel ? ' · uncensored reader' : '') + (sent.kind === 'edit' ? ` · edit of ${sent.photos || 1} photo${sent.photos > 1 ? 's' : ''}` : sent.kind === 'restyle' ? ` · restyle at ${sent.initimagecreativity}` : '');
   if (!sent) return 'Seedream · ' + size.replace('*', '×');
   const kb = (sent.images || []).map(x => +(x.match(/\((\d+) KB\)/) || [0, 0])[1]);
   if (sent.finished) return `Seedance draft finished at 1080p (from ${sent.finished})`;

@@ -883,6 +883,15 @@ def _swarm_status():
         me = _swarm_api("GetMyUserData")
     except Exception:
         me = {}
+    # An uncensored (abliterated) text encoder for MiniMax H3, when one is installed
+    # (add-minimax-nsfw.sh): the page offers it as a switch on MiniMax models
+    try:
+        encs = [c.get("name") or "" for c in listing("Clip")]
+    except Exception:
+        encs = []
+    import re
+    mm_enc = next((n for n in sorted(encs) if re.search(r"heretic|uncensor|abliterat", n, re.I)
+                   and re.search(r"minimax|qwen3vl_32b", n, re.I)), None)
     presets = {p.get("title"): p.get("param_map") or {} for p in me.get("presets") or []}
     links = (me.get("model_preset_links") or {}).get("Stable-Diffusion") or {}
     clean = lambda n: n[:-len(".safetensors")] if n.endswith(".safetensors") else n
@@ -894,7 +903,7 @@ def _swarm_status():
         out.append({"name": name, "title": m.get("title") or "", "cls": m.get("class") or "", "arch": m.get("architecture") or "",
                     "compat": m.get("compat_class") or "", "w": m.get("standard_width") or 0, "h": m.get("standard_height") or 0,
                     "preset": title, "steps": pm.get("steps"), "cfg": pm.get("cfgscale")})
-    return {"installed": True, "models": out,
+    return {"installed": True, "models": out, "mmEnc": mm_enc,
             "loras": [{"name": l.get("name") or "", "title": l.get("title") or "", "compat": l.get("compat_class") or ""} for l in loras]}
 
 
@@ -917,6 +926,8 @@ def _swarm_generate(req):
             body["cfgscale"] = float(req["cfg"])
     elif req.get("preset"):       # the preset linked to this model in SwarmUI
         body["presets"] = [req["preset"]]
+    if req.get("qwenmodel"):      # another text encoder for this picture (MiniMax's uncensored one)
+        body["qwenmodel"] = str(req["qwenmodel"])
     # Photos from the page (already uploaded to ComfyUI's input folder). "edit": they go in
     # with the prompt, for an edit model to follow your instruction on; "restyle": the first
     # is the starting picture (img2img), redrawn by "creativity" (0 = unchanged, 1 = all new)

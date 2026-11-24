@@ -907,6 +907,30 @@ def _swarm_status():
             "loras": [{"name": l.get("name") or "", "title": l.get("title") or "", "compat": l.get("compat_class") or ""} for l in loras]}
 
 
+def _comfy_log_hint():
+    """What ComfyUI itself logged just now, for an error message: SwarmUI only reports that
+    its connection to ComfyUI broke, the reason is in ComfyUI's log (~/comfyui.log, written
+    since edit-restart of 24 Nov 2026). The log holds no prompts."""
+    import re
+    path = os.path.expanduser("~/comfyui.log")
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 60000))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return " | ComfyUI's own log isn't being kept yet: run edit-restart on the VM, try again, and this message will include ComfyUI's error."
+    lines = [l.strip() for l in lines if l.strip() and "it/s]" not in l and "s/it]" not in l]
+    bad = [i for i, l in enumerate(lines) if re.search(r"error|exception|traceback|out of memory|killed|fatal|cannot|failed|not found|mismatch", l, re.I)]
+    if bad:      # the last error and the few lines around it (a traceback's last lines say the most)
+        i = bad[-1]
+        pick = lines[max(0, i - 4):i + 3]
+    else:
+        pick = lines[-6:]
+    text = " / ".join(l[:220] for l in pick)
+    return " | ComfyUI's log says: " + text[-900:] if text else ""
+
+
 def _ref_video(name):
     """A reference video the page uploaded, as a data URL for SwarmUI. Phone videos are big (4K,
     60 fps, minutes long) and every frame costs memory on the GPU, so with ffmpeg on the VM it is
@@ -994,7 +1018,9 @@ def _swarm_generate(req):
         body["promptimages"] = photos
     j = _swarm_api("GenerateText2Image", body, timeout=3600)
     if j.get("error"):
-        raise RuntimeError("SwarmUI: " + str(j["error"])[:400])
+        import re
+        err = re.sub(r"\s+at System\..*", "", str(j["error"]), flags=re.S)      # without .NET's stack trace
+        raise RuntimeError("SwarmUI: " + err[:400] + _comfy_log_hint())
     imgs = j.get("images") or []
     if not imgs:
         raise RuntimeError("SwarmUI returned no picture")

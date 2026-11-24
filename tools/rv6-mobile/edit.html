@@ -501,7 +501,7 @@
 <div id="videoBox" class="panel hidden" style="padding:10px 12px">
   <div id="vidEngineBox" class="hidden">
     <label style="margin-top:0">Engine</label>
-    <div class="seg"><button id="vidLocal">🖥️ Local (Wan 2.2)</button><button id="vidCloud">☁️ Seedance 2.5</button><button id="vidWan">☁️ Wan 3.0</button></div>
+    <div class="seg"><button id="vidLocal">🖥️ Local (Wan 2.2)</button><button id="vidMm" class="hidden">🐝 MiniMax H3</button><button id="vidCloud">☁️ Seedance 2.5</button><button id="vidWan">☁️ Wan 3.0</button></div>
   </div>
   <div id="vidKindBox" class="hidden">
     <label>Seedance uses my photos…</label>
@@ -559,6 +559,27 @@
     </div>
     <div class="hint" id="vidLoraHint"></div>
   </div>
+  <div id="vidMmBox" class="hidden">
+    <div id="mmShapeBox">
+    <label>Shape (no photo chosen)</label>
+    <div class="seg"><button id="mmWide">Wide 16:9</button><button id="mmTall">Tall 9:16</button><button id="mmSquare">Square</button></div>
+    </div>
+    <label>Steps</label>
+    <div class="seg"><button id="mmFull">✨ Full (20 steps)</button><button id="mmTurbo">⚡ Turbo (8 steps)</button></div>
+    <div id="mmEncRow">
+    <label>Content</label>
+    <div class="seg"><button id="mmEncStd">Standard</button><button id="mmEncUnc">🔓 Uncensored</button></div>
+    </div>
+    <div id="mmLoraBox">
+    <label>MiniMax H3 LoRAs</label>
+    <div class="chips" id="mmLoraChips"></div>
+    <div id="mmLoraTune" class="hidden">
+      <div class="lbl"><span>LoRA strength</span></div>
+      <div class="ctl"><button class="step" data-for="mmLoraW" data-dir="-1" aria-label="Less">−</button><input id="mmLoraW" type="range" min="0.2" max="2" step="0.05" value="0.8" data-nudge="0.1"><button class="step" data-for="mmLoraW" data-dir="1" aria-label="More">+</button><span class="val" id="mmLoraWVal"></span></div>
+    </div>
+    <div class="hint" id="mmLoraHint"></div>
+    </div>
+  </div>
   <div id="vidSoundBox" class="hidden">
   <label>Sound</label>
   <div class="seg"><button id="vidSoundOn">🔊 With sound</button><button id="vidSoundOff">Silent</button></div>
@@ -602,7 +623,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-24b';
+const PAGE_BUILD = '2026-11-24c';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -1678,7 +1699,10 @@ function vidDims() {
 const vidClips = () => Math.max(1, Math.ceil(+$('vidLen').value / 5));
 // ☁️ Seedance 2.5 on Atlas: same photo and prompt, 4-30 s, with sound; runs in the cloud
 let vidEngine = recall('vidEngine') || 'local', vidSound = recall('vidSound') !== '0';
-const cloudVid = () => cloudCfg.configured && (vidEngine === 'cloud' || vidEngine === 'wan' || !video);
+// 🐝 MiniMax H3 video (add-minimax-video.sh), through SwarmUI: set when SwarmUI lists a MiniMax H3 video model
+let mmVideo = null;
+const mmVid = () => !!mmVideo && (vidEngine === 'mm' || (!video && !cloudCfg.configured));
+const cloudVid = () => !mmVid() && cloudCfg.configured && (vidEngine === 'cloud' || vidEngine === 'wan' || !video);
 // ☁️ Wan 3.0 Prime (Alibaba) on Atlas: first frame (+ optional last frame) only, no drafts
 const wanVid = () => cloudVid() && vidEngine === 'wan';
 const WAN_RES = ['480p', '720p', '1080p', '720p-esr', '1080p-esr', '1440p-esr', '4k-esr'];
@@ -1705,15 +1729,94 @@ function renderRefChips() {
   }
   if (!n) box.textContent = 'Choose a photo first.';
 }
+// 🐝 MiniMax H3 video: from text, or from your photo as the first frame; up to 15 s with sound.
+// Sizes follow ComfyUI's template table (multiples of 32): about 864x480 or 1280x736, in the photo's shape.
+function mmState() { try { return JSON.parse(recall('mmVid') || '{}'); } catch (e) { return {}; } }
+function mmSave(patch) { store('mmVid', JSON.stringify({ ...mmState(), ...patch })); applyVideo(); }
+function mmDims() {
+  const area = vidRes === '720' ? 1280 * 736 : 864 * 480;
+  const r = photoIn ? (full.width / full.height || 1) : ({ tall: 9 / 16, square: 1 }[mmState().shape] || 16 / 9);
+  return [Math.max(256, Math.round(Math.sqrt(area * r) / 32) * 32), Math.max(256, Math.round(Math.sqrt(area / r) / 32) * 32)];
+}
+const mmLoras = () => !mmVideo ? [] : swarm.loras.filter(l => !/turbo/i.test(l.name) && (swarmFam(l.compat) === 'minimax-h3'
+  || /^minimax_h3(_image)?[\\/]/i.test(l.name) || /minimax.?h3|mmh3/i.test(swarmLoraInfo(l).baseModel || '')));
+const mmLorasOn = () => { const on = new Set(mmState().loras || []); return mmLoras().filter(l => on.has(l.name)); };
+const mmEncOn = () => mmVideo && swarm.mmEnc && mmState().enc !== 'std' ? swarm.mmEnc : null;
+const mmTurboOn = () => !!(mmVideo && mmVideo.turbo && mmState().turbo);
+function applyMmVideo() {
+  const st = mmState(), [w, h] = mmDims(), secs = +$('vidLen').value;
+  $('mmShapeBox').classList.toggle('hidden', !!photoIn);
+  $('mmWide').classList.toggle('on', !st.shape || st.shape === 'wide'); $('mmTall').classList.toggle('on', st.shape === 'tall'); $('mmSquare').classList.toggle('on', st.shape === 'square');
+  $('mmTurbo').classList.toggle('hidden', !mmVideo.turbo);
+  $('mmFull').classList.toggle('on', !mmTurboOn()); $('mmTurbo').classList.toggle('on', mmTurboOn());
+  $('mmEncRow').classList.toggle('hidden', !swarm.mmEnc);
+  $('mmEncStd').classList.toggle('on', !mmEncOn()); $('mmEncUnc').classList.toggle('on', !!mmEncOn());
+  const all = mmLoras(), on = new Set(mmLorasOn().map(l => l.name)), box = $('mmLoraChips');
+  $('mmLoraBox').classList.toggle('hidden', !all.length);
+  box.innerHTML = '';
+  for (const l of all) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'lchip' + (on.has(l.name) ? ' on' : ''); b.textContent = swarmLoraInfo(l).name || swarmShort(l.name);
+    b.onclick = () => { const k = new Set(mmState().loras || []); k.has(l.name) ? k.delete(l.name) : k.add(l.name); mmSave({ loras: [...k] }); };
+    box.appendChild(b);
+  }
+  const act = mmLorasOn(), words = act.flatMap(l => swarmLoraInfo(l).trainedWords || []);
+  $('mmLoraTune').classList.toggle('hidden', !act.length);
+  setVal($('mmLoraW'), +st.w || 0.8);
+  $('mmLoraHint').textContent = !act.length ? 'Tap one to switch it on. One or two at a time works best.'
+    : act.map(l => { const i = swarmLoraInfo(l); return (i.name || swarmShort(l.name)) + (i.note ? ': ' + i.note : ''); }).join(' · ')
+      + (words.length ? ` · Added to your prompt automatically: ${words.join(', ')}.` : '');
+  $('vidHint').textContent = `${w}×${h} · ${secs} s at 24 frames a second, with sound · ${mmTurboOn() ? '8 steps (Turbo)' : '20 steps'}. ` +
+    (photoIn ? 'Starts from your photo (the first frame). ' : 'No photo chosen: made from your text alone. ') +
+    'MiniMax H3 on this VM, through SwarmUI. Describe the movement, the camera and the sound in one paragraph. ' +
+    'Longer and bigger videos take much longer; start with 5 s at 480p.';
+}
+$('mmWide').onclick = () => mmSave({ shape: 'wide' }); $('mmTall').onclick = () => mmSave({ shape: 'tall' }); $('mmSquare').onclick = () => mmSave({ shape: 'square' });
+$('mmFull').onclick = () => mmSave({ turbo: false }); $('mmTurbo').onclick = () => mmSave({ turbo: true });
+$('mmEncStd').onclick = () => mmSave({ enc: 'std' }); $('mmEncUnc').onclick = () => mmSave({ enc: 'unc' });
+function saveMmLoraW() { store('mmVid', JSON.stringify({ ...mmState(), w: +$('mmLoraW').value })); }
+$('mmLoraW').addEventListener('input', saveMmLoraW);
+for (const b of document.querySelectorAll('button.step[data-for=mmLoraW]')) b.addEventListener('pointerup', saveMmLoraW);
+async function mmVideoGo() {
+  if (!$('prompt').value.trim()) return setStatus('Describe what should happen first: the movement, and the sound if you want one.', true);
+  $('go').disabled = true;
+  store('workPrompt', $('prompt').value);
+  try {
+    setStatus('Connecting… Stay on this page for now.');
+    if (!(await ensureServer())) throw new Error('Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.');
+    const [w, h] = mmDims(), images = [];
+    if (photoIn) {
+      setStatus('Sending your photo to the VM… Stay on this page for now.');
+      images.push((await photoOnVM('photo')) || await upload(await toJpeg(full), `rv6m_${Date.now()}_img.jpg`));
+    }
+    const act = mmLorasOn(), typed = $('prompt').value.trim();
+    const words = act.flatMap(l => swarmLoraInfo(l).trainedWords || []).filter(t => !typed.toLowerCase().includes(t.toLowerCase()));
+    const turbo = mmTurboOn();
+    const body = { kind: 'video', model: swarmClean(mmVideo.model), base: mmVideo.base ? swarmClean(mmVideo.base) : null,
+                   prompt: [...words, typed].join(', '), width: w, height: h, seed: -1, seconds: +$('vidLen').value, steps: turbo ? 8 : 20,
+                   loras: [...(turbo ? [{ name: swarmClean(mmVideo.turbo), weight: 1 }] : []), ...act.map(l => ({ name: swarmClean(l.name), weight: +$('mmLoraW').value }))],
+                   images, qwenmodel: mmEncOn() };
+    const r = await fetch('/rv6m/swarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'The VM refused the MiniMax video (' + r.status + ')');
+    startBg({ jobs: [j.job], t0: Date.now(), size: 'video', engine: 'swarm', label: 'MiniMax H3 video' });
+    setStatus('🐝 Sent to SwarmUI. It runs in the background: you can start something else now. It shows below when ready (and under Recent edits). The first video after a restart also loads the model, which takes a few minutes.');
+  } catch (err) {
+    setStatus(/load failed|failed to fetch|networkerror/i.test(err.message)
+      ? 'Lost connection to the VM. Check the Tailscale app says Connected, then tap Generate again.' : err.message, true);
+  } finally {
+    $('go').disabled = false;
+  }
+}
 // Video LoRAs for the local engine: tap to switch on; one strength for all of them
 function vidLoraState() { try { return JSON.parse(recall('vidLoras') || '{}'); } catch (e) { return {}; } }
 const vidExtras = () => {
-  if (!video || cloudVid() || !(video.extras || []).length) return [];
+  if (!video || cloudVid() || mmVid() || !(video.extras || []).length) return [];
   const st = vidLoraState(), on = new Set(st.keys || []);
   return video.extras.filter(l => on.has(l.key)).map(l => ({ ...l, w: +st.w || 1 }));
 };
 function applyVidLoras() {
-  const show = !!video && !cloudVid() && (video.extras || []).length > 0;
+  const show = !!video && !cloudVid() && !mmVid() && (video.extras || []).length > 0;
   $('vidLoraBox').classList.toggle('hidden', !show);
   if (!show) return;
   const st = vidLoraState(), picked = new Set((st.keys || []).filter(k => video.extras.some(l => l.key === k)));
@@ -1742,7 +1845,10 @@ $('vidLoraW').addEventListener('input', saveVidLoraW);
 for (const b of document.querySelectorAll('button.step[data-for=vidLoraW]')) b.addEventListener('pointerup', saveVidLoraW);
 function applyVideo() {
   applyVidLoras();
-  const cv = cloudVid(), wan = wanVid(), ref = cv && vidKind === 'ref' && !wan;
+  const cv = cloudVid(), wan = wanVid(), ref = cv && vidKind === 'ref' && !wan, mm = mmVid();
+  $('vidMmBox').classList.toggle('hidden', !mm);
+  $('vidMm').classList.toggle('hidden', !mmVideo); $('vidMm').classList.toggle('on', mm);
+  $('vidCloud').classList.toggle('hidden', !cloudCfg.configured); $('vidWan').classList.toggle('hidden', !cloudCfg.configured);
   $('vidKindBox').classList.toggle('hidden', !cv || wan);
   $('vidDraftBox').classList.toggle('hidden', wan);
   // Wan 3.0 has no -sr upscales and no 60 fps option
@@ -1755,15 +1861,17 @@ function applyVideo() {
   $('vidResRef').disabled = cv && vidDraft && !wan;  // a Seedance draft is always 480p
   if (mode === 'video') { $('secondBox').classList.toggle('hidden', !cv); renderMore(); }
   if (ref) renderRefChips();
-  $('vidEngineBox').classList.toggle('hidden', !cloudCfg.configured);
+  $('vidEngineBox').classList.toggle('hidden', !cloudCfg.configured && !(mmVideo && video));
   $('vidLocal').classList.toggle('hidden', !video);
-  $('vidLocal').classList.toggle('on', !cv); $('vidCloud').classList.toggle('on', cv && !wan); $('vidWan').classList.toggle('on', wan);
-  $('vidSpeedBox').classList.toggle('hidden', cv); $('vidSoundBox').classList.toggle('hidden', !cv);
+  $('vidLocal').classList.toggle('on', !cv && !mm); $('vidCloud').classList.toggle('on', cv && !wan); $('vidWan').classList.toggle('on', wan);
+  $('vidSpeedBox').classList.toggle('hidden', cv || mm); $('vidSoundBox').classList.toggle('hidden', !cv);
   $('vidSoundOn').classList.toggle('on', vidSound); $('vidSoundOff').classList.toggle('on', !vidSound);
-  for (const o of $('vidLen').options) o.disabled = cv && +o.value > 30;
+  for (const o of $('vidLen').options) o.disabled = (cv && +o.value > 30) || (mm && +o.value > 15);
   if (cv && +$('vidLen').value > 30) $('vidLen').value = '30';
+  if (mm && +$('vidLen').value > 15) $('vidLen').value = '15';
   $('vid480').classList.toggle('on', vidRes !== '720'); $('vid720').classList.toggle('on', vidRes === '720');
   $('vidFast').classList.toggle('on', !vidQuality); $('vidQual').classList.toggle('on', vidQuality);
+  if (mm) return void applyMmVideo();
   if (wan) return void ($('vidHint').textContent = `${$('vidLen').value} s · ${$('vidResRef').value}${vidSound ? ' · with sound' : ''}, ` +
     'starting from your photo' + (usedMore().length ? ' and ending on picture 2' : '') + '. Made by Alibaba\'s Wan 3.0 Prime on Atlas Cloud ' +
     '(paid per video; the -esr options make a smaller video and enhance it; Atlas\'s and Alibaba\'s content rules apply; only use photos of people who agreed).');
@@ -1791,6 +1899,7 @@ $('vidFast').onclick = () => { vidQuality = false; store('vidQuality', '0'); app
 $('vidLocal').onclick = () => { vidEngine = 'local'; store('vidEngine', vidEngine); applyVideo(); };
 $('vidCloud').onclick = () => { vidEngine = 'cloud'; store('vidEngine', vidEngine); applyVideo(); };
 $('vidWan').onclick = () => { vidEngine = 'wan'; store('vidEngine', vidEngine); applyVideo(); };
+$('vidMm').onclick = () => { vidEngine = 'mm'; store('vidEngine', vidEngine); applyVideo(); };
 $('vidSoundOn').onclick = () => { vidSound = true; store('vidSound', '1'); applyVideo(); };
 $('vidSoundOff').onclick = () => { vidSound = false; store('vidSound', '0'); applyVideo(); };
 $('vidDraftOn').onclick = () => { vidDraft = true; store('vidDraft', '1'); applyVideo(); };
@@ -2215,7 +2324,7 @@ $('writeUndo').onclick = () => {
   writeBefore = null; $('writeUndo').classList.add('hidden'); setStatus('Your own words are back.');
 };
 
-const FMT = { q21cfg: v => (+v).toFixed(1), loraW: v => (+v).toFixed(2), kreaLoraW: v => (+v).toFixed(2), vidLoraW: v => (+v).toFixed(2), swarmLoraW: v => (+v).toFixed(2), swarmSteps: v => v, swarmCfg: v => (+v).toFixed(1), swarmCreat: v => (+v).toFixed(2), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
+const FMT = { q21cfg: v => (+v).toFixed(1), loraW: v => (+v).toFixed(2), kreaLoraW: v => (+v).toFixed(2), vidLoraW: v => (+v).toFixed(2), mmLoraW: v => (+v).toFixed(2), swarmLoraW: v => (+v).toFixed(2), swarmSteps: v => v, swarmCfg: v => (+v).toFixed(1), swarmCreat: v => (+v).toFixed(2), fluxLoraW: v => (+v).toFixed(2), brush: v => v + 'px', denoise: v => (+v).toFixed(2), steps: v => v, cfg: v => (+v).toFixed(1) };
 function paint(r) {
   const pct = (r.value - r.min) / (r.max - r.min) * 100;
   r.style.setProperty('--pct', pct + '%');
@@ -2978,6 +3087,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 $('go').onclick = async () => {
   if (mode === 'cloud') return cloudGo();
   if (mode === 'swarm') return swarmGo();
+  if (mode === 'video' && mmVid()) return mmVideoGo();
   if (mode === 'video' && cloudVid()) return cloudVideoGo();
   if (!workflow) return setStatus('Workflow not loaded yet, reload the page.', true);
   if (mode !== 'create' && $('stage').classList.contains('hidden')) return setStatus('Choose a photo first.', true);
@@ -3160,10 +3270,21 @@ let swarm = null, loraMeta = {};   // loraMeta: lora_info.json (names, trigger w
 const swarmLoraInfo = l => loraMeta[l.name] || loraMeta[l.name.replace(/\\/g, '/')] || {};
 const swarmReady = fetch('/rv6m/swarm/status').then(r => r.ok ? r.json() : null).then(s => {
   if (!s || !s.installed) return;
-  // Swarm mode makes pictures: video models (MiniMax H3 fl2va / ref2va) are used in SwarmUI's own page
-  s.models = (s.models || []).filter(m => m.compat !== 'minimax-h3' && !/fl2va|ref2va/i.test(m.name));
-  if (!s.models.length) return;
+  // Swarm mode makes pictures; MiniMax H3's video models (fl2va) go to 🎬 Video → 🐝 MiniMax H3
+  const isVid = m => m.compat === 'minimax-h3' || /fl2va|ref2va/i.test(m.name);
+  const vids = (s.models || []).filter(m => isVid(m) && /fl2va/i.test(m.name))
+    .sort((a, b) => !/int8/i.test(a.name) - !/int8/i.test(b.name) || !/pruned/i.test(a.name) - !/pruned/i.test(b.name) || a.name.localeCompare(b.name));
+  s.models = (s.models || []).filter(m => !isVid(m));
+  s.loras = s.loras || [];
   swarm = s;
+  if (vids.length) {   // the 8-bit model first: the bf16 one is 66 GB
+    const turbo = s.loras.map(l => l.name).filter(n => /minimax.?h3.*fl2v.*turbo.*8.?step/i.test(n)).sort().pop() || null;
+    const base = s.models.find(m => /minimax.?h3.?image/i.test(m.name)) || s.models[0];
+    mmVideo = { model: vids[0].name, turbo, base: base ? base.name : null };
+    $('modeVideo').classList.remove('hidden');
+    if (mode === 'video') applyVideo();
+  }
+  if (!s.models.length) return;
   $('modeSwarm').classList.remove('hidden');
   renderSwarm();
 }).catch(() => {});

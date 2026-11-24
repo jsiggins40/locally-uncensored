@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Adds MiniMax H3 (MiniMax, Nov 2026), the video model: text to video and photo to
-# video (your photo as the first and/or last frame), with sound, up to about 15 s at
-# 24 fps. It runs through SwarmUI (add-swarmui.sh first): on the phone or laptop open
-# SwarmUI at https://<vm>.ts.net:8444, pick the model and write a prompt.
+# video (your photo as the first frame), with sound, up to about 15 s at 24 fps. It
+# runs through SwarmUI (add-swarmui.sh first). On the edit page it is 🎬 Video →
+# 🐝 MiniMax H3; SwarmUI's own page (https://<vm>.ts.net:8444) has every setting.
 # Gets Comfy-Org's ComfyUI files, pinned and checked against their SHA-256:
 #   the model "fl2va" (text / first-last frame to video with audio), pruned 8-bit (21 GB),
 #   the one ComfyUI's own templates use; its video and audio VAEs (3.4 GB); the 8-step
@@ -151,7 +151,9 @@ PY
 
 HOST=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
 echo
-echo "Done. MiniMax H3 video is used in SwarmUI's own page: https://${HOST:-<your-vm>.ts.net}:8444/"
+echo "Done. Run edit-restart and reload the edit page: 🎬 Video → 🐝 MiniMax H3 (your photo is the first frame;"
+echo "  with no photo chosen it makes the video from your text). Length, size, Turbo and LoRAs are on that panel."
+echo "It is also in SwarmUI's own page, with every setting: https://${HOST:-<your-vm>.ts.net}:8444/"
 echo "  Text to video: Models tab → minimax_h3_fl2va… → write a prompt (say what moves, and the sound) → Generate."
 echo "    Its Auto preset sets 20 steps, CFG 1. Length: 'Text To Video' → Frames (24 a second; 73 = 3 s, 124 = 5 s)."
 echo "  Photo to video: 'Init Image' → your photo, Creativity 0; 'Image To Video' → Video Model = minimax_h3_fl2va…,"

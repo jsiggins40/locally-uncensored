@@ -937,7 +937,24 @@ def _swarm_generate(req):
             raw = f.read()
         mime = "image/png" if raw[:4] == b"\x89PNG" else "image/webp" if raw[8:12] == b"WEBP" else "image/jpeg"
         photos.append(f"data:{mime};base64," + base64.b64encode(raw).decode())
-    if photos and req.get("kind") == "restyle":
+    if req.get("kind") == "video":
+        # MiniMax H3 video. 24 frames a second; SwarmUI rounds the count to the model's frame grid.
+        frames = max(5, int(round(float(req.get("seconds") or 5) * 24)))
+        steps = int(req.get("steps") or 20)
+        body.pop("presets", None)
+        if photos:
+            # Photo to video is SwarmUI's "Image To Video": the photo is the Init Image at creativity 0
+            # (the picture model named as "model" draws nothing), and the video model animates it.
+            # LoRAs are confined to the video part (section 2), so they don't go on the picture model.
+            body.update(model=req.get("base") or req["model"], initimage=photos[0], initimagecreativity=0,
+                        videomodel=req["model"], videoframes=frames, videosteps=steps, videocfg=1,
+                        videoresolution="Image", videofps=24, videoformat="h264-mp4")
+            body.pop("steps", None); body.pop("cfgscale", None)
+            if loras:
+                body["lorasectionconfinement"] = ["2"] * len(loras)
+        else:
+            body.update(text2videoframes=frames, steps=steps, cfgscale=1, videoformat="h264-mp4")
+    elif photos and req.get("kind") == "restyle":
         body["initimage"] = photos[0]
         body["initimagecreativity"] = min(1.0, max(0.05, float(req.get("creativity") or 0.6)))
     elif photos:
@@ -948,21 +965,28 @@ def _swarm_generate(req):
     imgs = j.get("images") or []
     if not imgs:
         raise RuntimeError("SwarmUI returned no picture")
-    src = str(imgs[0])
+    VIDEO = ("mp4", "webm", "mov", "gif")
+    is_video = lambda i: str(i).split("?")[0].rsplit(".", 1)[-1].lower() in VIDEO or str(i).startswith("data:video/")
+    src = str(next((i for i in imgs if is_video(i)), imgs[0]) if req.get("kind") == "video" else imgs[0])
     if src.startswith("data:"):
         head, b64 = src.split(",", 1)
-        data, ext = base64.b64decode(b64), ("jpg" if "jpeg" in head else "webp" if "webp" in head else "png")
+        data, ext = base64.b64decode(b64), ("mp4" if "mp4" in head else "webm" if "webm" in head else "gif" if "gif" in head
+                                            else "jpg" if "jpeg" in head else "webp" if "webp" in head else "png")
     else:
         with urllib.request.urlopen(SWARM_URL + "/" + urllib.parse.quote(src.lstrip("/")), timeout=120) as r:
             data = r.read()
         ext = os.path.splitext(src)[1].lstrip(".").lower() or "png"
-    if ext not in ("png", "jpg", "jpeg", "webp"):
-        raise RuntimeError(f"SwarmUI made a .{ext} file; the edit page shows pictures only")
+    if req.get("kind") == "video" and ext not in VIDEO:
+        raise RuntimeError(f"SwarmUI made a .{ext} file, not a video")
+    if req.get("kind") != "video" and ext not in ("png", "jpg", "jpeg", "webp"):
+        raise RuntimeError(f"SwarmUI made a .{ext} file; this mode shows pictures only")
     out = f"rv6_edit_swarm_{int(time.time() * 1000)}.{ext}"
     with open(os.path.join(folder_paths.get_output_directory(), out), "wb") as f:
         f.write(data)
     sent = {k: v for k, v in body.items() if k not in ("prompt", "promptimages", "initimage")}   # no text or photo data in the log
-    if photos:
+    if req.get("kind") == "video":
+        sent["kind"] = "video from a photo" if photos else "video from text"
+    elif photos:
         sent["photos"] = len(photos if "promptimages" in body else photos[:1])
         sent["kind"] = "restyle" if "initimage" in body else "edit"
     return {"filename": out, "sent": {"swarm": True, **sent}}

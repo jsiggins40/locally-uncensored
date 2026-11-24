@@ -111,7 +111,10 @@ def api(name, body, timeout=120):
     return json.load(urllib.request.urlopen(req, timeout=timeout))
 sid = api("GetNewSession", {}, 60)["session_id"]
 files = api("ListModels", {"session_id": sid, "path": "", "depth": 8, "subtype": "Stable-Diffusion", "allowRemote": False}).get("files") or []
-m = next((f for f in files if "minimax_h3_fl2va" in (f.get("name") or "").lower()), None)
+# the 8-bit files first (the pruned one before the full one): the 66 GB bf16 file may not fit next to the chat model
+cands = [f for f in files if "minimax_h3_fl2va" in (f.get("name") or "").lower()]
+cands.sort(key=lambda f: ("int8" not in f["name"].lower(), "pruned" not in f["name"].lower(), f["name"]))
+m = cands[0] if cands else None
 if not m:
     raise SystemExit("MINIMAX H3 VIDEO TEST: SwarmUI doesn't list the model. Open SwarmUI, Models tab, press its refresh button, and run this again.")
 print("SwarmUI sees:", m["name"], "| type:", m.get("class") or "NOT RECOGNISED", flush=True)

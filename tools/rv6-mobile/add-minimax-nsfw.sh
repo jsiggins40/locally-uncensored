@@ -129,7 +129,9 @@ def names(subtype):
 model = next((n for n in names("Stable-Diffusion") if "minimax_h3_image" in n.lower()), None)
 enc = next((n for n in names("Clip") if "heretic" in n.lower() and "minimax" in n.lower()), None)
 loras = [n for n in names("LoRA") if n.lower().replace("\\", "/").startswith("minimax_h3_image/")]
-vmodel = next((n for n in names("Stable-Diffusion") if "minimax_h3_fl2va" in n.lower()), None)
+# the 8-bit video files first (the pruned one before the full one): the 66 GB bf16 file may not fit next to the chat model
+vmodel = next(iter(sorted((n for n in names("Stable-Diffusion") if "minimax_h3_fl2va" in n.lower()),
+                          key=lambda n: ("int8" not in n.lower(), "pruned" not in n.lower(), n))), None)
 vloras = [n for n in names("LoRA") if n.lower().replace("\\", "/").startswith("minimax_h3/hm_")]
 print("SwarmUI sees: image model", model, "| video model", vmodel, "| encoder", enc, "| LoRAs", len(loras), "+", len(vloras), "for video")
 if not model and not vmodel: raise SystemExit("SwarmUI doesn't list a MiniMax H3 model; run add-minimax-image.sh or add-minimax-video.sh again.")

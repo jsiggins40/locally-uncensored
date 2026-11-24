@@ -90,7 +90,10 @@ command -v ffmpeg >/dev/null 2>&1 || sudo apt-get install -y -qq ffmpeg >/dev/nu
   || "$HOME/ComfyUI/venv/bin/pip" install -q pillow-heif >/dev/null 2>&1 \
   || echo "  (couldn't install pillow-heif: HEIC photos won't convert)"
 tmux kill-session -t comfy 2>/dev/null 9>&-
-tmux new -d -s comfy "cd $HOME/ComfyUI && venv/bin/python main.py --listen 127.0.0.1 --port 8188" 9>&-
+# ComfyUI's output also goes to ~/comfyui.log (the run before it: ~/comfyui.log.1), so the reason is
+# still there after it crashes and its tmux window is gone. It holds no prompts.
+[ -s "$HOME/comfyui.log" ] && mv -f "$HOME/comfyui.log" "$HOME/comfyui.log.1"
+tmux new -d -s comfy "cd $HOME/ComfyUI && PYTHONUNBUFFERED=1 venv/bin/python main.py --listen 127.0.0.1 --port 8188 2>&1 | tee $HOME/comfyui.log" 9>&-
 echo -n "Starting ComfyUI"
 for _ in $(seq 90); do curl -sf -o /dev/null localhost:8188 && break; echo -n .; sleep 1; done; echo
 curl -sf -o /dev/null localhost:8188 || { echo "ComfyUI did not start. See: tmux attach -t comfy"; exit 1; }

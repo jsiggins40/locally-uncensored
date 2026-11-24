@@ -70,6 +70,20 @@ if [ -n "$last" ]; then
   grep -E '\[(Error|Warning)\]' "$last" | grep -vi 'prompt' | tail -8 | cut -c1-300 | sed 's/^/        /'
 fi
 
+say "Memory, and whether something was killed for using too much"
+free -g | awk 'NR==2{print "  RAM: " $2 " GB in the VM, " $7 " GB free right now"}'
+echo "  GPU memory by program:"
+nvidia-smi --query-compute-apps=process_name,used_memory --format=csv,noheader 2>/dev/null | sed 's|.*/||; s/^/        /' | head -6
+oom=$(sudo -n dmesg -T 2>/dev/null | grep -iE "out of memory|oom-kill|killed process" | tail -3)
+if [ -n "$oom" ]; then echo "  PROBLEM  Linux killed a program because the VM ran out of RAM (the newest lines):"; echo "$oom" | cut -c1-200 | sed 's/^/        /'
+else echo "  OK    nothing was killed for lack of RAM since the VM started"; fi
+tmux has-session -t comfy 2>/dev/null || echo "  PROBLEM  ComfyUI's window is gone: it crashed or was stopped. Run: edit-restart"
+for f in "$HOME/comfyui.log" "$HOME/comfyui.log.1"; do
+  [ -s "$f" ] || continue
+  e=$(grep -n -iE "out of memory|OutOfMemory|CUDA error|Killed|Segmentation|core dumped|Traceback|Error:|Exception" "$f" | grep -vi "prompt" | tail -6)
+  [ -n "$e" ] && { echo "  error lines in $(basename "$f") (the newest last):"; echo "$e" | cut -c1-230 | sed 's/^/        /'; }
+done
+
 say "ComfyUI (SwarmUI draws through it)"
 [ "$(code localhost:8188)" = 200 ] && ok "ComfyUI answers (port 8188)" || bad "ComfyUI does not answer. Run: edit-restart"
 read -r qr qp <<<"$(queue)"

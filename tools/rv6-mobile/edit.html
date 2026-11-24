@@ -602,7 +602,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-23e';
+const PAGE_BUILD = '2026-11-24a';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -3198,8 +3198,17 @@ function swarmSave(change) { store('swarmSet', JSON.stringify({ ...swarmState(),
 // ...and ones an installer filed under this model (lora_info.json's baseModel), whatever family SwarmUI
 // reads from the file: LoRAs made for MiniMax H3 video load on MiniMax H3 Image, for example
 const swarmNorm = t => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-const swarmLoras = () => { const m = swarmCur(); return !m ? [] : swarm.loras.filter(l => !m.compat || !l.compat || l.compat === m.compat
-  || (!!swarmLoraInfo(l).baseModel && swarmNorm(swarmLoraInfo(l).baseModel) === swarmNorm(m.cls))); };
+// MiniMax H3 (video) and MiniMax H3 Image share their layers, so a LoRA made for one loads on the other: both are
+// offered on the image model, except the video-only ones the installers keep in loras/minimax_h3/ (motion, Turbo)
+const swarmFam = c => /^minimax-h3/i.test(c || '') ? 'minimax-h3' : (c || '');
+const swarmLoras = () => { const m = swarmCur(); if (!m) return [];
+  const mm = /minimax/i.test(m.cls + ' ' + m.name);
+  return swarm.loras.filter(l => {
+    const base = swarmLoraInfo(l).baseModel || '';
+    if (mm && /^minimax_h3[\\/]/i.test(l.name)) return false;
+    return !m.compat || !l.compat || swarmFam(l.compat) === swarmFam(m.compat)
+      || (!!base && swarmNorm(base) === swarmNorm(m.cls)) || (mm && /minimax.?h3|mmh3/i.test(base));
+  }); };
 // MiniMax H3 reads your prompt with a Qwen3-VL language model; with an abliterated copy of it installed (add-minimax-nsfw.sh) the page can ask SwarmUI to use that instead
 const swarmMmEnc = () => { const m = swarmCur(); return m && swarm.mmEnc && /minimax/i.test(m.cls + ' ' + m.name) ? swarm.mmEnc : null; };
 const swarmEncOn = () => swarmMmEnc() && swarmState().enc !== 'std' ? swarmMmEnc() : null;

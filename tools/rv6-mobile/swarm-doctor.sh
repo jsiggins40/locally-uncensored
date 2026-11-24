@@ -80,8 +80,20 @@ else echo "  OK    nothing was killed for lack of RAM since the VM started"; fi
 tmux has-session -t comfy 2>/dev/null || echo "  PROBLEM  ComfyUI's window is gone: it crashed or was stopped. Run: edit-restart"
 for f in "$HOME/comfyui.log" "$HOME/comfyui.log.1"; do
   [ -s "$f" ] || continue
-  e=$(grep -n -iE "out of memory|OutOfMemory|CUDA error|Killed|Segmentation|core dumped|Traceback|Error:|Exception" "$f" | grep -vi "prompt" | tail -6)
+  e=$(grep -n -iE "out of memory|OutOfMemory|CUDA error|Killed|Segmentation|core dumped|Fatal Python error|Traceback|Error:|Exception" "$f" | grep -vi "prompt" | tail -6)
   [ -n "$e" ] && { echo "  error lines in $(basename "$f") (the newest last):"; echo "$e" | cut -c1-230 | sed 's/^/        /'; }
+  end=$(grep "== ComfyUI stopped with exit code" "$f" | tail -1)
+  if [ -n "$end" ]; then
+    c=$(echo "$end" | sed 's/.*exit code \([0-9]*\).*/\1/')
+    case "$c" in
+      0|143|130|129) why="it was stopped on purpose (a restart or an installer)" ;;
+      137) why="it was KILLED, usually for using too much RAM" ;;
+      139|134|132|136) why="it CRASHED inside a library (not a Python error): the lines before it say where" ;;
+      *) why="it ended with an error" ;;
+    esac
+    echo "  $(basename "$f"): ${end#== }: $why"
+    case "$c" in 0|143|130|129) ;; *) echo "  its last lines:"; grep -v "^\s*$" "$f" | grep -vi "prompt" | tail -14 | cut -c1-230 | sed 's/^/        /' ;; esac
+  fi
 done
 
 say "ComfyUI (SwarmUI draws through it)"

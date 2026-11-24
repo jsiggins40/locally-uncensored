@@ -8,7 +8,8 @@
 #   the one ComfyUI's own templates use; its video and audio VAEs (3.4 GB); the 8-step
 #   Turbo LoRA (2 GB); and the Qwen3-VL 32B text encoder (16 GB) that MiniMax H3 Image
 #   also uses, if it isn't there yet. About 42 GB.
-#   "ref"   also gets "ref2va" (video from reference photos of people and things, 21 GB)
+#   "ref"   also gets "ref2va" (a new video from reference photos and a reference video you
+#           upload on the edit page, 21 GB) and its 4-step Turbo LoRA
 #   "full"  gets the full 8-bit models instead of the pruned ones (34 GB each)
 # Then makes a short test video on the GPU through SwarmUI.
 # LICENCE: the MiniMax-H3 Community License only grants rights in its "Applicable
@@ -65,6 +66,8 @@ FILES += [
      "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48", "Audio VAE (0.6 GB)"),
     ("loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors", "models/loras/minimax_h3/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
      "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e", "Turbo LoRA, 8 steps (2 GB)"),
+] + ([("loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors", "models/loras/minimax_h3/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+       "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c", "Turbo LoRA for the reference model, 4 steps (2 GB)")] if ref else []) + [
     ("text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "models/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
      "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6", "Text encoder: Qwen3-VL 32B, 4-bit (16 GB; runs on any recent NVIDIA card)"),
 ]

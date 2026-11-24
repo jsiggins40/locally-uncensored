@@ -83,6 +83,8 @@ fi
 # so there is no long line to paste
 sudo curl -fsSL "$SRC/rv6.sh" -o /usr/local/bin/rv6.new 2>/dev/null && sudo chmod +x /usr/local/bin/rv6.new \
   && sudo mv /usr/local/bin/rv6.new /usr/local/bin/rv6 || sudo rm -f /usr/local/bin/rv6.new
+# ffmpeg: shrinks a reference video from the phone before MiniMax H3 reads it (once, small)
+command -v ffmpeg >/dev/null 2>&1 || sudo apt-get install -y -qq ffmpeg >/dev/null 2>&1 || true
 # HEIC photos from a computer whose browser can't open them are converted on the VM
 "$HOME/ComfyUI/venv/bin/python" -c "import pillow_heif" 2>/dev/null \
   || "$HOME/ComfyUI/venv/bin/pip" install -q pillow-heif >/dev/null 2>&1 \

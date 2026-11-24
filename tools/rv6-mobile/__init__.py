@@ -907,6 +907,30 @@ def _swarm_status():
             "loras": [{"name": l.get("name") or "", "title": l.get("title") or "", "compat": l.get("compat_class") or ""} for l in loras]}
 
 
+def _ref_video(name):
+    """A reference video the page uploaded, as a data URL for SwarmUI. Phone videos are big (4K,
+    60 fps, minutes long) and every frame costs memory on the GPU, so with ffmpeg on the VM it is
+    first cut to 10 s, 24 fps and 720 px on the short side; without ffmpeg it goes as it is."""
+    import base64
+    import shutil
+    import subprocess
+    path = folder_paths.get_annotated_filepath(name)
+    out = path
+    if shutil.which("ffmpeg"):
+        small = os.path.splitext(path)[0] + "_ref.mp4"
+        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", path, "-t", "10", "-r", "24",
+                            "-vf", "scale='if(gt(iw,ih),-2,720)':'if(gt(iw,ih),720,-2)'", "-c:v", "libx264", "-crf", "20",
+                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", small], capture_output=True, timeout=600)
+        if r.returncode == 0 and os.path.exists(small) and os.path.getsize(small) > 1000:
+            out = small
+        else:
+            logging.warning("[rv6_mobile] ffmpeg could not shrink the reference video; sending it as it is")
+    if os.path.getsize(out) > 200 * 1024 * 1024:
+        raise RuntimeError("The reference video is too big (over 200 MB). Trim it to a few seconds on the phone first.")
+    with open(out, "rb") as f:
+        return "data:video/mp4;base64," + base64.b64encode(f.read()).decode()
+
+
 def _swarm_generate(req):
     import base64
     import time
@@ -932,7 +956,7 @@ def _swarm_generate(req):
     # with the prompt, for an edit model to follow your instruction on; "restyle": the first
     # is the starting picture (img2img), redrawn by "creativity" (0 = unchanged, 1 = all new)
     photos = []
-    for n in (req.get("images") or [])[:4]:
+    for n in (req.get("images") or [])[:9 if req.get("ref") else 4]:
         with open(folder_paths.get_annotated_filepath(n), "rb") as f:
             raw = f.read()
         mime = "image/png" if raw[:4] == b"\x89PNG" else "image/webp" if raw[8:12] == b"WEBP" else "image/jpeg"
@@ -942,7 +966,16 @@ def _swarm_generate(req):
         frames = max(5, int(round(float(req.get("seconds") or 5) * 24)))
         steps = int(req.get("steps") or 20)
         body.pop("presets", None)
-        if photos:
+        if req.get("ref"):
+            # Reference to video (the ref2va model): photos and up to 3 videos go in with the prompt,
+            # which names them <Picture 1>, <Video 1>... in the order given. Nothing is a first frame.
+            body.update(text2videoframes=frames, steps=steps, cfgscale=1, videoformat="h264-mp4")
+            if photos:
+                body["promptimages"] = photos
+            vids = [_ref_video(n) for n in (req.get("videos") or [])[:3]]
+            if vids:
+                body["promptvideos"] = vids
+        elif photos:
             # Photo to video is SwarmUI's "Image To Video": the photo is the Init Image at creativity 0
             # (the picture model named as "model" draws nothing), and the video model animates it.
             # LoRAs are confined to the video part (section 2), so they don't go on the picture model.
@@ -983,8 +1016,10 @@ def _swarm_generate(req):
     out = f"rv6_edit_swarm_{int(time.time() * 1000)}.{ext}"
     with open(os.path.join(folder_paths.get_output_directory(), out), "wb") as f:
         f.write(data)
-    sent = {k: v for k, v in body.items() if k not in ("prompt", "promptimages", "initimage")}   # no text or photo data in the log
-    if req.get("kind") == "video":
+    sent = {k: v for k, v in body.items() if k not in ("prompt", "promptimages", "promptvideos", "initimage")}   # no text, photo or video data in the log
+    if req.get("kind") == "video" and req.get("ref"):
+        sent["kind"] = f"video from references ({len(body.get('promptimages') or [])} photos, {len(body.get('promptvideos') or [])} videos)"
+    elif req.get("kind") == "video":
         sent["kind"] = "video from a photo" if photos else "video from text"
     elif photos:
         sent["photos"] = len(photos if "promptimages" in body else photos[:1])

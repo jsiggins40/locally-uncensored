@@ -602,7 +602,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-24a';
+const PAGE_BUILD = '2026-11-24b';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -898,16 +898,23 @@ $('engFix').onclick = () => { engine = 'fix'; store('maskEngine', engine); setMo
 
 // Seedream on Atlas Cloud: the button only shows once the VM has a key
 let cloudCfg = { configured: false, model: '' };
-// Seedream 5.0 Pro Edit (default) or 5.5 Edit; a name typed under "Other Atlas model" wins
-const cloudModel = () => $('cloudModel').value.trim() || $('cloudModelSel').value || cloudCfg.model;
+// Seedream 5.0 Pro Edit (default) or 5.5 Edit; a name typed under "Other Atlas model" wins.
+// Atlas model names look like maker/model/kind: anything without a "/" (a stray letter typed
+// into the box) is ignored, or every picture fails with Atlas's "not found".
+const cloudOther = () => { const v = $('cloudModel').value.trim(); return v.includes('/') ? v : ''; };
+const cloudModel = () => cloudOther() || $('cloudModelSel').value || cloudCfg.model;
 $('cloudModelSel').value = recall('cloudModelSel') || 'bytedance/seedream-v5.0-pro/edit';
 if ($('cloudModelSel').selectedIndex < 0) $('cloudModelSel').value = 'bytedance/seedream-v5.0-pro/edit';
 $('cloudModelSel').addEventListener('change', () => { store('cloudModelSel', $('cloudModelSel').value); cloudSizeOptions(); cloudModelHint(); });
 function cloudModelHint() {
-  $('cloudHint').textContent = 'Runs on Atlas Cloud (' + cloudModel().replace(/^bytedance\//, '') + '), not on your GPU. Each variation is a separate paid image.';
+  const typed = $('cloudModel').value.trim();
+  $('cloudHint').textContent = 'Runs on Atlas Cloud (' + cloudModel().replace(/^bytedance\//, '') + '), not on your GPU. Each variation is a separate paid image.'
+    + (cloudOther() ? ' This name comes from "Other Atlas model" below: empty that box to go back to the Model list.'
+       : typed ? ` "${typed}" under "Other Atlas model" is not a model name, so it is ignored.` : '');
 }
 $('cloudModel').value = recall('cloudModel') || '';
-$('cloudModel').addEventListener('change', () => { store('cloudModel', $('cloudModel').value.trim()); cloudSizeOptions(); cloudModelHint(); });
+if ($('cloudModel').value && !cloudOther()) { $('cloudModel').value = ''; store('cloudModel', ''); }   // a stray letter saved earlier
+$('cloudModel').addEventListener('change', () => { store('cloudModel', cloudOther()); cloudSizeOptions(); cloudModelHint(); });
 const cloudReady = fetch('/rv6m/cloud/status').then(r => r.ok ? r.json() : null).then(c => {
   if (!c) return;
   cloudCfg = c;

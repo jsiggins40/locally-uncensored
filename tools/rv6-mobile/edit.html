@@ -633,7 +633,7 @@
 <script>
 // Bump on every change: the page compares it with the copy on the VM and reloads
 // itself when Safari is still showing an older one
-const PAGE_BUILD = '2026-11-24d';
+const PAGE_BUILD = '2026-11-27a';
 const $ = id => document.getElementById(id);
 // A computer (mouse) vs a phone/tablet (touch); a wide window gets the two-column layout
 const desktop = matchMedia('(hover:hover) and (pointer:fine)').matches;
@@ -3791,12 +3791,28 @@ let recentShown = 12;
 function showRecent(items, total) {
   const box = $('recentList'); box.innerHTML = '';
   for (const x of items) {
-    const vid = isVideo(x.img), im = document.createElement(vid ? 'video' : 'img');
-    im.src = viewUrl({ ...x.img, type: 'output' }, 600) + (vid ? '#t=0.5' : '');
-    im.loading = 'lazy';
-    if (vid) { im.muted = true; im.playsInline = true; im.preload = 'metadata'; }
-    im.onclick = () => { showResult(x.img); $('result').scrollIntoView({ behavior: 'smooth' }); };
-    box.append(im);
+    // A small JPEG made on the VM for every tile: quick over Tailscale, and for a video a still
+    // from its start (a phone shows a blank box for a video it has not played). If the VM can't
+    // make one (older VM code), the tile falls back to the file itself, as before.
+    const vid = isVideo(x.img), o = { ...x.img, type: 'output' }, tile = document.createElement('div'), im = document.createElement('img');
+    tile.style.cssText = 'position:relative;cursor:pointer';
+    im.loading = 'lazy'; im.alt = vid ? 'video' : 'picture';
+    im.src = `/rv6m/jpeg?filename=${encodeURIComponent(o.filename)}&subfolder=${encodeURIComponent(o.subfolder || '')}&max=600`;
+    im.onerror = () => {
+      im.onerror = null;
+      if (!vid) return void (im.src = viewUrl(o, 600));
+      const v = document.createElement('video');
+      v.src = viewUrl(o, 600) + '#t=0.5'; v.muted = true; v.playsInline = true; v.preload = 'metadata';
+      im.replaceWith(v);
+    };
+    tile.append(im);
+    if (vid) {
+      const badge = document.createElement('span'); badge.textContent = '▶';
+      badge.style.cssText = 'position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.6);color:#fff;border-radius:10px;padding:1px 7px;font-size:13px;pointer-events:none';
+      tile.append(badge);
+    }
+    tile.onclick = () => { showResult(x.img); $('result').scrollIntoView({ behavior: 'smooth' }); };
+    box.append(tile);
   }
   $('recent').classList.toggle('hidden', !items.length);
   $('recentMoreRow').classList.toggle('hidden', !(total > items.length));

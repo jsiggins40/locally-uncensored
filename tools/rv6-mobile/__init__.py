@@ -168,7 +168,42 @@ async def rv6m_segment(request):
 # Upscaled pictures are 4K-8K PNGs (30-100 MB): too slow for a phone over
 # Tailscale. GET /rv6m/jpeg?filename=...&subfolder=... gives the same output
 # picture as a high-quality JPEG (a few MB), made once and kept in temp.
-# &max=600 gives a small one for the Recent edits thumbnails.
+# &max=600 gives a small one for the Recent edits thumbnails. For a video it gives a
+# still from its start (phones often show a blank box for a video until it is played).
+VIDEO_EXT = (".mp4", ".webm", ".mov", ".mkv")
+
+
+def _video_still(src):
+    """One frame from about half a second in, as a PIL image: PyAV (ComfyUI has it), else ffmpeg."""
+    from PIL import Image
+    try:
+        import av
+        with av.open(src) as c:
+            stream = c.streams.video[0]
+            first = None
+            for i, frame in enumerate(c.decode(stream)):
+                first = first or frame
+                if (frame.time or 0) >= 0.5 or i >= 30:
+                    return frame.to_image()
+            if first is not None:
+                return first.to_image()
+    except Exception:
+        pass
+    import shutil
+    import subprocess
+    import tempfile
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("no way to read the video on this VM (run edit-restart, which installs ffmpeg)")
+    with tempfile.TemporaryDirectory() as d:
+        still = os.path.join(d, "still.jpg")
+        for seek in ("0.5", "0"):
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", seek, "-i", src, "-frames:v", "1", still], capture_output=True, timeout=120)
+            if os.path.exists(still) and os.path.getsize(still) > 0:
+                with Image.open(still) as im:
+                    return im.convert("RGB")
+    raise RuntimeError("could not read a frame from the video")
+
+
 def _jpeg(src, size):
     from PIL import Image
     st = os.stat(src)
@@ -176,7 +211,7 @@ def _jpeg(src, size):
                        f"{os.path.basename(src)}.{int(st.st_mtime)}.{st.st_size}.{size}.jpg")
     if not os.path.exists(out):
         os.makedirs(os.path.dirname(out), exist_ok=True)
-        with Image.open(src) as im:
+        with (_video_still(src) if src.lower().endswith(VIDEO_EXT) else Image.open(src)) as im:
             im = im.convert("RGB")
             if size:
                 im.thumbnail((size, size), Image.LANCZOS)
